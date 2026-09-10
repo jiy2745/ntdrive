@@ -104,7 +104,7 @@ SSH.
 ## Install
 
 ```powershell
-git clone https://github.com/<you>/ntdrive
+git clone https://github.com/jiy2745/ntdrive
 cd ntdrive
 uv sync
 uv run pre-commit install
