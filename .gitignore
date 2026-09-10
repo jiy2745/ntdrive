@@ -12,3 +12,4 @@ policy.yaml
 logs/
 *.log
 .env
+*.tmp

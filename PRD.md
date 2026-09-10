@@ -223,7 +223,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | Latency | Terminal output to agent visibility within 100 ms. A simple kd command (`r`, `k`) round trip within 1 s. A Hyper-V PowerShell call round trip within 500 ms (reusing the long-lived pwsh process). |
 | Stability | Zero server crashes over a 48-hour continuous session. Detect a dead child process (kd.exe, pwsh), update state and restart. |
 | Concurrency | Up to 8 terminal sessions and 1 KD session per VM. Running several VMs at once (separate ports) is P1. |
-| Security | The daemon binds only to 127.0.0.1 and checks the token on every request. MCP is stdio. Secrets (guest password, KDNET key, encryption password, daemon token) live only in `vms.yaml`, environment variables and `daemon.json`, and never appear in tool arguments, logs or results. |
+| Security | The daemon binds only to 127.0.0.1 and checks the token on every request. MCP is stdio. Secrets (guest password, KDNET key, encryption password, daemon token) live only in `vms.yaml`, environment variables and `daemon.json`, and never appear in tool arguments, logs or results. The CoView URL in `term_open` results carries a separate view token that only opens the session list and the terminal streams. |
 | Portability | Python 3.12 + uv. Host Windows 11. External binary paths come from config (`vmrun.exe`, `kd.exe`, `kdnet.exe`, `pwsh.exe`). |
 | Observability | Structured logs, per-session raw log files, `sys_health` (external binary presence and version, hypervisor service, backend capabilities, per-VM config issues, and a live probe of every VM: power, guest IP, whether the SSH port answers, and whether the serial pipe has a server on the host or the KDNET UDP port is free). |
 

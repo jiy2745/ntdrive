@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import subprocess
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -47,9 +49,16 @@ def _mask_argv(argv: list[str]) -> str:
 
 
 async def subprocess_runner(args: list[str], timeout: float) -> tuple[int, str]:
-    """Run a command and return (exit code, combined stdout+stderr)."""
+    """Run a command and return (exit code, combined stdout+stderr).
+
+    The daemon runs without a console, so on Windows every child would otherwise get a console
+    window of its own and flash it on the desktop. CREATE_NO_WINDOW keeps vmrun invisible.
+    """
+    kwargs: dict[str, Any] = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     proc = await asyncio.create_subprocess_exec(
-        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **kwargs
     )
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)

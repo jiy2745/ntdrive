@@ -37,6 +37,9 @@ class DaemonInfo:
     version: str
     started_at: float
     config_path: str = ""
+    # Second secret, accepted only by the CoView session list and the terminal WebSocket. It is
+    # the one that goes into CoView URLs, so tool results never carry the daemon token.
+    view_token: str = ""
 
     @property
     def base_url(self) -> str:

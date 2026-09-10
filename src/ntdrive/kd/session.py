@@ -2,8 +2,9 @@ r"""KdSession: drive kd.exe over pipes.
 
 Design:
 - kd.exe is spawned with `-k net:port=P,key=K` (KDNET) or `-k com:pipe,port=\\.\pipe\...` (a
-  VMware serial port) in its own hidden console and process group so that break-in can be
-  delivered as CTRL_BREAK without touching the daemon's console.
+  VMware serial port) in a console of its own that has no window (CREATE_NO_WINDOW) and in its
+  own process group, so that break-in can be delivered as CTRL_BREAK without touching the
+  daemon's console and without anything showing on the desktop.
 - A reader thread pushes stdout into the event loop. State transitions are detected from the
   text: "Connected to" means the target is running, a trailing `kd>` prompt means broken in.
 - Commands are framed with a sentinel: `<cmd>; .echo <sentinel>`. Everything printed between the
@@ -115,16 +116,16 @@ def named_pipe_exists(pipe: str) -> bool:
 
 
 def spawn_kd(argv: list[str]) -> KdProcess:
-    """Start kd.exe in a hidden console of its own with a separate process group."""
+    """Start kd.exe in a console of its own that has no window, in a separate process group.
+
+    CREATE_NO_WINDOW still gives the child a console, so `send_ctrl_break` can attach to it
+    (verified from a detached parent, which is how ntdrived runs). CREATE_NEW_CONSOLE plus
+    SW_HIDE delivers the break too, but not every console host honors the hide request and an
+    empty window was seen on Windows 11, so no window is requested at all.
+    """
     kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
-        startup = subprocess.STARTUPINFO()
-        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startup.wShowWindow = 0  # SW_HIDE
-        kwargs["startupinfo"] = startup
-        kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     proc = subprocess.Popen(  # noqa: S603 - argv is built from config, not user text
         argv,
         stdin=subprocess.PIPE,

@@ -105,3 +105,8 @@ messages follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:
 - `Add-WindowsCapability` for OpenSSH fails on some Insider builds. The zip install works.
 - PSReadLine redraws the input line on every keystroke and floods terminal reads. The terminal
   unloads it at session start.
+- The daemon runs detached, without a console. Any child started without `CREATE_NO_WINDOW`
+  gets a console window of its own, so the desktop flashed an empty window on every vmrun call.
+  kd.exe keeps a console of its own (CREATE_NO_WINDOW gives it one, just without a window)
+  because break-in attaches to that console to send CTRL_BREAK. `tests/test_kd.py` checks that
+  delivery from a detached parent, so keep it green when touching `spawn_kd`.

@@ -39,6 +39,24 @@ async def test_query_token_only_works_for_websockets(service: NtDriveService) ->
         assert no_token.status == 401
 
 
+async def test_view_token_only_opens_terminal_streams(service: NtDriveService) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    opened = await service.call("term_open", {"vm": "win11-dev"})
+    app = create_app(service, token="t", view_token="v")
+    async with TestClient(TestServer(app)) as client:
+        listed = await client.get("/coview/sessions", headers={"X-NtDrive-Token": "v"})
+        assert listed.status == 200
+        ws = await client.ws_connect(f"/ws/term/{opened['session_id']}?token=v&source=human")
+        await ws.close()
+        # The daemon token still opens streams. The view token opens nothing else.
+        ws = await client.ws_connect(f"/ws/term/{opened['session_id']}?token=t&source=human")
+        await ws.close()
+        for path in ("/api/tools/sys_health", "/api/shutdown"):
+            denied = await client.post(path, json={}, headers={"X-NtDrive-Token": "v"})
+            assert denied.status == 401, path
+        assert (await client.get("/api/tools", headers={"X-NtDrive-Token": "v"})).status == 401
+
+
 def test_pinned_host_key_policy(tmp_path: Path) -> None:
     store = tmp_path / "keys" / "vm.json"
     policy = PinnedHostKeyPolicy(store)

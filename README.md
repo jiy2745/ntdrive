@@ -162,8 +162,12 @@ The guest also needs a KDNET-capable NIC (`e1000e`) and `kd_transport: net` in `
 The CLI has the same tools as subcommands. The first call auto-starts the daemon. This assumes the
 guest is already set up for your chosen transport (see above).
 
+The daemon and the vmrun and kd.exe processes it starts run without console windows, so nothing
+pops up on the desktop. `uv run ntdrive daemon status` says whether it is up, and its own output
+goes to `%LOCALAPPDATA%\ntdrive\logs\daemon.out.log`.
+
 ```powershell
-uv run ntdrive sys health                 # check vmrun, kd.exe, kdnet.exe, config and ports
+uv run ntdrive sys health                 # host binaries and config, then each VM live: power, SSH, debugger transport
 uv run ntdrive vm start win11
 uv run ntdrive term open win11            # prints a session id and a CoView URL
 uv run ntdrive kd attach win11            # serial: attaches at once; net: connects as the guest boots
@@ -225,8 +229,9 @@ same way (suspend, delete, resume).
 - The guest's SSH host key is pinned per VM on first use under `%LOCALAPPDATA%\ntdrive\hostkeys`.
   A different key later is refused before the password is sent. Delete that file after
   reinstalling a guest.
-- The CoView URL carries the daemon token. Treat it like a password and do not paste it into chat
-  or tickets. Terminal transcripts under the log directory record everything typed into a
+- The CoView URL carries a view token, a second secret that only lists terminal sessions and opens
+  their streams. That is still a shell in the guest, so treat it like a password and do not paste
+  it into chat or tickets. Terminal transcripts under the log directory record everything typed into a
   session, by the agent or by a person, so passwords typed interactively land there too.
 - `kd_exec` executes any debugger command, and kd's `.shell` runs commands on the host. The
   policy file can set `kd_exec: deny` for agents that should not have that.

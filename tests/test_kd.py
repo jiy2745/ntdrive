@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -7,6 +9,44 @@ from ntdrive.errors import KD_NOT_ATTACHED, KD_NOT_BROKEN, NtDriveError
 from ntdrive.kd.session import classify_break, generate_kdnet_key
 
 from .conftest import FakeKdProcess, FakeVmrun, settle
+
+# Runs inside a detached helper process, the way ntdrived runs: a stand-in for kd.exe is spawned
+# through spawn_kd and must exit through its SIGBREAK handler when send_ctrl_break fires.
+BREAK_PROBE = r"""
+import sys
+from ntdrive.kd.session import send_ctrl_break, spawn_kd
+
+CHILD = (
+    "import signal, sys, time\n"
+    "def stop(*args):\n"
+    "    sys.stdout.write('GOT_BREAK\\n')\n"
+    "    sys.stdout.flush()\n"
+    "    sys.exit(3)\n"
+    "signal.signal(signal.SIGBREAK, stop)\n"
+    "sys.stdout.write('READY\\n')\n"
+    "sys.stdout.flush()\n"
+    "time.sleep(20)\n"
+)
+proc = spawn_kd([sys.executable, "-c", CHILD])
+assert proc.stdout.readline().strip() == b"READY"
+send_ctrl_break(proc)
+rest = proc.stdout.read().decode()
+print("rest", rest.strip(), "rc", proc.wait(timeout=15))
+"""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="CTRL_BREAK delivery is Windows only")
+def test_ctrl_break_reaches_a_process_spawned_like_kd() -> None:
+    # send_ctrl_break drops the caller's console, so it must not run in the pytest process.
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", BREAK_PROBE],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "GOT_BREAK" in result.stdout and "rc 3" in result.stdout
 
 
 def test_generate_kdnet_key_format() -> None:

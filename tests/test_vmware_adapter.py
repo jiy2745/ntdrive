@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -5,9 +6,22 @@ import pytest
 from ntdrive.config import Config
 from ntdrive.core.state import PowerState
 from ntdrive.errors import BACKEND_ERROR, NtDriveError
-from ntdrive.hypervisor.vmware import VmwareAdapter, parse_current_snapshot, parse_snapshot_tree
+from ntdrive.hypervisor.vmware import (
+    VmwareAdapter,
+    parse_current_snapshot,
+    parse_snapshot_tree,
+    subprocess_runner,
+)
 
 from .conftest import FakeVmrun
+
+
+async def test_subprocess_runner_captures_output_and_exit_code() -> None:
+    # The real runner, with the no-window creation flag on Windows, still runs and reports.
+    code, out = await subprocess_runner(
+        [sys.executable, "-c", "import sys; print('hi'); sys.exit(3)"], 30
+    )
+    assert code == 3 and out.strip() == "hi"
 
 
 def test_parse_snapshot_tree_nesting() -> None:

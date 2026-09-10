@@ -11,7 +11,9 @@ Routes:
 
 Every route except /health and /coview needs the token from daemon.json in the X-NtDrive-Token
 header. WebSocket clients cannot set headers from a browser, so /ws/ routes (only) also accept
-the `token` query parameter.
+the `token` query parameter. /coview/sessions and /ws/term/ additionally accept the view token,
+a second secret that opens terminal streams and nothing else. CoView URLs carry that one, so a
+tool result never contains the daemon token.
 """
 
 from __future__ import annotations
@@ -40,6 +42,9 @@ from ntdrive.errors import SESSION_DISCONNECTED, UNAUTHORIZED, NtDriveError
 log = logging.getLogger("ntdrived")
 STATIC_DIR = Path(__file__).with_name("static")
 OPEN_PATHS = {"/health", "/coview", "/coview/"}
+# Routes the view token may open: the CoView session list and the terminal streams.
+VIEW_PATHS = {"/coview/sessions"}
+VIEW_PREFIX = "/ws/term/"
 INPUT_SOURCES = {"human", "agent"}
 # The daemon is local-only, but a browser on the same machine can still be pointed at it by a
 # hostile page. These headers keep the token out of referrers and responses out of caches.
@@ -64,6 +69,20 @@ def _presented_token(request: web.Request) -> str:
     return ""
 
 
+def _accepted_tokens(request: web.Request) -> list[str]:
+    """The daemon token everywhere, plus the view token on the terminal-stream routes."""
+    tokens: list[str] = [request.app["token"]]
+    view: str = request.app.get("view_token", "")
+    if view and (request.path in VIEW_PATHS or request.path.startswith(VIEW_PREFIX)):
+        tokens.append(view)
+    return tokens
+
+
+def _token_matches(presented: str, accepted: list[str]) -> bool:
+    got = presented.encode("utf-8", errors="replace")
+    return any(hmac.compare_digest(got, token.encode("utf-8")) for token in accepted)
+
+
 @web.middleware
 async def auth_middleware(
     request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -72,8 +91,7 @@ async def auth_middleware(
     if request.path in OPEN_PATHS:
         response = await handler(request)
     else:
-        expected: str = request.app["token"]
-        if not hmac.compare_digest(_presented_token(request), expected):
+        if not _token_matches(_presented_token(request), _accepted_tokens(request)):
             response = error_response(
                 NtDriveError(UNAUTHORIZED, "missing or wrong daemon token", "read daemon.json")
             )
@@ -206,11 +224,12 @@ async def term_ws(request: web.Request) -> web.StreamResponse:
     return ws
 
 
-def create_app(service: NtDriveService, token: str) -> web.Application:
+def create_app(service: NtDriveService, token: str, view_token: str = "") -> web.Application:
     """Build the aiohttp application."""
     app = web.Application(middlewares=[auth_middleware], client_max_size=64 * 1024 * 1024)
     app["service"] = service
     app["token"] = token
+    app["view_token"] = view_token
     app["stop"] = asyncio.Event()
     app.router.add_get("/health", health)
     app.router.add_get("/api/tools", list_tools)
@@ -229,10 +248,11 @@ async def serve(config_path: str | None = None, bind: str | None = None) -> None
     if bind:
         config.host.daemon_bind = bind
     token = new_token()
+    view_token = new_token()
     host, port = config.host.bind_host, config.host.bind_port
-    coview_base = f"http://{host}:{port}/coview?token={token}"
+    coview_base = f"http://{host}:{port}/coview?token={view_token}"
     service = NtDriveService(config, coview_base=coview_base)
-    app = create_app(service, token)
+    app = create_app(service, token, view_token)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
@@ -243,7 +263,7 @@ async def serve(config_path: str | None = None, bind: str | None = None) -> None
         port += 1
         site = web.TCPSite(runner, host, port)
         await site.start()
-        service.term.coview_base = f"http://{host}:{port}/coview?token={token}"
+        service.term.coview_base = f"http://{host}:{port}/coview?token={view_token}"
     info = DaemonInfo(
         host=host,
         port=port,
@@ -252,6 +272,7 @@ async def serve(config_path: str | None = None, bind: str | None = None) -> None
         version=__version__,
         started_at=service.state.started_at,
         config_path=config.path,
+        view_token=view_token,
     )
     write_info(info)
     log.info("ntdrived %s listening on %s:%s (pid %s)", __version__, host, port, os.getpid())

@@ -15,16 +15,16 @@ repos:
       - id: ruff
         args: [--fix]
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.13.0
+  - repo: local
     hooks:
+      # The mirrors-mypy hook runs in an isolated environment without click, aiohttp, mcp and
+      # the other runtime packages, so it reported untyped decorators everywhere. Running the
+      # project's own mypy keeps the hook identical to `uv run mypy`.
       - id: mypy
-        additional_dependencies:
-          - pydantic>=2.7
-          - types-PyYAML
-          - types-paramiko
-          - types-psutil
-        args: [--config-file=pyproject.toml]
+        name: mypy (project environment)
+        entry: uv run mypy
+        language: system
+        types: [python]
         pass_filenames: false
 
   - repo: https://github.com/pre-commit/mirrors-prettier
