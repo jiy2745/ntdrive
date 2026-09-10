@@ -35,7 +35,7 @@ from ntdrive.errors import (
 )
 from ntdrive.hypervisor.base import HypervisorAdapter
 from ntdrive.hypervisor.vmware import VmwareAdapter
-from ntdrive.kd.session import Breaker, KdSession, PipeCheck, Spawner
+from ntdrive.kd.session import Breaker, KdSession, PipeCheck, Spawner, named_pipe_exists
 from ntdrive.term.manager import TermManager, TransportFactory
 from ntdrive.term.ssh import probe_tcp_port
 from ntdrive.term.transport import TermTransport
@@ -234,10 +234,17 @@ class NtDriveService:
         """Guest IPv4 through the hypervisor tools."""
         return await self.adapter_for(vm).guest_ip(vm, timeout=timeout)
 
-    async def ssh_reachable(self, vm: VmConfig) -> tuple[bool, str]:
-        """(True, ip) when the guest SSH port accepts connections within about two seconds."""
-        ip = await self.guest_ip(vm)
+    async def ssh_reachable(self, vm: VmConfig, timeout: float = 60.0) -> tuple[bool, str]:
+        """(True, ip) when the guest SSH port accepts connections within about two seconds.
+
+        `timeout` bounds the IP lookup, which blocks while VMware Tools report no address.
+        """
+        ip = await self.guest_ip(vm, timeout=timeout)
         return await self.ssh_probe(ip, vm.guest.ssh_port), ip
+
+    def serial_pipe_open(self, pipe: str) -> bool:
+        """True when the host side of a serial named pipe has a server (the VM exposes COM1)."""
+        return (self._kd_pipe_check or named_pipe_exists)(pipe)
 
     async def transport(self, vm: VmConfig) -> TermTransport:
         """Transport to the guest, resolving the IP when needed."""

@@ -36,6 +36,20 @@ Rules that follow from the state model:
 
 ## Standard procedures
 
+### Check that everything is connected
+
+`sys_health` is the one call for "is the host wired up and does the guest answer". It lists
+host `problems` (binaries, config) and, per VM, `issues` plus a live probe: `power`,
+`kd_state`, `guest.ssh_open` (a TCP connect to the guest SSH port, bounded to a few seconds)
+and either `serial_pipe.open` (the host has a pipe server, so the running VM exposes COM1) or
+`kdnet_port.free`. The guest probe is skipped while the VM is off or frozen at a kd prompt,
+and `guest.skipped` says which. Read `issues` first: every entry names the fix.
+
+Two things the probe cannot prove. An open SSH port is not a working login, so `term_open` is
+the real test. Over the serial transport `kd_state == running` only means kd.exe is alive.
+The target is proven connected when `kd_break` reaches a `kd>` prompt and `target_info` fills
+in.
+
 ### Set up a fresh guest (serial transport, the default)
 
 The serial transport needs no host firewall rule and no administrator step. The VM must be off

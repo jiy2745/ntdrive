@@ -225,7 +225,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | Concurrency | Up to 8 terminal sessions and 1 KD session per VM. Running several VMs at once (separate ports) is P1. |
 | Security | The daemon binds only to 127.0.0.1 and checks the token on every request. MCP is stdio. Secrets (guest password, KDNET key, encryption password, daemon token) live only in `vms.yaml`, environment variables and `daemon.json`, and never appear in tool arguments, logs or results. |
 | Portability | Python 3.12 + uv. Host Windows 11. External binary paths come from config (`vmrun.exe`, `kd.exe`, `kdnet.exe`, `pwsh.exe`). |
-| Observability | Structured logs, per-session raw log files, `sys_health` (external binary presence and version, hypervisor service, port conflicts, backend capabilities). |
+| Observability | Structured logs, per-session raw log files, `sys_health` (external binary presence and version, hypervisor service, backend capabilities, per-VM config issues, and a live probe of every VM: power, guest IP, whether the SSH port answers, and whether the serial pipe has a server on the host or the KDNET UDP port is free). |
 
 ### 5.10 Technical constraints (verified facts)
 
@@ -410,7 +410,7 @@ messages are written in English (ST-9).
 | `file_push` | `vm, local, remote, verify=true` (`local` is an absolute host path, the CLI and SDK absolutize) | `{files, bytes, verified, via: sftp\|guest_tools, copied:[...], note?}` |
 | `file_pull` | `vm, remote, local` (a trailing separator on `local` means directory) | `{bytes, via, note?}` |
 | `sys_state` | `vm?` | unified VM, KD, TERM state |
-| `sys_health` | - | binary paths and versions, backend capabilities, port conflicts, hypervisor service |
+| `sys_health` | - | binary paths and versions, backend capabilities, hypervisor service, and per VM: config `issues`, `power`, `kd_state`, `guest {ip, ssh_port, ssh_open, skipped}`, and `serial_pipe {path, open}` or `kdnet_port {port, free, held_by_ntdrive}`. The guest probe is bounded to a few seconds and skipped while the VM is off or frozen by the debugger |
 
 ### 7.5 Config file (`vms.yaml`)
 
