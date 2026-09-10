@@ -222,6 +222,14 @@ same way (suspend, delete, resume).
 - Secrets (guest password, KDNET key, VM encryption password, daemon token) live only in `vms.yaml`,
   environment variables, and the daemon state file. They never appear in tool arguments, results or
   logs, and the audit log masks them.
+- The guest's SSH host key is pinned per VM on first use under `%LOCALAPPDATA%\ntdrive\hostkeys`.
+  A different key later is refused before the password is sent. Delete that file after
+  reinstalling a guest.
+- The CoView URL carries the daemon token. Treat it like a password and do not paste it into chat
+  or tickets. Terminal transcripts under the log directory record everything typed into a
+  session, by the agent or by a person, so passwords typed interactively land there too.
+- `kd_exec` executes any debugger command, and kd's `.shell` runs commands on the host. The
+  policy file can set `kd_exec: deny` for agents that should not have that.
 - Destructive actions (`snap_delete`, hard `vm_stop`, hard `vm_reboot`) require `confirm=true` and go
   through a policy gate you can tune in `policy.yaml`.
 

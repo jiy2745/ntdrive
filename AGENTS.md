@@ -31,8 +31,12 @@ Requirements live in `PRD.md`. Setup is in `README.md`.
   either inline or as the name of an environment variable. Environment variables are preferred.
   Mask them in anything that is logged (`_mask_argv` in the VMware adapter, `redact` in
   `kd_setup_guest`).
-- Destructive tools (`snap_delete`, hard `vm_stop`, `vm_reboot`) require `confirm=true` and go
-  through the policy gate in `ntdrive.core.policy`.
+- Destructive tools (`snap_delete`, hard `vm_stop`, hard `vm_reboot`) require `confirm=true` and
+  go through the policy gate in `ntdrive.core.policy`.
+- Anything that becomes a command line in the guest (bcdedit arguments from `kd_setup_guest`)
+  is validated against a strict pattern first. Free text from tool arguments never gets
+  interpolated into a shell command except in the tools whose purpose is running a command
+  (`term_exec`, `kd_exec`).
 - While the debugger is broken in, the guest is frozen. Tools that touch the guest must fail fast
   with `guest_frozen_by_debugger` instead of hanging. Anything that suspends, stops or reverts the
   VM must detach the debugger and drop terminal sessions first (`NtDriveService.release_guest`).

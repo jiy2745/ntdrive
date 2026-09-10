@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from typing import Any
 
 from pydantic import Field
@@ -13,19 +15,46 @@ from ntdrive.core.tools.common import VmParams
 from ntdrive.errors import BACKEND_ERROR, INVALID_ARGS, NtDriveError
 from ntdrive.kd.session import generate_kdnet_key
 
+# A KDNET key is four base36 words joined by dots. Anything else must never reach the bcdedit
+# command line that runs inside the guest shell.
+KDNET_KEY = r"^[0-9a-z]{1,13}(\.[0-9a-z]{1,13}){3}$"
+
+
+def _check_hostip(value: str) -> str:
+    """Strict IPv4 so vms.yaml cannot smuggle shell text into the guest command."""
+    try:
+        ipaddress.IPv4Address(value)
+    except ValueError:
+        raise NtDriveError(
+            INVALID_ARGS, f"kdnet_hostip is not an IPv4 address: {value!r}", "fix vms.yaml"
+        ) from None
+    return value
+
+
+def _check_key(value: str) -> str:
+    if not re.match(KDNET_KEY, value):
+        raise NtDriveError(
+            INVALID_ARGS,
+            "kdnet key must be four base36 words separated by dots",
+            "omit key to have one generated",
+        )
+    return value
+
 
 class SetupParams(VmParams):
     """kd_setup_guest."""
 
     port: int | None = Field(default=None, ge=49152, le=65535, description="KDNET UDP port")
-    key: str | None = Field(default=None, description="KDNET key; generated when omitted")
+    key: str | None = Field(
+        default=None, pattern=KDNET_KEY, description="KDNET key; generated when omitted"
+    )
 
 
 class AttachParams(VmParams):
     """kd_attach."""
 
-    port: int | None = Field(default=None, description="Override the configured port")
-    key: str | None = Field(default=None, description="Override the configured key")
+    port: int | None = Field(default=None, ge=1, le=65535, description="Override the port")
+    key: str | None = Field(default=None, pattern=KDNET_KEY, description="Override the key")
     symbol_path: str | None = Field(default=None, description="Override host.symbol_path")
     wait_for_target: bool = Field(default=True, description="Block until the target connects")
     timeout: float = Field(default=120, ge=1, description="Seconds to wait for the target")
@@ -119,7 +148,9 @@ async def kd_setup_guest(service: NtDriveService, p: SetupParams) -> dict[str, A
     service.ensure_not_frozen(p.vm)
     await service.ensure_running(cfg)
     port = p.port or cfg.kdnet.port
-    key = "" if serial else (p.key or cfg.kdnet.key or generate_kdnet_key())
+    key = "" if serial else _check_key(p.key or cfg.kdnet.key or generate_kdnet_key())
+    if not serial:
+        _check_hostip(cfg.kdnet_hostip)
     transport = await service.transport(cfg)
     if not hasattr(transport, "exec_once"):
         raise NtDriveError(BACKEND_ERROR, "the transport cannot run commands")

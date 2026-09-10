@@ -9,8 +9,9 @@ Routes:
 - GET  /coview                 the web terminal page
 - GET  /coview/sessions        session list for the page
 
-Every route except /health and /coview needs the token from daemon.json, either in the
-X-NtDrive-Token header or the `token` query parameter (for WebSocket clients).
+Every route except /health and /coview needs the token from daemon.json in the X-NtDrive-Token
+header. WebSocket clients cannot set headers from a browser, so /ws/ routes (only) also accept
+the `token` query parameter.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hmac
 import json
 import logging
 import os
@@ -38,6 +40,14 @@ from ntdrive.errors import SESSION_DISCONNECTED, UNAUTHORIZED, NtDriveError
 log = logging.getLogger("ntdrived")
 STATIC_DIR = Path(__file__).with_name("static")
 OPEN_PATHS = {"/health", "/coview", "/coview/"}
+INPUT_SOURCES = {"human", "agent"}
+# The daemon is local-only, but a browser on the same machine can still be pointed at it by a
+# hostile page. These headers keep the token out of referrers and responses out of caches.
+SAFE_HEADERS = {
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+}
 
 
 def error_response(exc: NtDriveError) -> web.Response:
@@ -45,19 +55,33 @@ def error_response(exc: NtDriveError) -> web.Response:
     return web.json_response(exc.to_dict(), status=exc.status)
 
 
+def _presented_token(request: web.Request) -> str:
+    header = request.headers.get("X-NtDrive-Token")
+    if header:
+        return header
+    if request.path.startswith("/ws/"):
+        return request.query.get("token", "")
+    return ""
+
+
 @web.middleware
 async def auth_middleware(
     request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
 ) -> web.StreamResponse:
     """Token check for everything but /health and the CoView page."""
-    if request.path in OPEN_PATHS or request.path.startswith("/coview/static"):
-        return await handler(request)
-    token = request.headers.get("X-NtDrive-Token") or request.query.get("token")
-    if token != request.app["token"]:
-        return error_response(
-            NtDriveError(UNAUTHORIZED, "missing or wrong daemon token", "read daemon.json")
-        )
-    return await handler(request)
+    if request.path in OPEN_PATHS:
+        response = await handler(request)
+    else:
+        expected: str = request.app["token"]
+        if not hmac.compare_digest(_presented_token(request), expected):
+            response = error_response(
+                NtDriveError(UNAUTHORIZED, "missing or wrong daemon token", "read daemon.json")
+            )
+        else:
+            response = await handler(request)
+    for name, value in SAFE_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
 
 
 async def health(request: web.Request) -> web.Response:
@@ -124,6 +148,10 @@ async def term_ws(request: web.Request) -> web.StreamResponse:
     service: NtDriveService = request.app["service"]
     session_id = request.match_info["session_id"]
     source = request.query.get("source", "human")
+    if source not in INPUT_SOURCES:
+        return error_response(
+            NtDriveError("invalid_args", f"source must be one of {sorted(INPUT_SOURCES)}")
+        )
     try:
         session = service.term.get(session_id)
     except NtDriveError as exc:

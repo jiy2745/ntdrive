@@ -141,6 +141,9 @@ class FakeChannel(TermChannel):
     def write(self, data: bytes) -> None:
         self.written.append(data)
         self._on_data(data.replace(b"\r", b"\r\n"))  # PTY echo
+        if b"Clear-Host" in data:
+            # Like a real shell: the setup line runs, the screen clears, a fresh prompt appears.
+            self._on_data(b"\x1b[2J\x1b[H" + b"PS C:\\Users\\dev> ")
         self._transport.react(self, data)
 
     def resize(self, cols: int, rows: int) -> None:

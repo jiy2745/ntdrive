@@ -44,6 +44,13 @@ class Policy:
         mode = getattr(params, "mode", None)
         if mode is not None and mode != "hard":
             return
+        if not hasattr(params, "confirm"):
+            # A tool without a confirm flag cannot be confirmed, so "confirm" means deny here.
+            raise NtDriveError(
+                POLICY_DENIED,
+                f"{spec.name} is set to confirm in policy.yaml but has no confirm flag",
+                "set it to allow or deny in policy.yaml",
+            )
         if getattr(params, "confirm", False):
             return
         raise NtDriveError(

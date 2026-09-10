@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ntdrive.config import HostConfig, VmConfig
+from ntdrive.config import HostConfig, VmConfig, state_dir
 from ntdrive.core.state import StateStore, TermInfo, TermState
 from ntdrive.errors import BACKEND_UNSUPPORTED, SESSION_NOT_FOUND, TIMEOUT, NtDriveError
 from ntdrive.term.session import TermSession
@@ -21,6 +21,9 @@ TransportFactory = Callable[[VmConfig, str], TermTransport]
 # PSReadLine redraws the input line on every keystroke, which floods delta reads with echo
 # fragments ("ping -t ping -t 1ping -t 12..."). Unloading it gives a plain line editor.
 PSREADLINE_OFF = "Remove-Module PSReadLine -ErrorAction SilentlyContinue; Clear-Host\r"
+# A PowerShell prompt at the end of the output means the shell is ready for the next line.
+PROMPT_READY = r"^PS [^\r\n]*> ?$"
+SHELL_READY_TIMEOUT = 5.0
 
 
 def default_transport_factory(host: HostConfig) -> TransportFactory:
@@ -33,6 +36,9 @@ def default_transport_factory(host: HostConfig) -> TransportFactory:
             vm.guest.user,
             vm.guest.resolve_password(),
             connect_timeout=host.ssh_connect_timeout,
+            # Pinned per VM so a reverted or rebooted guest keeps working and a stranger on the
+            # same DHCP address is refused before the password is sent.
+            host_key_file=state_dir() / "hostkeys" / f"{vm.name}.json",
         )
 
     return factory
@@ -141,7 +147,15 @@ class TermManager:
         self.state.vm(vm.name).terms[session_id] = info
         if shell in ("powershell", "pwsh"):
             with contextlib.suppress(NtDriveError):
+                start = session.ring.end
                 session.send(PSREADLINE_OFF.encode(), source="system")
+                # The shell needs a moment to unload PSReadLine and clear the screen, and a
+                # command typed meanwhile can be swallowed (seen live: the first term_exec after
+                # term_open timed out). Wait for the fresh prompt and hand the session over
+                # there, so the agent's first read does not see the setup noise either.
+                ready = await session.wait_until(PROMPT_READY, SHELL_READY_TIMEOUT, cursor=start)
+                if ready.get("matched"):
+                    session.cursor = ready["cursor"]
         return session
 
     def _on_channel_closed(self, session: TermSession) -> None:

@@ -67,8 +67,16 @@ def read_info() -> DaemonInfo | None:
 
 
 def write_info(info: DaemonInfo) -> None:
-    """Write daemon.json. LOCALAPPDATA is per-user, which is the required ACL."""
-    info_path().write_text(json.dumps(asdict(info), indent=2), encoding="utf-8")
+    """Write daemon.json, readable by this user only.
+
+    On Windows LOCALAPPDATA already carries a per-user ACL. Elsewhere the mode is tightened
+    because the file holds the bearer token.
+    """
+    path = info_path()
+    path.write_text(json.dumps(asdict(info), indent=2), encoding="utf-8")
+    if sys.platform != "win32":
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o600)
 
 
 def remove_info() -> None:

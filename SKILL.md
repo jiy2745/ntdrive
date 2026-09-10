@@ -117,6 +117,9 @@ same flag. A snapshot of a powered-off VM never needs it.
 - `kd_exec` accepts a list in `cmds` so that several debugger commands cost one tool call.
 - Large outputs are cut at `max_bytes` (64 KB by default) and flagged `truncated: true`. The
   full text is in the session log named in `kd_state.log_path`.
-- Destructive tools need `confirm=true`: `snap_delete`, `vm_stop mode=hard`, `vm_reboot`.
+- Destructive tools need `confirm=true`: `snap_delete`, `vm_stop mode=hard`, `vm_reboot mode=hard`.
+  Soft and kd reboots run without it.
+- `kd_exec` runs whatever you send at the `kd>` prompt, including `.shell`, which executes
+  commands on the host. Do not use it unless the task calls for it.
 - Never put passwords or KDNET keys in tool arguments. They live in `vms.yaml` and environment
   variables on the host.

@@ -69,9 +69,11 @@ async def test_term_tools_end_to_end(
     assert opened["coview_url"].endswith(sid)
     chan = fake_transport.channels[-1]
     await settle()
-    # PSReadLine is unloaded as the first system input so delta reads stay clean.
+    # PSReadLine is unloaded as the first system input so delta reads stay clean, and the
+    # session is handed over at the fresh prompt: the first read sees none of that noise.
     assert any(b"Remove-Module PSReadLine" in w for w in chan.written)
-    service.term.get(sid).read_delta()  # drain
+    first = await service.call("term_read", {"session_id": sid})
+    assert first["text"] == ""
     await service.call("term_send", {"session_id": sid, "text": "ping -t 127.0.0.1"})
     chan.emit(b"Reply from 127.0.0.1: bytes=32\r\n")
     await settle()

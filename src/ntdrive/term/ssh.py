@@ -13,9 +13,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import os
 import threading
 from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 import paramiko
 
@@ -27,6 +30,39 @@ SHELL_COMMANDS: dict[str, str] = {
     "pwsh": "pwsh.exe -NoLogo",
     "cmd": "cmd.exe /Q",
 }
+
+
+class HostKeyChanged(paramiko.SSHException):
+    """The guest presented a different SSH host key than the one pinned for this VM."""
+
+
+class PinnedHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    """Trust on first use, pinned per VM rather than per address.
+
+    The guest IP comes from DHCP on the VMware NAT network and can move between VMs, so the key
+    is stored under the VM name. The first connection records the key. A later connection with
+    a different key is refused, which is what stops a machine that took over the address from
+    receiving the guest password.
+    """
+
+    def __init__(self, store: Path) -> None:
+        self.store = store
+
+    def missing_host_key(self, client: Any, hostname: str, key: Any) -> None:
+        """Paramiko calls this for every host because no system known_hosts is loaded."""
+        seen = {"type": key.get_name(), "key": key.get_base64()}
+        try:
+            stored = json.loads(self.store.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            stored = None
+        if stored is None:
+            self.store.parent.mkdir(parents=True, exist_ok=True)
+            self.store.write_text(json.dumps(seen, indent=2), encoding="utf-8")
+            return
+        if stored != seen:
+            raise HostKeyChanged(
+                f"host key for {hostname} changed ({stored.get('type')} -> {seen['type']})"
+            )
 
 
 async def probe_tcp_port(host: str, port: int, timeout: float = 2.0) -> bool:
@@ -129,12 +165,15 @@ class SshPtyTransport(TermTransport):
         user: str,
         password: str,
         connect_timeout: float = 10.0,
+        host_key_file: Path | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.user = user
         self._password = password
         self.connect_timeout = connect_timeout
+        # None (tests, ad hoc use) accepts any host key. The daemon always pins per VM.
+        self.host_key_file = host_key_file
         self._client: paramiko.SSHClient | None = None
         self._lock = asyncio.Lock()
 
@@ -146,21 +185,33 @@ class SshPtyTransport(TermTransport):
                     return self._client
                 self._client = None
             client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            if self.host_key_file is not None:
+                client.set_missing_host_key_policy(PinnedHostKeyPolicy(self.host_key_file))
+            else:
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             loop = asyncio.get_running_loop()
 
             def _connect() -> None:
-                client.connect(
-                    self.host,
-                    port=self.port,
-                    username=self.user,
-                    password=self._password,
-                    timeout=self.connect_timeout,
-                    banner_timeout=self.connect_timeout,
-                    auth_timeout=self.connect_timeout,
-                    look_for_keys=False,
-                    allow_agent=False,
-                )
+                try:
+                    client.connect(
+                        self.host,
+                        port=self.port,
+                        username=self.user,
+                        password=self._password,
+                        timeout=self.connect_timeout,
+                        banner_timeout=self.connect_timeout,
+                        auth_timeout=self.connect_timeout,
+                        look_for_keys=False,
+                        allow_agent=False,
+                    )
+                except HostKeyChanged as exc:
+                    raise NtDriveError(
+                        BACKEND_ERROR,
+                        f"ssh connect to {self.host}:{self.port} refused: {exc}",
+                        "the guest's SSH host key differs from the one recorded on first use. "
+                        f"If the guest was reinstalled, delete {self.host_key_file} and retry. "
+                        "Otherwise something else answers on that address.",
+                    ) from exc
 
             await loop.run_in_executor(
                 None,
@@ -341,6 +392,8 @@ def _mkdirs(sftp: paramiko.SFTPClient, directory: str) -> None:
 
 __all__: list[str] = [
     "SHELL_COMMANDS",
+    "HostKeyChanged",
+    "PinnedHostKeyPolicy",
     "SshChannel",
     "SshPtyTransport",
     "probe_tcp_port",
