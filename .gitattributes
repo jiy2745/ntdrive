@@ -1,0 +1,4 @@
+# Store every text file with LF so the ASCII/style hook and diffs behave the same on every host.
+* text=auto eol=lf
+*.png binary
+*.ico binary

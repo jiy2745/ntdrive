@@ -1,0 +1,36 @@
+# Copy to vms.yaml and edit. vms.yaml is git-ignored because it names VM paths, users and secrets.
+host:
+  vmrun: "C:/Program Files (x86)/VMware/VMware Workstation/vmrun.exe"
+  kd: "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/kd.exe"
+  kdnet: "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/kdnet.exe"
+  symbol_path: "srv*C:/symbols*https://msdl.microsoft.com/download/symbols"
+  daemon_bind: "127.0.0.1:8765" # ntdrived: HTTP API + WebSocket + CoView
+  log_dir: "" # empty = %LOCALAPPDATA%/ntdrive/logs
+  tool_timeout_max: 600 # seconds; long-poll tools are capped here
+
+vms:
+  win11-dev:
+    backend: vmware # only "vmware" is supported in this version
+    vmx: "D:/VMs/win11-dev/win11-dev.vmx"
+
+    # Encrypted VM (vmrun -vp). Prefer the environment variable. The inline form is fine too
+    # because this file is git-ignored, but never paste the value anywhere else.
+    encryption_password_env: ""
+    encryption_password: ""
+
+    # Kernel debug transport. "serial" (default, recommended) is kd over a VMware named pipe:
+    # no network, no firewall, no admin. Run `ntdrive kd setup-host <vm>` once with the VM off.
+    # "net" is KDNET over UDP: the host firewall must allow kd.exe inbound, which needs
+    # scripts/setup-host.ps1 as Administrator once, and the guest NIC must be e1000e.
+    kd_transport: serial # serial | net
+    serial_pipe: "" # empty = \\.\pipe\ntdrive-<vm name>
+    kdnet_hostip: "192.168.126.1" # net only: IPv4 of "VMware Network Adapter VMnet8" on the host
+
+    guest:
+      user: "dev"
+      password_env: "NTDRIVE_WIN11_DEV_PW" # the password is read from this environment variable
+      ssh_port: 22
+      shell: powershell # powershell | cmd | pwsh
+    kdnet: # net only
+      port: 50000
+      key: "" # filled in by kd_setup_guest

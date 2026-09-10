@@ -1,0 +1,8 @@
+# Copy to policy.yaml to override the built-in policy.
+# Levels: allow (run), confirm (needs confirm=true), deny (never run).
+# Tools marked destructive in the registry default to "confirm" when not listed here.
+default: allow
+tools:
+  snap_delete: confirm
+  vm_stop: confirm # only the hard mode checks the policy; soft shutdown is always allowed
+  vm_reboot: confirm # only the hard mode checks the policy

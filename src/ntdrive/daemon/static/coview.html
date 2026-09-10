@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ntdrive CoView</title>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css"
+    />
+    <style>
+      :root {
+        --bg: #111418;
+        --panel: #1a1f26;
+        --ink: #e6ebf2;
+        --muted: #8b95a5;
+        --accent: #5ea3ff;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font: 13px/1.5 Consolas, 'Cascadia Mono', monospace;
+        display: grid;
+        grid-template-columns: 260px 1fr;
+        height: 100vh;
+      }
+      aside {
+        background: var(--panel);
+        padding: 12px;
+        overflow: auto;
+        border-right: 1px solid #2a3340;
+      }
+      h1 {
+        font-size: 14px;
+        margin: 0 0 8px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      li {
+        padding: 6px 8px;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      li:hover,
+      li.active {
+        background: #243042;
+      }
+      li .state {
+        float: right;
+        color: var(--muted);
+      }
+      main {
+        padding: 8px;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      #status {
+        padding: 4px 6px;
+        color: var(--muted);
+      }
+      #term {
+        flex: 1;
+        min-height: 0;
+      }
+      button {
+        background: #243042;
+        color: var(--ink);
+        border: 1px solid #3a4556;
+        border-radius: 4px;
+        padding: 4px 8px;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <h1>ntdrive CoView</h1>
+      <p class="muted">Sessions the daemon holds. Typing here is logged as human input.</p>
+      <button id="refresh">Refresh</button>
+      <ul id="sessions"></ul>
+    </aside>
+    <main>
+      <div id="status">No session selected.</div>
+      <div id="term"></div>
+    </main>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
+    <script>
+      const params = new URLSearchParams(location.search);
+      const token = params.get('token') || '';
+      const listEl = document.getElementById('sessions');
+      const statusEl = document.getElementById('status');
+      const term = new Terminal({ cols: 120, rows: 40, convertEol: false, fontSize: 13 });
+      term.open(document.getElementById('term'));
+      let ws = null;
+      let current = location.hash ? location.hash.slice(1) : '';
+
+      async function loadSessions() {
+        const resp = await fetch('/coview/sessions', { headers: { 'X-NtDrive-Token': token } });
+        if (!resp.ok) {
+          statusEl.textContent = 'Cannot list sessions (bad token?)';
+          return;
+        }
+        const data = await resp.json();
+        listEl.innerHTML = '';
+        for (const s of data.sessions) {
+          const li = document.createElement('li');
+          li.textContent = s.vm + ' ' + s.session_id + ' (' + s.shell + ')';
+          const st = document.createElement('span');
+          st.className = 'state';
+          st.textContent = s.state;
+          li.appendChild(st);
+          if (s.session_id === current) li.classList.add('active');
+          li.onclick = () => connect(s.session_id);
+          listEl.appendChild(li);
+        }
+        if (current && !ws) connect(current);
+      }
+
+      function connect(sessionId) {
+        if (ws) {
+          ws.close();
+          ws = null;
+        }
+        current = sessionId;
+        location.hash = sessionId;
+        term.reset();
+        statusEl.textContent = 'Connecting to ' + sessionId;
+        const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+        ws = new WebSocket(
+          proto + location.host + '/ws/term/' + sessionId + '?token=' + token + '&source=human'
+        );
+        ws.binaryType = 'arraybuffer';
+        ws.onopen = () => {
+          statusEl.textContent = 'Connected: ' + sessionId;
+          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        };
+        ws.onmessage = (ev) => {
+          if (typeof ev.data === 'string') {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === 'state') statusEl.textContent = sessionId + ': ' + msg.state;
+            if (msg.type === 'error') statusEl.textContent = msg.code + ': ' + msg.message;
+            return;
+          }
+          term.write(new Uint8Array(ev.data));
+        };
+        ws.onclose = () => {
+          statusEl.textContent = 'Closed: ' + sessionId;
+          ws = null;
+        };
+        for (const li of listEl.children) {
+          li.classList.toggle('active', li.textContent.includes(sessionId));
+        }
+      }
+
+      term.onData((data) => {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data }));
+      });
+      term.onResize(({ cols, rows }) => {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+      });
+      document.getElementById('refresh').onclick = loadSessions;
+      loadSessions();
+      setInterval(loadSessions, 5000);
+    </script>
+  </body>
+</html>

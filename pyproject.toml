@@ -1,0 +1,79 @@
+[project]
+name = "ntdrive"
+version = "0.1.0"
+description = "Daemon plus MCP, CLI and SDK front doors that let an agent drive VMware guests: power, snapshots, KDNET kernel debugging and a real-time terminal."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "aiohttp>=3.10",
+    "httpx>=0.27",
+    "paramiko>=3.4",
+    "pyte>=0.8.2",
+    "click>=8.1",
+    "mcp>=1.2,<2",
+    "psutil>=6.0",
+]
+
+[project.scripts]
+ntdrived = "ntdrive.daemon.app:main"
+ntdrive = "ntdrive.cli.main:main"
+ntdrive-mcp = "ntdrive.mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ntdrive"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+    "types-PyYAML",
+    "types-paramiko",
+    "types-psutil",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "D"]
+ignore = ["D100", "D104", "D105", "D107", "D203", "D213"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "E501"]
+"scripts/**" = ["D"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["ntdrive"]
+mypy_path = "src"
+ignore_missing_imports = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = "ntdrive.core.*"
+strict = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.check_ascii]
+# Files that may contain non-ASCII text. Everything in the repo, PRD.md included, is now English
+# and plain ASCII, so nothing is excluded.
+exclude = []
