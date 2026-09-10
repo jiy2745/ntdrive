@@ -1,5 +1,7 @@
 # ntdrive
 
+[![CI](https://github.com/jiy2745/ntdrive/actions/workflows/ci.yml/badge.svg)](https://github.com/jiy2745/ntdrive/actions/workflows/ci.yml)
+
 Drive a Windows guest on VMware Workstation the way a person sitting at the machine would, but from
 an LLM agent. ntdrive gives an agent power and snapshot control, KDNET kernel debugging, and a
 real-time terminal on the guest, all behind one local daemon and one set of tools.

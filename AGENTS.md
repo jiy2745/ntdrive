@@ -60,6 +60,9 @@ uv run ntdrive daemon restart            # after editing daemon-side code, or th
 
 All four checks (ruff format, ruff check, mypy, pytest) must pass before a commit. Commit
 messages follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`).
+CI (`.github/workflows/ci.yml`, GitHub Actions on windows-latest) runs `pre-commit run
+--all-files` and `pytest` on every push to main and every pull request, so a red check on
+GitHub means one of those failed on a clean machine.
 
 ## Where things live
 
