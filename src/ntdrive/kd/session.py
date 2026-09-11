@@ -7,7 +7,8 @@ Design:
   daemon's console and without anything showing on the desktop.
 - A reader thread pushes stdout into the event loop. State transitions are detected from the
   text: "Connected to" means the target is running, a trailing `kd>` prompt means broken in.
-- Commands are framed with a sentinel: `<cmd>; .echo <sentinel>`. Everything printed between the
+- Commands are framed with a sentinel: `<cmd>` then `.echo <sentinel>` on its own line so a
+  line-eating meta command cannot swallow it. Everything printed between the
   write and the sentinel is that command's output, regardless of how noisy the target is.
 """
 
@@ -423,7 +424,10 @@ class KdSession:
                 sentinel = f"__NTDRIVE_END_{secrets.token_hex(4)}__"
                 start = self._base + len(self._buf)
                 started = time.monotonic()
-                self._write(f"{cmd}; .echo {sentinel}\n")
+                # The sentinel goes on its own line, not after `; `, because a line-eating meta
+                # command (`.sympath`, `.reload`, ...) consumes to end of line and would swallow
+                # `.echo` and the sentinel with it. On a separate line every command is framed.
+                self._write(f"{cmd}\n.echo {sentinel}\n")
                 idx = await self._wait_for_bytes(sentinel.encode(), start, timeout)
                 raw = bytes(self._buf[start - self._base : idx - self._base])
                 text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
@@ -451,7 +455,7 @@ class KdSession:
         await self._notify()
         return self.status()
 
-    async def break_in(self, timeout: float = 10.0) -> dict[str, Any]:
+    async def break_in(self, timeout: float = 20.0) -> dict[str, Any]:
         """Interrupt the running target and wait for the prompt."""
         proc = self._require_attached()
         if self.state == KdState.BROKEN:
@@ -459,7 +463,21 @@ class KdSession:
         start = self._base + len(self._buf)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._break, proc)
-        await self._wait_state({KdState.BROKEN}, timeout)
+        reached = await self._wait_state({KdState.BROKEN}, timeout, allow_timeout=True)
+        if not reached:
+            # kd.exe is alive but never reached a prompt. When it never saw the target connect
+            # (no target_info, the [no_debuggee] state), the guest is not talking to the debugger,
+            # which a KDNET target that booted before kd attached does. A reboot reconnects it.
+            if not self.target_info:
+                hint = (
+                    "the debugger never connected to the target (kd is at [no_debuggee]). Reboot "
+                    "the guest so it reconnects: vm_reboot mode=soft confirm=true, then kd_break"
+                )
+            else:
+                hint = "the target did not stop in time; retry kd_break with a larger timeout"
+            raise NtDriveError(
+                TIMEOUT, f"kd did not reach a kd> prompt within {timeout:.0f}s", hint
+            )
         output = bytes(self._buf[start - self._base :]).decode("utf-8", errors="replace")
         self.last_event = {"event": "user_break", "at": time.time(), "output": output[-2000:]}
         result = self.status()

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from ntdrive.core.service import NtDriveService
-from ntdrive.errors import KD_NOT_ATTACHED, KD_NOT_BROKEN, NtDriveError
+from ntdrive.errors import KD_NOT_ATTACHED, KD_NOT_BROKEN, TIMEOUT, NtDriveError
 from ntdrive.kd.session import classify_break, generate_kdnet_key
 
 from .conftest import FakeKdProcess, FakeVmrun, settle
@@ -215,7 +215,10 @@ async def test_kd_lifecycle(service: NtDriveService, kd_procs: list[FakeKdProces
     assert [o["cmd"] for o in outs] == ["!process 0 0", "k"]
     assert outs[0]["output"] == "output of [!process 0 0]\nline two"
     assert not outs[0]["truncated"]
-    assert any(c.startswith("!process 0 0; .echo __NTDRIVE_END_") for c in proc.commands)
+    # The command and its sentinel are separate lines now, so a line-eating meta command
+    # cannot swallow the sentinel.
+    assert "!process 0 0" in proc.commands
+    assert any(c.startswith(".echo __NTDRIVE_END_") for c in proc.commands)
 
     state = await service.call("kd_state", {"vm": "win11-dev"})
     assert state["state"] == "broken" and state["last_event"]["event"] == "user_break"
@@ -351,3 +354,35 @@ async def test_kd_attach_reads_the_key_a_guest_script_set(
     assert "needs a reboot" in exc.value.message and "vm_reboot" in exc.value.hint
     assert any("dbgsettings net hostip:192.168.126.1" in c for c in fake_transport.exec_log)
     assert cfg.kdnet.key  # saved, so the attach after the reboot needs no SSH
+
+
+async def test_kd_exec_frames_a_line_eating_meta_command(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    # A dot-command eats to end of line. The sentinel is a separate line, so it survives and the
+    # command's output still comes back framed.
+    result = await service.call(
+        "kd_exec", {"vm": "win11-dev", "cmd": ".sympath srv*c:\sym*https://x"}
+    )
+    out = result["outputs"][0]
+    assert out["output"] == "output of [.sympath srv*c:\sym*https://x]\nline two"
+    proc = kd_procs[-1]
+    assert ".sympath srv*c:\sym*https://x" in proc.commands
+    assert any(c.startswith(".echo __NTDRIVE_END_") for c in proc.commands)
+    assert not any("; .echo" in c for c in proc.commands)
+
+
+async def test_kd_break_timeout_points_at_reconnecting_the_guest(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # A break that never reaches a prompt (the target is at [no_debuggee], never connected) tells
+    # the caller to reboot the guest so it reconnects, instead of a bare timeout.
+    service._kd_breaker = lambda proc: None  # noqa: SLF001 - break does nothing here
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    service.kd_sessions["win11-dev"].target_info = ""  # never saw the target connect
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("kd_break", {"vm": "win11-dev", "timeout": 1})
+    assert exc.value.code == TIMEOUT
+    assert "no_debuggee" in exc.value.hint and "vm_reboot" in exc.value.hint

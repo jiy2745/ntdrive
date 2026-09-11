@@ -384,7 +384,7 @@ messages are written in English (ST-9).
 | `kd_setup_guest` | `vm, port?, key?` (needs SSH to the guest) | `{transport, port?, key_saved, adopted, needs_reboot, steps}`. `adopted` means the guest already debugged to this host's IP (scripts/setup-guest.ps1 does that by default), so the port and key were read back over SSH instead of written, and `needs_reboot` is false when debugging was already on |
 | `kd_attach` | `vm, port?, key?, symbol_path?, wait_for_target=true, timeout=120` | `{state, transport, target_info?}`. On net with no saved key it runs the `kd_setup_guest` step first (reads the guest's settings over SSH, `adopted`) and fails with a reboot hint when settings had to be written |
 | `kd_detach` | `vm, force=false` | `{state}` |
-| `kd_break` | `vm, timeout=10` | `{state, output}` |
+| `kd_break` | `vm, timeout=20` | `{state, output}`. A timeout with no target ever connected (kd at [no_debuggee]) tells the caller to reboot the guest so KDNET reconnects |
 | `kd_go` | `vm` | `{state}` |
 | `kd_exec` | `vm, cmd | cmds[], timeout=60, max_bytes=65536` | `{outputs:[{cmd, output, truncated, elapsed_ms}]}` |
 | `kd_wait_event` | `vm, timeout=300` | `{event: bugcheck\|breakpoint\|module_load\|user_break\|timeout, output, state}` |
@@ -508,7 +508,8 @@ tool JSON. Exit codes: 0 ok, 2 bad arguments, 3 `confirm_required`, 4 `guest_fro
 |---|---|
 | OpenSSH Server | `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`, or the Win32-OpenSSH zip (`install-sshd.ps1`) where the capability cannot be installed (Insider builds have no Feature-on-Demand package). `scripts/setup-guest.ps1` tries the capability and falls back to the zip. Service auto-start, default shell set to PowerShell (`HKLM:\SOFTWARE\OpenSSH\DefaultShell`) |
 | Kernel debug | `bcdedit /debug on` plus either `bcdedit /dbgsettings serial debugport:1 baudrate:115200` (serial) or `bcdedit /dbgsettings net hostip:<hostip> port:<n> key:<key>` (KDNET, the default), then reboot. `kd_setup_guest` does this over SSH |
-| Login | At least one local account (for PowerShell Direct and SSH auth) |
+| Login | At least one local account (for PowerShell Direct and SSH auth). `scripts/setup-guest.ps1` creates a local administrator (`ntdrive`) for this |
+| Power | Sleep and hibernate off: a debugged or remotely driven VM must never sleep (it freezes and drops SSH) or hibernate (it tears down the KDNET/serial link). `scripts/setup-guest.ps1` sets `powercfg /change standby-timeout-* 0` and `/hibernate off` |
 
 ### 8.5 First-time setup flow (run by the agent)
 

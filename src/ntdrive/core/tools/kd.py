@@ -71,7 +71,7 @@ class DetachParams(VmParams):
 class BreakParams(VmParams):
     """kd_break."""
 
-    timeout: float = Field(default=10, ge=1, description="Seconds to wait for the prompt")
+    timeout: float = Field(default=20, ge=1, description="Seconds to wait for the prompt")
 
 
 class ExecParams(VmParams):

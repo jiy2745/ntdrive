@@ -289,14 +289,16 @@ class FakeKdProcess:
         if line.strip() == "q":
             self.stop(0)
             return
-        if "; .echo " in line:
-            cmd, sentinel = line.split("; .echo ", 1)
-            body = f"output of [{cmd}]\r\nline two\r\n"
-            self.inject(body.encode() + sentinel.encode() + b"\r\nkd> ")
-            return
         if line.strip() == ".reboot":
             self.broken = False
             threading.Timer(0.1, self.reconnect).start()
+            return
+        if line.startswith(".echo "):
+            # The sentinel arrives on its own line now, framing the command written before it.
+            self.inject(line[len(".echo ") :].encode() + b"\r\nkd> ")
+            return
+        if line.strip():
+            self.inject(f"output of [{line}]\r\nline two\r\nkd> ".encode())
             return
 
     def reconnect(self) -> None:
