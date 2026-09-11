@@ -64,10 +64,10 @@ from it, so they never drift apart.
 
 Host: Windows 11, VMware Workstation Pro 17.6 or newer, the Debugging Tools for Windows (`kd.exe`
 and `kdnet.exe` from the SDK or WDK), Python 3.12 and [uv](https://docs.astral.sh/uv/). No
-administrator shell is needed. Guest: Windows 10 or 11 x64 with VMware Tools, a local account with
-a password, Secure Boot off in the VM settings (`bcdedit /debug on` needs that) and, for KDNET, the
-`e1000e` NIC. `ntdrive sys health` names the fix for anything that is missing, so run it whenever
-in doubt.
+administrator shell is needed. Guest: Windows 10 or 11 x64 with VMware Tools, Secure Boot off in
+the VM settings (`bcdedit /debug on` needs that) and, for KDNET, the `e1000e` NIC. The guest script
+creates the account SSH logs in with. `ntdrive sys health` names the fix for anything that is
+missing, so run it whenever in doubt.
 
 **1. Host.** One command from a clone:
 
