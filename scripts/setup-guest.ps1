@@ -272,6 +272,15 @@ try {
   $sshdPath = (Get-CimInstance Win32_Service -Filter "Name='sshd'").PathName
   Ok "sshd" "running ($sshdPath), default shell PowerShell, port 22 open"
 
+  # A debugged or remotely driven VM must never sleep or hibernate: standby freezes the guest and
+  # drops the SSH session, and hibernate tears down the KDNET or serial link.
+  powercfg /change standby-timeout-ac 0 | Out-Null
+  powercfg /change standby-timeout-dc 0 | Out-Null
+  powercfg /change hibernate-timeout-ac 0 | Out-Null
+  powercfg /change hibernate-timeout-dc 0 | Out-Null
+  powercfg /hibernate off 2>$null | Out-Null
+  Ok "power" "sleep and hibernate disabled, so the guest stays reachable"
+
   Step 3 4 "Kernel debugging"
   $kdSummary = ""
   if ($Serial) {
