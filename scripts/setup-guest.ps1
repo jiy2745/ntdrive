@@ -8,7 +8,8 @@
   Installs and starts OpenSSH Server with PowerShell as the default shell, and optionally enables
   kernel debugging with bcdedit. By default that is KDNET: the host IP is inferred from the NAT
   gateway (x.x.x.2 means the host is x.x.x.1, -HostIp overrides), the key is generated in the
-  guest and never needs copying, because the host reads it back over SSH on the first kd_attach.
+  guest and never needs copying, because the host reads it back over SSH (ntdrive verify, or the
+  first kd_attach).
   The port comes from the machine id (50000-50039), so several guests of one host differ.
   -Serial sets up the serial named-pipe transport instead, -OpenSshOnly skips debugging. Reboot
   the guest afterwards.
@@ -26,7 +27,7 @@
 
 .EXAMPLE
   setup-guest.cmd
-  The usual run: OpenSSH plus KDNET. Reboot, then ntdrive kd attach <vm> on the host reads the key.
+  The usual run: OpenSSH plus KDNET. Then, on the host, ntdrive verify proves the whole setup.
   A plain .\setup-guest.ps1 is refused by the default execution policy, the .cmd is not.
   powershell -ExecutionPolicy Bypass -File setup-guest.ps1 is the same thing spelled out.
 
@@ -181,7 +182,7 @@ if ($Serial) {
   Assert-SecureBootOff
   Invoke-Bcdedit @("/debug", "on")
   Invoke-Bcdedit @("/dbgsettings", "serial", "debugport:1", "baudrate:115200")
-  $kdSummary = "serial (COM1 pipe). Reboot this guest, then kd_attach from the host"
+  $kdSummary = "serial (COM1 pipe). On the host run ntdrive verify (or setup-host.cmd -Verify)"
 } elseif (-not $OpenSshOnly) {
   Write-Host "== KDNET (the ntdrive default)"
   if (-not $HostIp) {
@@ -206,7 +207,7 @@ if ($Serial) {
     $net = @("/dbgsettings", "net", "hostip:$HostIp", "port:$Port")
     if ($Key) { $net += "key:$Key" }
     Invoke-Bcdedit $net
-    $kdSummary = "KDNET to host $HostIp port $Port. The key stays here, the host reads it on the first kd attach. Reboot this guest first"
+    $kdSummary = "KDNET to host $HostIp port $Port. The key stays here. On the host run ntdrive verify (or setup-host.cmd -Verify): it reads the key, reboots this guest if needed and ends with ALL SET"
   }
 } else {
   Write-Host "== kernel debugging skipped (-OpenSshOnly). kd_setup_guest can do it over SSH later."

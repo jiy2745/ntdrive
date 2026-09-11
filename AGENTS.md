@@ -86,9 +86,9 @@ GitHub means one of those failed on a clean machine.
   `SshPtyTransport` (every paramiko failure becomes `NtDriveError`), key tokens like `{ctrl+c}`.
 - `src/ntdrive/daemon/`: aiohttp app, `daemon.json` lifecycle, `DaemonClient`, CoView page.
 - `src/ntdrive/mcp/server.py`, `src/ntdrive/cli/main.py`, `src/ntdrive/sdk/__init__.py`:
-  generated front doors. Three CLI commands are hand-written because they are not daemon tools:
-  `term attach` and the `daemon` group in `main.py`, and `ntdrive setup` in `cli/setup.py`,
-  which writes `vms.yaml`.
+  generated front doors. Four CLI commands are hand-written because they are not daemon tools:
+  `term attach` and the `daemon` group in `main.py`, `ntdrive setup` in `cli/setup.py` (writes
+  `vms.yaml`) and `ntdrive verify` in `cli/verify.py` (the end-to-end check).
 - `tests/conftest.py`: `FakeVmrun`, `FakeTransport`, `FakeKdProcess` and the `service` fixture.
   Live testing against a real VM is manual and described in `README.md`.
 

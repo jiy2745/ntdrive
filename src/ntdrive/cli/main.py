@@ -20,6 +20,7 @@ from pydantic.fields import FieldInfo
 from ntdrive import __version__
 from ntdrive.cli.attach import attach_session
 from ntdrive.cli.setup import setup_command
+from ntdrive.cli.verify import verify_command
 from ntdrive.core.registry import ToolRegistry, ToolSpec, load_builtin_tools
 from ntdrive.daemon.client import DaemonClient, connect
 from ntdrive.daemon.lifecycle import ensure_daemon, read_info, restart_daemon, stop_daemon
@@ -231,6 +232,7 @@ def build_cli(registry: ToolRegistry) -> click.Group:
         cli.add_command(group)
     cli.add_command(_daemon_group())
     cli.add_command(setup_command())
+    cli.add_command(verify_command())
     return cli
 
 

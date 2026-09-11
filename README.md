@@ -97,16 +97,17 @@ Several VMs: run `setup-host.cmd` again (or `ntdrive setup`) for each VM and `se
 each guest. Every guest picks its own KDNET port from its machine id, and the host moves a guest
 whose port collides with another VM's.
 
-**3. Connect.** KDNET is the default transport:
+**3. Verify.** On the host, whichever of the two scripts ran last:
 
 ```powershell
-ntdrive kd attach win11         # first time: reads the KDNET key the guest script set, over SSH
-ntdrive kd break win11          # a kd> prompt means the target is connected
+ntdrive verify                  # config, power, SSH login, firewall, then attach, break in, resume
 ```
 
-That is the whole setup: `setup-host.cmd` on the host, `setup-guest.cmd` in each guest, a reboot
-of the guest, then `kd attach`. On a guest set up by hand, `kd setup-guest` writes the KDNET
-settings itself and asks for a soft reboot (`ntdrive vm reboot win11 --mode soft --confirm`).
+It ends with `ALL SET` or the first thing to fix and how. `setup-host.cmd` runs it at the end,
+and `setup-host.cmd -Verify` repeats only this part. KDNET is the default transport: the first
+attach reads the key the guest script set over SSH, so nothing is copied by hand, and when the
+guest was configured a moment ago verify reboots it itself. On a guest set up by hand,
+`ntdrive kd setup-guest win11` writes the settings instead.
 
 `sys health` shows the firewall state, and `scripts\setup-host.cmd -FirewallOnly` from an
 Administrator shell is the manual repair. `kd_transport: serial` (a VMware named pipe: no firewall,

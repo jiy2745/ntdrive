@@ -48,7 +48,8 @@ and `guest.skipped` says which. Read `issues` first: every entry names the fix.
 Two things the probe cannot prove. An open SSH port is not a working login, so `term_open` is
 the real test. Over the serial transport `kd_state == running` only means kd.exe is alive.
 The target is proven connected when `kd_break` reaches a `kd>` prompt and `target_info` fills
-in.
+in. A person can run `ntdrive verify` on the host, which does exactly this sequence for every
+VM and prints ALL SET or the first failing check with its fix.
 
 ### Set up a fresh guest (net transport, the default)
 

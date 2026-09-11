@@ -216,6 +216,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | FACE-8 | **Auth and version**: every request carries the random token from `daemon.json` as a header. The file has per-user ACL. `/health` returns the version and a client with a different major version is refused. | P0 |
 | FACE-9 | **Front-door parity**: calling the same tool over MCP, CLI (`--json`) and SDK yields the same JSON (AT-9). Error codes and hints match too. | P0 |
 | FACE-10 | **`ntdrive setup`**: a CLI command that writes the `vms.yaml` entry for one VM so nobody edits YAML by hand. It lists the VMs in the VMware Workstation inventory (or takes `--vmx`), reads the vmx (display name, encryption, NIC, Secure Boot), asks for the guest account and the passwords with hidden input, stores the passwords as User environment variables (`--inline-secrets` keeps them in `vms.yaml` instead), writes the entry, restarts the daemon and prints the `sys_health` issues that remain. Running it again adds another VM or updates one. Passwords are never accepted on the command line. `scripts/setup-host.ps1` wraps it into the one-run host setup: tools check, `uv sync`, `ntdrive setup` per VM, daemon restart, `kd_setup_host` per VM, `sys_health`, with no elevated shell. | P1 |
+| FACE-11 | **`ntdrive verify`**: a CLI command that proves a VM end to end and says so: sys_health issues, the VM running (started if off), an SSH login as the configured account, the debugger transport on the host (firewall or serial pipe), then a real attach, break in, resume and detach. When the attach reports that KDNET was just configured in the guest, verify soft-reboots the guest and attaches again. It ends with ALL SET or the first failing check and its fix, exit code 0 or 1, `--json` for the report. `scripts/setup-host.ps1` runs it last, `-Verify` runs only it, so the order in which the host and guest scripts ran does not matter. | P1 |
 
 ### 5.9 Non-functional requirements
 
@@ -528,6 +529,9 @@ tool JSON. Exit codes: 0 ok, 2 bad arguments, 3 `confirm_required`, 4 `guest_fro
 7. kd_break -> kd_exec "!process 0 0" -> kd_go
 8. snap_take win11-dev "base-kd"
 ```
+
+`ntdrive verify` (FACE-11) is the human form of steps 1 to 7: it runs them, reboots the guest when
+KDNET was just configured, and ends with ALL SET or the first failing check and its fix.
 
 ---
 
