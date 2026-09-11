@@ -67,9 +67,24 @@ and `kdnet.exe` from the SDK or WDK), Python 3.12 and [uv](https://docs.astral.s
 administrator shell is needed. Guest: Windows 10 or 11 x64 with VMware Tools, Secure Boot off in
 the VM settings (`bcdedit /debug on` needs that) and, for KDNET, the `e1000e` NIC. The guest script
 creates the account SSH logs in with. `ntdrive sys health` names the fix for anything that is
-missing, so run it whenever in doubt.
+missing, so run it whenever in doubt. Guest first, then host: the host script ends with the
+end-to-end check and prints ALL SET, and it reboots the guest itself when the debugger needs it.
 
-**1. Host.** One command from a clone:
+**1. Guest.** Copy `scripts\setup-guest.cmd` and `scripts\setup-guest.ps1` into the guest (drag and
+drop works once VMware Tools are in) and run the `.cmd` from any shell or by double click. It asks
+for administrator rights itself (one UAC click), creates a local administrator `ntdrive` and asks
+for its password (type the same one in `ntdrive setup` on the host, `-NoAccount` uses your own
+account instead), installs OpenSSH Server with PowerShell as the default shell, opens port 22 and
+turns on KDNET (the host IP comes from the NAT gateway, the key
+is generated in the guest and never needs copying). On Insider builds, where
+`Add-WindowsCapability` has no package, it falls back to the Win32-OpenSSH zip (`-OpenSshZip
+<file>` for a guest without internet). Running it again is safe. Reboot the guest when it says so.
+
+Several VMs: run `setup-host.cmd` again (or `ntdrive setup`) for each VM and `setup-guest.cmd` in
+each guest. Every guest picks its own KDNET port from its machine id, and the host moves a guest
+whose port collides with another VM's.
+
+**2. Host.** One command from a clone:
 
 ```powershell
 git clone https://github.com/jiy2745/ntdrive
@@ -85,21 +100,8 @@ and ends with `sys health`. Run it again to add a VM, or run `ntdrive setup` on 
 lands in `%LOCALAPPDATA%\ntdrive\vms.yaml`, and `vms.example.yaml` documents every field. Without a
 clone: `uv tool install git+https://github.com/jiy2745/ntdrive`, then `ntdrive setup`.
 
-**2. Guest.** Copy `scripts\setup-guest.cmd` and `scripts\setup-guest.ps1` into the guest (drag and
-drop works once VMware Tools are in) and run the `.cmd` from any shell or by double click. It asks
-for administrator rights itself (one UAC click), creates a local administrator `ntdrive` and asks
-for its password (type the same one in `ntdrive setup` on the host, `-NoAccount` uses your own
-account instead), installs OpenSSH Server with PowerShell as the default shell, opens port 22 and
-turns on KDNET (the host IP comes from the NAT gateway, the key
-is generated in the guest and never needs copying). On Insider builds, where
-`Add-WindowsCapability` has no package, it falls back to the Win32-OpenSSH zip (`-OpenSshZip
-<file>` for a guest without internet). Running it again is safe. Reboot the guest when it says so.
-
-Several VMs: run `setup-host.cmd` again (or `ntdrive setup`) for each VM and `setup-guest.cmd` in
-each guest. Every guest picks its own KDNET port from its machine id, and the host moves a guest
-whose port collides with another VM's.
-
-**3. Verify.** On the host, whichever of the two scripts ran last:
+**3. Verify.** The host script already ran this at its end. Run it again after any change, or
+whenever the guest was set up after the host:
 
 ```powershell
 ntdrive verify                  # config, power, SSH login, firewall, then attach, break in, resume
