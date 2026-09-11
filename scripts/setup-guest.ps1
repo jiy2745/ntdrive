@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  Prepare a Windows 10/11 guest for ntdrive. Run inside the guest as Administrator.
+  Prepare a Windows 10/11 guest for ntdrive. Run it inside the guest from any PowerShell: it asks
+  for administrator rights itself, one UAC click.
 
 .DESCRIPTION
   Installs and starts OpenSSH Server with PowerShell as the default shell, and optionally enables
@@ -22,6 +23,7 @@
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File setup-guest.ps1
   The usual first step: OpenSSH only. kd_setup_guest configures the debugger over SSH afterwards.
+  Right click, "Run with PowerShell" does the same. Both end in one UAC prompt.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File setup-guest.ps1 -Serial
@@ -47,7 +49,23 @@ $ProgressPreference = "SilentlyContinue"
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]$identity
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  throw "run this script from an Administrator PowerShell (right click, Run as administrator)"
+  # Everything below needs administrator rights (a service, HKLM, a firewall rule, bcdedit).
+  # Relaunch elevated with the same arguments: one UAC click instead of opening an admin shell.
+  $relaunch = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-NoExit", "-File", "`"$PSCommandPath`"")
+  foreach ($bound in $PSBoundParameters.GetEnumerator()) {
+    if ($bound.Value -is [switch]) {
+      if ($bound.Value.IsPresent) { $relaunch += "-$($bound.Key)" }
+    } else {
+      $relaunch += @("-$($bound.Key)", "`"$($bound.Value)`"")
+    }
+  }
+  Write-Host "administrator rights are needed: approve the UAC prompt, the script continues in the new window"
+  try {
+    Start-Process -FilePath "powershell.exe" -ArgumentList $relaunch -Verb RunAs | Out-Null
+  } catch {
+    throw "the UAC prompt was refused. Approve it, or open an Administrator PowerShell and run the script there."
+  }
+  exit 0
 }
 
 function Assert-SecureBootOff {

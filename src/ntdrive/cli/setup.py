@@ -346,7 +346,7 @@ def run_setup(
     else:
         click.echo(f"{source} reports no issues for this VM")
     click.echo(
-        "next: in the guest run scripts/setup-guest.ps1 as Administrator (installs OpenSSH), "
+        "next: in the guest run scripts/setup-guest.ps1 (installs OpenSSH, asks for admin rights), "
         f"then on the host: ntdrive kd setup-host {name}"
     )
 

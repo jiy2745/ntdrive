@@ -101,10 +101,10 @@ blocked firewall, a missing serial pipe), so run it after each host step until t
 3. VM settings, with the VM off: Secure Boot off (Options > Advanced), NAT networking, and the
    `e1000e` NIC for KDNET (the default).
 4. Guest: install VMware Tools, create a local account with a password, copy
-   `scripts/setup-guest.ps1` in (drag and drop works once Tools are in) and run it from an
-   Administrator PowerShell. It installs OpenSSH, and `kd setup-guest` does the bcdedit part from
-   the host afterwards (`-Serial` sets up the serial transport in the guest instead). Reboot when
-   it says so.
+   `scripts/setup-guest.ps1` in (drag and drop works once Tools are in) and run it from any
+   PowerShell: it asks for administrator rights itself, one UAC click. It installs OpenSSH, and
+   `kd setup-guest` does the bcdedit part from the host afterwards (`-Serial` sets up the serial
+   transport in the guest instead). Reboot when it says so.
 5. Host: `vm start`, `term open`, `kd setup-guest` (unless the guest script already did it), a
    soft `vm reboot`, `kd attach`, `kd break`. The "Kernel debugging" section below has the exact
    commands for each transport.
@@ -131,7 +131,8 @@ to the zip on its own (downloaded from GitHub, or pass `-OpenSshZip` with a loca
 without internet), sets the default shell and the firewall rule, and with `-Serial` (or `-HostIp`
 for KDNET) also runs the `bcdedit` step that `kd_setup_guest` would otherwise do over SSH. Copy it
 into the guest (VMware drag and drop, or `file_push`, which falls back to VMware Tools while SSH is
-not up yet) and run it from an Administrator PowerShell:
+not up yet) and run it from any PowerShell. It asks for administrator rights itself, so one UAC
+click replaces opening an elevated shell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File setup-guest.ps1
