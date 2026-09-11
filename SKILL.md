@@ -50,28 +50,30 @@ the real test. Over the serial transport `kd_state == running` only means kd.exe
 The target is proven connected when `kd_break` reaches a `kd>` prompt and `target_info` fills
 in.
 
-### Set up a fresh guest (serial transport, the default)
+### Set up a fresh guest (net transport, the default)
 
-The serial transport needs no host firewall rule and no administrator step. The VM must be off
-for the first command because it edits the vmx.
+KDNET is the default. `kd_setup_host` reads the host firewall rules for kd.exe and, when they
+block it, repairs them through one UAC prompt that a person at the desktop must approve (pass
+`fix_firewall=false` to only look, `sys_health` reports the same check as `kdnet_firewall`).
+`kd_setup_guest` generates and saves the KDNET key.
 
 ```
-sys_health                                 -> issues per VM, for example "serial pipe not in the vmx"
-kd_setup_host vm=win11-dev                 -> adds the named-pipe COM port to the vmx (VM off)
+sys_health                                 -> issues per VM, for example "host firewall blocks KDNET"
+kd_setup_host vm=win11-dev                 -> firewall checked, repaired after the UAC prompt
 vm_start vm=win11-dev
 term_open vm=win11-dev                     -> session_id (needs OpenSSH in the guest)
-kd_setup_guest vm=win11-dev                -> bcdedit /dbgsettings serial, needs_reboot=true
+kd_setup_guest vm=win11-dev                -> bcdedit /dbgsettings net, key saved, needs_reboot=true
 vm_reboot vm=win11-dev mode=soft confirm=true
-kd_attach vm=win11-dev                     -> running (serial attaches at once)
+kd_attach vm=win11-dev                     -> waiting, then running once the guest boots with the debugger on
 kd_break vm=win11-dev                      -> broken, target_info filled in
 kd_exec vm=win11-dev cmd="!process 0 0"
 kd_go vm=win11-dev
 snap_take vm=win11-dev name=base-kd
 ```
 
-With `kd_transport: net` (KDNET) the flow is the same except that `kd_setup_host` only reports
-the one-time administrator step (`scripts/setup-host.ps1`), `kd_setup_guest` generates and saves
-the KDNET key, and `kd_attach` reports `waiting` until the guest boots with the debugger on.
+With `kd_transport: serial` (a VMware named pipe, no firewall and no prompt) the flow is the same
+except that `kd_setup_host` must run while the VM is off, because it adds the COM port to the vmx,
+`kd_setup_guest` writes the serial bcdedit setting, and `kd_attach` reports `running` at once.
 
 ### Driver deploy and debug loop
 

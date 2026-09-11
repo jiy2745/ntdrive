@@ -1,4 +1,7 @@
-# Copy to vms.yaml and edit. vms.yaml is git-ignored because it names VM paths, users and secrets.
+# `ntdrive setup` writes vms.yaml for you (pick the VM, enter the account and passwords). This
+# file documents every field for editing by hand: copy it to %LOCALAPPDATA%\ntdrive\vms.yaml
+# and edit. ntdrive never reads a vms.yaml from a checkout or the working directory: the file
+# belongs to the user, and it names VM paths, users and secrets.
 host:
   vmrun: "C:/Program Files (x86)/VMware/VMware Workstation/vmrun.exe"
   kd: "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/kd.exe"
@@ -18,11 +21,12 @@ vms:
     encryption_password_env: ""
     encryption_password: ""
 
-    # Kernel debug transport. "serial" (default, recommended) is kd over a VMware named pipe:
-    # no network, no firewall, no admin. Run `ntdrive kd setup-host <vm>` once with the VM off.
-    # "net" is KDNET over UDP: the host firewall must allow kd.exe inbound, which needs
-    # scripts/setup-host.ps1 as Administrator once, and the guest NIC must be e1000e.
-    kd_transport: serial # serial | net
+    # Kernel debug transport. "net" (default) is KDNET over UDP: the host firewall must allow
+    # kd.exe inbound, which `ntdrive kd setup-host <vm>` repairs through one UAC prompt
+    # (scripts/setup-host.ps1 -FirewallOnly does the same by hand), and the guest NIC must be
+    # e1000e. "serial" is kd over a VMware named pipe: no network, no firewall, no prompt. Run
+    # `ntdrive kd setup-host <vm>` once with the VM off to add the port to the vmx.
+    kd_transport: net # net | serial
     serial_pipe: "" # empty = \\.\pipe\ntdrive-<vm name>
     kdnet_hostip: "192.168.126.1" # net only: IPv4 of "VMware Network Adapter VMnet8" on the host
 

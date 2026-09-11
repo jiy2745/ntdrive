@@ -12,7 +12,9 @@ import pytest
 
 from ntdrive.config import Config, GuestConfig, HostConfig, KdnetConfig, PolicyConfig, VmConfig
 from ntdrive.core.service import NtDriveService
+from ntdrive.errors import BACKEND_ERROR, NtDriveError
 from ntdrive.hypervisor.vmware import VmwareAdapter
+from ntdrive.kd.firewall import MANUAL_FIREWALL_HINT, FirewallStatus
 from ntdrive.term.transport import CloseCallback, DataCallback, TermChannel, TermTransport
 
 # -- fake vmrun ------------------------------------------------------------------------------
@@ -353,6 +355,7 @@ def config(tmp_path: Path, vmx_path: str) -> Config:
                 name="win11-dev",
                 vmx=vmx_path,
                 kdnet_hostip="192.168.126.1",
+                kd_transport="net",  # most tests exercise KDNET, the serial ones say so
                 guest=GuestConfig(user="dev", password="secret"),
                 kdnet=KdnetConfig(port=50000, key="1.2.3.4"),
             )
@@ -374,6 +377,44 @@ def fake_vmrun(vmx_path: str) -> FakeVmrun:
     return FakeVmrun(vmx_path)
 
 
+class FakeFirewall:
+    """The host firewall as the tests see it.
+
+    The test sets the status. The repair either fixes it or is refused, the way a cancelled
+    UAC prompt refuses it. `unreadable` makes the check fail the way a missing PowerShell would.
+    """
+
+    def __init__(self) -> None:
+        self.allow = True
+        self.block_rules: list[str] = []
+        self.refuse = False
+        self.unreadable = ""
+        self.checks = 0
+        self.fixes = 0
+
+    async def check(self, kd: str) -> FirewallStatus:
+        self.checks += 1
+        if self.unreadable:
+            return FirewallStatus(checked=False, error=self.unreadable)
+        return FirewallStatus(allow=self.allow, block_rules=list(self.block_rules))
+
+    async def fix(self, kd: str, timeout: float) -> FirewallStatus:
+        self.fixes += 1
+        if self.refuse:
+            raise NtDriveError(
+                BACKEND_ERROR,
+                "the UAC prompt was refused",
+                MANUAL_FIREWALL_HINT,
+            )
+        self.allow, self.block_rules = True, []
+        return await self.check(kd)
+
+
+@pytest.fixture
+def fake_firewall() -> FakeFirewall:
+    return FakeFirewall()
+
+
 @pytest.fixture
 def fake_transport() -> FakeTransport:
     return FakeTransport()
@@ -390,6 +431,7 @@ def service(
     fake_vmrun: FakeVmrun,
     fake_transport: FakeTransport,
     kd_procs: list[FakeKdProcess],
+    fake_firewall: FakeFirewall,
 ) -> NtDriveService:
     def spawner(argv: list[str]) -> FakeKdProcess:
         proc = FakeKdProcess(argv)
@@ -407,6 +449,8 @@ def service(
         kd_spawner=spawner,
         kd_breaker=breaker,
         kd_pipe_check=lambda pipe: True,
+        firewall_check=fake_firewall.check,
+        firewall_fix=fake_firewall.fix,
         coview_base="http://127.0.0.1:18765/coview?token=t",
     )
     svc.ssh_probe = always_reachable

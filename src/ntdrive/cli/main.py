@@ -19,9 +19,10 @@ from pydantic.fields import FieldInfo
 
 from ntdrive import __version__
 from ntdrive.cli.attach import attach_session
+from ntdrive.cli.setup import setup_command
 from ntdrive.core.registry import ToolRegistry, ToolSpec, load_builtin_tools
 from ntdrive.daemon.client import DaemonClient, connect
-from ntdrive.daemon.lifecycle import ensure_daemon, read_info, stop_daemon
+from ntdrive.daemon.lifecycle import ensure_daemon, read_info, restart_daemon, stop_daemon
 from ntdrive.errors import (
     CONFIRM_REQUIRED,
     GUEST_FROZEN_BY_DEBUGGER,
@@ -229,6 +230,7 @@ def build_cli(registry: ToolRegistry) -> click.Group:
             group.add_command(_attach_command())
         cli.add_command(group)
     cli.add_command(_daemon_group())
+    cli.add_command(setup_command())
     return cli
 
 
@@ -289,11 +291,8 @@ def _daemon_group() -> click.Group:
     @daemon.command("restart")
     @click.pass_context
     def restart(ctx: click.Context) -> None:
-        info = read_info()
-        if info is not None:
-            stop_daemon(info)
         try:
-            info = ensure_daemon(ctx.obj.get("config"), autostart=True)
+            info = restart_daemon(ctx.obj.get("config"))
         except NtDriveError as exc:
             fail(ctx, exc)
             return

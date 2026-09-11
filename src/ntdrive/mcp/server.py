@@ -17,16 +17,28 @@ import mcp.types as types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
+from ntdrive import __version__
 from ntdrive.core.registry import ToolRegistry, load_builtin_tools
 from ntdrive.daemon.client import DaemonClient, connect
 from ntdrive.errors import NtDriveError
 
 log = logging.getLogger("ntdrive-mcp")
 
+# Sent to the client at initialize. The short form of SKILL.md: what to call first and the one
+# rule that bites (a broken-in debugger freezes the guest).
+INSTRUCTIONS = (
+    "ntdrive drives VMware Workstation guests on this Windows host. Call sys_health first: it "
+    "names the fix for every setup problem. Tools take vm, the name from vms.yaml. While "
+    "kd_state is broken the guest is frozen, so call kd_go before term_*, file_* or "
+    "con_screenshot. snap_revert and vm_reboot drop terminal sessions and reattach the "
+    "debugger for you. Destructive tools need confirm=true. Passwords and KDNET keys never go "
+    "into tool arguments."
+)
+
 
 def build_server(registry: ToolRegistry, client: DaemonClient) -> Server:
     """Create the MCP server object."""
-    server: Server = Server("ntdrive")
+    server: Server = Server("ntdrive", version=__version__, instructions=INSTRUCTIONS)
 
     @server.list_tools()  # type: ignore[no-untyped-call, untyped-decorator]
     async def _list_tools() -> list[types.Tool]:

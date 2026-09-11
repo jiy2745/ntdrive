@@ -68,8 +68,9 @@ Host:
 - VMware Workstation Pro 17.6 or newer (provides `vmrun.exe`)
 - Debugging Tools for Windows (`kd.exe`, `kdnet.exe`) from the Windows SDK or WDK
 - Python 3.12 and [uv](https://docs.astral.sh/uv/)
-- For `net` kernel debugging only: a firewall rule that lets `kd.exe` receive UDP (admin, once).
-  The `serial` transport needs no firewall and no admin. See "Kernel debugging" below.
+- For KDNET, the default: a firewall rule that lets `kd.exe` receive UDP. `kd_setup_host` creates
+  it through one UAC prompt. The `serial` transport needs no firewall and no prompt. See "Kernel
+  debugging" below.
 
 Guest (Windows 10 or 11 x64):
 
@@ -77,11 +78,36 @@ Guest (Windows 10 or 11 x64):
 - VMware Tools installed
 - OpenSSH Server running, with PowerShell as the default shell (see "Guest setup" below)
 - A local user account for SSH
-- For `net` kernel debugging only: the virtual NIC set to `e1000e` (the Intel 82574L, which KDNET
-  supports on every Windows 10/11 build). `vmxnet3` works only on Windows 11 23H2 and later.
+- For KDNET, the default: the virtual NIC set to `e1000e` (the Intel 82574L, which KDNET supports
+  on every Windows 10/11 build). `vmxnet3` works only on Windows 11 23H2 and later.
 
 `scripts/setup-host.ps1`, `scripts/setup-guest.ps1` and `scripts/probe-guest.ps1` automate most of
 this.
+
+## Setup in order
+
+`ntdrive sys health` names the fix for every problem it finds (a missing vmx, Secure Boot
+on, the wrong NIC for KDNET, an encrypted VM without a password, an empty password variable, a
+blocked firewall, a missing serial pipe), so run it after each host step until the VM has no
+`issues` left.
+
+1. Host tools: VMware Workstation Pro, the Debugging Tools for Windows and uv (see Requirements),
+   then `git clone` and `cd ntdrive`.
+2. Host, one command, no admin: `powershell -ExecutionPolicy Bypass -File scripts\setup-host.ps1`.
+   It runs `uv sync`, then `ntdrive setup` for each VM you pick (guest account and passwords,
+   hidden, stored as User environment variables and never in a file), restarts the daemon, runs
+   `kd setup-host` for each VM (net: one UAC prompt for the firewall. serial: the pipe goes into
+   the vmx, so the VM must be off) and ends with `sys health`. Run it again to add a VM.
+3. VM settings, with the VM off: Secure Boot off (Options > Advanced), NAT networking, and the
+   `e1000e` NIC for KDNET (the default).
+4. Guest: install VMware Tools, create a local account with a password, copy
+   `scripts/setup-guest.ps1` in (drag and drop works once Tools are in) and run it from an
+   Administrator PowerShell. It installs OpenSSH, and `kd setup-guest` does the bcdedit part from
+   the host afterwards (`-Serial` sets up the serial transport in the guest instead). Reboot when
+   it says so.
+5. Host: `vm start`, `term open`, `kd setup-guest` (unless the guest script already did it), a
+   soft `vm reboot`, `kd attach`, `kd break`. The "Kernel debugging" section below has the exact
+   commands for each transport.
 
 ## Guest setup
 
@@ -95,31 +121,65 @@ New-ItemProperty -Path HKLM:\SOFTWARE\OpenSSH -Name DefaultShell `
   -Value C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -PropertyType String -Force
 ```
 
-If `Add-WindowsCapability` fails (some offline images and Insider builds have no Feature-on-Demand
-source), install the standalone build instead: download `OpenSSH-Win64.zip` from the
-[Win32-OpenSSH releases](https://github.com/PowerShell/Win32-OpenSSH/releases), expand it to
-`C:\Program Files\OpenSSH`, and run its `install-sshd.ps1`, then start the `sshd` service.
-`scripts/setup-guest.ps1` does the Add-WindowsCapability path for you, and with `-Serial` (or
-`-HostIp` for KDNET) it also runs the `bcdedit` step that `kd_setup_guest` would otherwise do over
-SSH.
+`Add-WindowsCapability` fails on Insider builds and on some offline images, because Windows Update
+publishes no Feature-on-Demand package for them. The build-independent alternative is the standalone
+[Win32-OpenSSH](https://github.com/PowerShell/Win32-OpenSSH/releases) zip: expand `OpenSSH-Win64.zip`
+to `C:\Program Files\OpenSSH`, run its `install-sshd.ps1`, then start the `sshd` service.
+
+`scripts/setup-guest.ps1` does all of this in one run. It tries the capability first and falls back
+to the zip on its own (downloaded from GitHub, or pass `-OpenSshZip` with a local copy for a guest
+without internet), sets the default shell and the firewall rule, and with `-Serial` (or `-HostIp`
+for KDNET) also runs the `bcdedit` step that `kd_setup_guest` would otherwise do over SSH. Copy it
+into the guest (VMware drag and drop, or `file_push`, which falls back to VMware Tools while SSH is
+not up yet) and run it from an Administrator PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup-guest.ps1
+```
+
+`kd_setup_guest` does the `bcdedit` step over SSH afterwards for the configured transport, so the
+flags are optional. Reboot the guest when it says so. Running it again on a guest that already has `sshd` is safe.
 
 ## Install
 
 ```powershell
 git clone https://github.com/jiy2745/ntdrive
 cd ntdrive
-uv sync
-uv run pre-commit install
-copy vms.example.yaml vms.yaml
-# edit vms.yaml: vmx path, guest user and password env var, VMnet8 host IP,
-# and encryption_password_env if the VM is encrypted
+powershell -ExecutionPolicy Bypass -File scripts\setup-host.ps1   # uv tool install -e ., ntdrive setup, kd setup-host, sys health
 ```
 
-Register the MCP server with an MCP client. Claude Code picks up the bundled `.mcp.json`, or add the
-same entry to your own config:
+That installs three commands on your PATH with `uv tool install`: `ntdrive` (the CLI), `ntdrive-mcp`
+(the MCP server) and `ntdrived` (the daemon, started for you). The install is editable, so the
+commands run the code in the clone and follow `git pull`. Without a clone:
+
+```powershell
+uv tool install git+https://github.com/jiy2745/ntdrive
+ntdrive setup                    # pick the VM, enter the guest account and passwords
+```
+
+Later, `ntdrive setup` on its own adds or changes a VM, and `uv tool upgrade ntdrive` updates a
+clone-less install.
+
+`ntdrive setup` writes one VM entry into `%LOCALAPPDATA%\ntdrive\vms.yaml` (or the file that
+`--config` or `NTDRIVE_CONFIG` names), stores the passwords as User environment variables,
+restarts the daemon and prints what `sys health` still complains about. Run it again to add a VM or change one. `--inline-secrets` keeps the passwords
+in the file instead, and `vms.example.yaml` documents every field for editing by hand.
+
+`ntdrive` looks for `vms.yaml` in `NTDRIVE_CONFIG`, then `%LOCALAPPDATA%\ntdrive`. It never looks
+in the working directory: the config belongs to the user, not to a checkout of this repository.
+The CLI and the MCP server hand the file they find to the daemon they start, and a daemon that
+came up before the file existed is restarted on it by the next command.
+
+Register the MCP server with an MCP client. The command is the installed `ntdrive-mcp`, with no
+path and no `uv run`, so it does not matter which directory the client starts it from. Claude Code
+picks up the bundled `.mcp.json` in a clone, or add the server to your own configuration:
 
 ```json
-{ "mcpServers": { "ntdrive": { "command": "uv", "args": ["run", "ntdrive-mcp"] } } }
+{ "mcpServers": { "ntdrive": { "command": "ntdrive-mcp" } } }
+```
+
+```powershell
+claude mcp add --scope user ntdrive ntdrive-mcp
 ```
 
 Allow the tools with one permission rule: `mcp__ntdrive__*`. Because the wait tools long-poll, set the
@@ -127,37 +187,44 @@ MCP tool-call timeout above the server cap (600 s by default).
 
 ## Kernel debugging: pick a transport
 
-ntdrive can attach the kernel debugger two ways. Set `kd_transport` per VM in `vms.yaml`.
+ntdrive can attach the kernel debugger two ways. `kd_transport` in `vms.yaml` chooses per VM, and
+`ntdrive setup` writes `net` unless told otherwise.
 
-**serial (recommended, no admin).** kd.exe talks to the guest over a VMware serial port exposed as
-a host named pipe (`\\.\pipe\ntdrive-<vm>`). A named pipe is local IPC, so there is no network, no
-host firewall, and no administrator step. It is a little slower than net, which rarely matters.
-
-One-time setup (the VM must be powered off to add the serial port):
+**net (KDNET, the default).** kd.exe receives UDP from the guest over VMnet8, so the host firewall
+must let it through. On many machines Windows has a leftover inbound Block rule for kd.exe that
+silently drops KDNET (a Block rule beats an Allow rule). Windows creates those "Query User" rules
+itself when kd.exe first listens, the firewall prompt appears and nobody clicks Allow.
+`kd_setup_host` reads the rules, and when they block kd.exe it removes the Block rules and adds an
+Allow rule through a single UAC prompt:
 
 ```powershell
-uv run ntdrive kd setup-host win11     # VM off: adds the named-pipe serial port to the vmx (idempotent)
-uv run ntdrive vm start win11
-uv run ntdrive kd setup-guest win11    # runs bcdedit /dbgsettings serial in the guest over SSH
-uv run ntdrive vm reboot win11 --mode soft --confirm
-uv run ntdrive kd attach win11         # running at once; kd break syncs with the target
+ntdrive kd setup-host win11     # checks the firewall, repairs it once you approve the UAC prompt
+ntdrive kd setup-guest win11    # generates the KDNET key and runs bcdedit /dbgsettings net over SSH
+ntdrive vm reboot win11 --mode soft --confirm
+ntdrive kd attach win11         # waiting until the guest boots with the debugger on
+```
+
+`sys health` runs the same firewall check and lists the offending rules. Pass `--no-fix-firewall`
+to only look. `scripts\setup-host.ps1 -FirewallOnly` from an Administrator PowerShell does the same
+repair by hand. The guest needs a KDNET-capable NIC (`e1000e`).
+
+**serial (no network, no prompt).** kd.exe talks to the guest over a VMware serial port exposed as
+a host named pipe (`\\.\pipe\ntdrive-<vm>`). A named pipe is local IPC, so there is no firewall
+and nothing to approve, which makes it the choice for a host where nobody can answer a UAC prompt.
+It is a little slower than net. Set `kd_transport: serial` (or `ntdrive setup --transport serial`),
+then, with the VM powered off:
+
+```powershell
+ntdrive kd setup-host win11     # VM off: adds the named-pipe serial port to the vmx (idempotent)
+ntdrive vm start win11
+ntdrive kd setup-guest win11    # runs bcdedit /dbgsettings serial in the guest over SSH
+ntdrive vm reboot win11 --mode soft --confirm
+ntdrive kd attach win11         # running at once; kd break syncs with the target
 ```
 
 `sys health` tells you when the vmx still lacks the pipe entry, and `kd attach` refuses with a
 clear hint when the pipe is not open on the host (the VM is off or was started before the vmx
 edit).
-
-**net (KDNET, faster, needs admin once).** kd.exe receives UDP from the guest, so the host firewall
-must allow it. On many machines Windows has a leftover inbound Block rule for kd.exe that silently
-drops KDNET (a Block rule beats an Allow rule). Run the host setup as Administrator once. It removes
-any such Block rule and adds an Allow rule:
-
-```powershell
-# Administrator PowerShell, once:
-powershell -ExecutionPolicy Bypass -File scripts\setup-host.ps1
-```
-
-The guest also needs a KDNET-capable NIC (`e1000e`) and `kd_transport: net` in `vms.yaml`.
 
 ## Quick start (CLI)
 
@@ -165,17 +232,17 @@ The CLI has the same tools as subcommands. The first call auto-starts the daemon
 guest is already set up for your chosen transport (see above).
 
 The daemon and the vmrun and kd.exe processes it starts run without console windows, so nothing
-pops up on the desktop. `uv run ntdrive daemon status` says whether it is up, and its own output
+pops up on the desktop. `ntdrive daemon status` says whether it is up, and its own output
 goes to `%LOCALAPPDATA%\ntdrive\logs\daemon.out.log`.
 
 ```powershell
-uv run ntdrive sys health                 # host binaries and config, then each VM live: power, SSH, debugger transport
-uv run ntdrive vm start win11
-uv run ntdrive term open win11            # prints a session id and a CoView URL
-uv run ntdrive kd attach win11            # serial: attaches at once; net: connects as the guest boots
-uv run ntdrive kd break win11             # freezes the guest at a kd> prompt
-uv run ntdrive kd exec win11 "!process 0 0"
-uv run ntdrive kd go win11                # resume the guest
+ntdrive sys health                 # host binaries and config, then each VM live: power, SSH, debugger transport
+ntdrive vm start win11
+ntdrive term open win11            # prints a session id and a CoView URL
+ntdrive kd attach win11            # serial: attaches at once; net: connects as the guest boots
+ntdrive kd break win11             # freezes the guest at a kd> prompt
+ntdrive kd exec win11 "!process 0 0"
+ntdrive kd go win11                # resume the guest
 ```
 
 Add `--json` to any command for the raw tool result. Exit codes: 0 ok, 1 error, 2 bad arguments,
@@ -184,7 +251,7 @@ Add `--json` to any command for the raw tool result. Exit codes: 0 ok, 1 error, 
 A person can sit down in a session the agent opened:
 
 ```powershell
-uv run ntdrive term attach <session-id>   # Ctrl+] to detach, your keystrokes are logged as human
+ntdrive term attach <session-id>   # Ctrl+] to detach, your keystrokes are logged as human
 ```
 
 ## The state model to respect

@@ -22,8 +22,8 @@ import httpx
 import psutil
 
 from ntdrive import __version__
-from ntdrive.config import state_dir
-from ntdrive.errors import DAEMON_UNAVAILABLE, VERSION_MISMATCH, NtDriveError
+from ntdrive.config import find_config_path, state_dir
+from ntdrive.errors import DAEMON_UNAVAILABLE, INVALID_ARGS, VERSION_MISMATCH, NtDriveError
 
 
 @dataclass
@@ -132,16 +132,46 @@ def spawn_daemon(config_path: str | None = None) -> subprocess.Popen[bytes]:
     )
 
 
+def resolve_config_path(explicit: str | None = None) -> str | None:
+    """The vms.yaml this client would use, absolute, or None when there is none yet.
+
+    Resolved on the client side (explicit path, NTDRIVE_CONFIG, then the state directory) and
+    handed to the daemon, so the daemon never depends on the directory it was started from.
+    """
+    found = find_config_path(explicit)
+    return str(found.resolve()) if found is not None else None
+
+
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(str(Path(a).resolve())) == os.path.normcase(str(Path(b).resolve()))
+
+
 def ensure_daemon(
     config_path: str | None = None, autostart: bool = True, timeout: float = 25.0
 ) -> DaemonInfo:
-    """Return a healthy daemon, starting one when allowed."""
+    """Return a healthy daemon, starting one when allowed.
+
+    A daemon that runs without any vms.yaml holds no sessions, so when a config exists now
+    and autostart is allowed it is restarted on that file. A daemon that runs on a different
+    file than this client resolved is left alone and reported, because it may hold live
+    sessions: `ntdrive daemon restart` switches it deliberately.
+    """
+    wanted = resolve_config_path(config_path)
     info = read_info()
     if info is not None and pid_alive(info.pid):
         health = probe_health(info)
         if health is not None:
             _check_version(str(health.get("version", "")))
-            return info
+            if info.config_path and wanted and not _same_path(info.config_path, wanted):
+                raise NtDriveError(
+                    INVALID_ARGS,
+                    f"the running daemon uses {info.config_path}, this client resolved {wanted}",
+                    "run `ntdrive daemon restart` from this shell to switch the daemon, or drop "
+                    "--config and NTDRIVE_CONFIG to use the daemon's file",
+                )
+            if info.config_path or wanted is None or not autostart:
+                return info
+            stop_daemon(info)
     if not autostart:
         raise NtDriveError(
             DAEMON_UNAVAILABLE,
@@ -149,7 +179,7 @@ def ensure_daemon(
             "run `ntdrive daemon start` or allow auto-start",
         )
     remove_info()
-    spawn_daemon(config_path)
+    spawn_daemon(wanted)
     deadline = time.time() + timeout
     while time.time() < deadline:
         time.sleep(0.4)
@@ -161,6 +191,14 @@ def ensure_daemon(
         f"ntdrived did not come up within {timeout:.0f}s",
         f"see {state_dir() / 'logs' / 'daemon.out.log'}",
     )
+
+
+def restart_daemon(config_path: str | None = None, timeout: float = 25.0) -> DaemonInfo:
+    """Stop the daemon if one runs, then start one on the config this client resolves."""
+    info = read_info()
+    if info is not None:
+        stop_daemon(info)
+    return ensure_daemon(config_path, autostart=True, timeout=timeout)
 
 
 def _check_version(remote: str) -> None:

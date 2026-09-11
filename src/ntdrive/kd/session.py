@@ -368,7 +368,7 @@ class KdSession:
                 else:
                     hint = (
                         "check the KDNET settings in the guest and the host firewall "
-                        "(scripts/setup-host.ps1 as Administrator)"
+                        "(kd_setup_host repairs the firewall through one UAC prompt)"
                     )
                 raise NtDriveError(
                     TIMEOUT,

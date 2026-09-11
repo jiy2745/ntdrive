@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import platform
-import re
 import socket
 import sys
 import time
@@ -20,6 +19,8 @@ from ntdrive.core.service import NtDriveService
 from ntdrive.core.state import PowerState
 from ntdrive.core.tools.common import NoParams
 from ntdrive.errors import NtDriveError
+from ntdrive.hypervisor.vmx import vmx_settings
+from ntdrive.kd.firewall import FirewallStatus
 
 # The guest probe must stay quick. `vmrun getGuestIPAddress -wait` blocks for as long as VMware
 # Tools report nothing, so it gets a short timeout here instead of the 60 s the terminal uses.
@@ -60,14 +61,9 @@ async def sys_state(service: NtDriveService, p: StateParams) -> dict[str, Any]:
     }
 
 
-def _vmx_has_serial_pipe(vmx: str, pipe: str) -> bool:
+def _vmx_has_serial_pipe(settings: dict[str, str], pipe: str) -> bool:
     """True when the vmx already exposes serial0 as the expected host named pipe."""
-    try:
-        text = Path(vmx).read_text(encoding="latin-1")
-    except OSError:
-        return False
-    m = re.search(r'(?im)^\s*serial0\.fileName\s*=\s*"(.*)"\s*$', text)
-    return m is not None and m.group(1).lower() == pipe.lower()
+    return settings.get("serial0.filename", "").lower() == pipe.lower()
 
 
 def _udp_port_free(port: int) -> bool:
@@ -87,29 +83,73 @@ def _udp_port_free(port: int) -> bool:
             return False
 
 
-def _config_issues(service: NtDriveService, cfg: VmConfig) -> list[str]:
-    """Static checks: things that are wrong in vms.yaml or the vmx before any VM is touched."""
+def config_issues(cfg: VmConfig, backends: set[str]) -> list[str]:
+    """Static checks: things that are wrong in vms.yaml or the vmx before any VM is touched.
+
+    Every entry names the fix, because this list is what a first-time user reads. Pure, so
+    `ntdrive setup` prints the same list without a daemon.
+    """
     issues: list[str] = []
-    if cfg.backend not in service.adapters:
+    if cfg.backend not in backends:
         issues.append(f"backend {cfg.backend} unsupported")
     vmx_ok = bool(cfg.vmx) and Path(cfg.vmx).is_file()
-    if cfg.vmx and not vmx_ok:
+    if not cfg.vmx:
+        issues.append("vmx path missing (the .vmx file of the VM, see vms.example.yaml)")
+    elif not vmx_ok:
         issues.append("vmx path does not exist")
+    settings = vmx_settings(cfg.vmx) if vmx_ok else {}
+    if settings.get("uefi.secureboot.enabled", "").lower() == "true":
+        issues.append(
+            "Secure Boot is on in the vmx, so bcdedit /debug on is refused in the guest "
+            "(power off the VM, then VM settings > Options > Advanced > turn Secure Boot off)"
+        )
     if cfg.kd_transport == "net":
         if not cfg.kdnet_hostip:
-            issues.append("kdnet_hostip missing")
+            issues.append("kdnet_hostip missing (IPv4 of the host's VMware Network Adapter VMnet8)")
         if not cfg.kdnet.key:
             issues.append("kdnet key not set (run kd_setup_guest)")
-    elif vmx_ok and not _vmx_has_serial_pipe(cfg.vmx, cfg.resolved_serial_pipe()):
+        nic = settings.get("ethernet0.virtualdev", "")
+        if nic and nic.lower() != "e1000e":
+            issues.append(
+                f"guest NIC is {nic}, KDNET needs e1000e on every Windows 10/11 build "
+                "(vmxnet3 works only on Windows 11 23H2 and later)"
+            )
+    elif vmx_ok and not _vmx_has_serial_pipe(settings, cfg.resolved_serial_pipe()):
         issues.append("serial pipe not in the vmx (run kd_setup_host with the VM off)")
+    if not cfg.guest.user:
+        issues.append("guest.user missing (a local account in the guest with a password, for SSH)")
+    empty_envs: list[str] = []
     if cfg.guest.password_env and not cfg.guest.resolve_password():
-        issues.append(f"environment variable {cfg.guest.password_env} is empty")
+        empty_envs.append(cfg.guest.password_env)
     if cfg.encryption_password_env and not cfg.resolve_encryption_password():
-        issues.append(f"environment variable {cfg.encryption_password_env} is empty")
+        empty_envs.append(cfg.encryption_password_env)
+    for env in dict.fromkeys(empty_envs):
+        issues.append(
+            f"environment variable {env} is empty (set it at User scope: ntdrive reads it from "
+            "the registry at once, no new terminal needed)"
+        )
+    if (
+        "encryption.keysafe" in settings
+        and not cfg.encryption_password_env
+        and not cfg.encryption_password
+    ):
+        issues.append(
+            "the VM is encrypted (a Windows 11 vTPM does this) but vms.yaml names no encryption "
+            "password: set encryption_password_env"
+        )
     return issues
 
 
-async def _probe_vm(service: NtDriveService, cfg: VmConfig, issues: list[str]) -> dict[str, Any]:
+def _config_issues(service: NtDriveService, cfg: VmConfig) -> list[str]:
+    return config_issues(cfg, set(service.adapters))
+
+
+async def _probe_vm(
+    service: NtDriveService,
+    cfg: VmConfig,
+    issues: list[str],
+    firewall: asyncio.Task[FirewallStatus] | None,
+) -> dict[str, Any]:
     """Live checks for one VM, each bounded to a few seconds.
 
     Reports the power state, the host side of the debugger transport (a serial pipe server, or
@@ -144,6 +184,11 @@ async def _probe_vm(service: NtDriveService, cfg: VmConfig, issues: list[str]) -
                 f"UDP port {cfg.kdnet.port} is taken by another process, so kd.exe cannot "
                 "listen on it (change kdnet.port or stop the other debugger)"
             )
+        if firewall is not None:
+            status = await firewall
+            kdnet_port["firewall_ok"] = status.ok if status.checked else None
+            if not status.ok:
+                issues.append(status.issue())
     guest: dict[str, Any] = {
         "ip": None,
         "ssh_port": cfg.guest.ssh_port,
@@ -175,9 +220,14 @@ async def _probe_vm(service: NtDriveService, cfg: VmConfig, issues: list[str]) -
     }
 
 
-async def _vm_health(service: NtDriveService, name: str, cfg: VmConfig) -> dict[str, Any]:
+async def _vm_health(
+    service: NtDriveService,
+    name: str,
+    cfg: VmConfig,
+    firewall: asyncio.Task[FirewallStatus] | None,
+) -> dict[str, Any]:
     issues = _config_issues(service, cfg)
-    live = await _probe_vm(service, cfg, issues)
+    live = await _probe_vm(service, cfg, issues, firewall)
     return {
         "name": name,
         "backend": cfg.backend,
@@ -209,7 +259,11 @@ async def sys_health(service: NtDriveService, _: NoParams) -> dict[str, Any]:
     kdnet_ok = Path(host.kdnet).is_file()
     problems: list[str] = []
     if not service.config.path:
-        problems.append("vms.yaml not found; copy vms.example.yaml to vms.yaml")
+        problems.append(
+            "vms.yaml not found: run `ntdrive setup` (it writes %LOCALAPPDATA%/ntdrive/vms.yaml), "
+            "or point NTDRIVE_CONFIG or --config at a file. The next ntdrive command restarts "
+            "the daemon on it"
+        )
     if not kd_ok:
         problems.append(f"kd.exe not found at {host.kd}")
     if not kdnet_ok:
@@ -217,11 +271,27 @@ async def sys_health(service: NtDriveService, _: NoParams) -> dict[str, Any]:
     for name, info in backends.items():
         if not info.get("exists", False):
             problems.append(f"{name} binary not found at {info.get('path')}")
-    vms = list(
-        await asyncio.gather(
-            *(_vm_health(service, name, cfg) for name, cfg in service.config.vms.items())
+    firewall: asyncio.Task[FirewallStatus] | None = None
+    if any(cfg.kd_transport == "net" for cfg in service.config.vms.values()):
+        # One read of the host firewall, shared by every VM on the net transport.
+        firewall = asyncio.create_task(service.kdnet_firewall())
+    try:
+        vms = list(
+            await asyncio.gather(
+                *(
+                    _vm_health(service, name, cfg, firewall)
+                    for name, cfg in service.config.vms.items()
+                )
+            )
         )
-    )
+    except BaseException:
+        # A failed probe must not leave the firewall read running unattended.
+        if firewall is not None and not firewall.done():
+            firewall.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await firewall
+        raise
+    kdnet_firewall = (await firewall).as_dict() if firewall is not None else None
     return {
         "ok": not problems,
         "problems": problems,
@@ -235,6 +305,7 @@ async def sys_health(service: NtDriveService, _: NoParams) -> dict[str, Any]:
             "kdnet": {"path": host.kdnet, "exists": kdnet_ok},
         },
         "backends": backends,
+        "kdnet_firewall": kdnet_firewall,
         "daemon_bind": host.daemon_bind,
         "tools": len(service.registry),
         "vms": vms,

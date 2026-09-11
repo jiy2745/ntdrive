@@ -35,10 +35,15 @@ from ntdrive.errors import (
 )
 from ntdrive.hypervisor.base import HypervisorAdapter
 from ntdrive.hypervisor.vmware import VmwareAdapter
+from ntdrive.kd import firewall as host_firewall
+from ntdrive.kd.firewall import FirewallCheck, FirewallFix, FirewallStatus
 from ntdrive.kd.session import Breaker, KdSession, PipeCheck, Spawner, named_pipe_exists
 from ntdrive.term.manager import TermManager, TransportFactory
 from ntdrive.term.ssh import probe_tcp_port
 from ntdrive.term.transport import TermTransport
+
+# A readable firewall answer is kept this long: the read enumerates every rule on the host.
+FIREWALL_CACHE_TTL = 30.0
 
 
 class NtDriveService:
@@ -54,6 +59,8 @@ class NtDriveService:
         kd_spawner: Spawner | None = None,
         kd_breaker: Breaker | None = None,
         kd_pipe_check: PipeCheck | None = None,
+        firewall_check: FirewallCheck | None = None,
+        firewall_fix: FirewallFix | None = None,
         log_dir: Path | None = None,
         coview_base: str = "",
     ) -> None:
@@ -79,6 +86,9 @@ class NtDriveService:
         self._kd_spawner = kd_spawner
         self._kd_breaker = kd_breaker
         self._kd_pipe_check = kd_pipe_check
+        self._firewall_check = firewall_check
+        self._firewall_fix = firewall_fix
+        self._firewall_cache: tuple[float, FirewallStatus] | None = None
         self._snapshot_meta_dir = self.log_dir / "snapshots"
         # Fast TCP probe used before trying SFTP. Tests replace it to avoid real sockets.
         self.ssh_probe: Callable[[str, int], Awaitable[bool]] = probe_tcp_port
@@ -245,6 +255,32 @@ class NtDriveService:
     def serial_pipe_open(self, pipe: str) -> bool:
         """True when the host side of a serial named pipe has a server (the VM exposes COM1)."""
         return (self._kd_pipe_check or named_pipe_exists)(pipe)
+
+    async def kdnet_firewall(self) -> FirewallStatus:
+        """Whether the host firewall lets kd.exe receive KDNET packets. Needs no privilege.
+
+        A readable answer is cached for FIREWALL_CACHE_TTL seconds, a repair replaces it, and
+        an unreadable answer is not kept so the next call tries again.
+        """
+        now = time.monotonic()
+        if self._firewall_cache is not None:
+            at, cached = self._firewall_cache
+            if now - at < FIREWALL_CACHE_TTL:
+                return cached
+        check = self._firewall_check or host_firewall.firewall_status
+        status = await check(self.config.host.kd)
+        if status.checked:
+            self._firewall_cache = (now, status)
+        return status
+
+    async def fix_kdnet_firewall(self, timeout: float) -> FirewallStatus:
+        """Drop the Block rules for kd.exe and add the Allow rule through one UAC prompt."""
+        fix = self._firewall_fix or host_firewall.firewall_fix
+        self._firewall_cache = None
+        status = await fix(self.config.host.kd, timeout)
+        if status.checked:
+            self._firewall_cache = (time.monotonic(), status)
+        return status
 
     async def transport(self, vm: VmConfig) -> TermTransport:
         """Transport to the guest, resolving the IP when needed."""

@@ -10,8 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import subprocess
-import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -25,10 +23,10 @@ from ntdrive.errors import (
     REASON_ENCRYPTED_LIVE,
     REASON_PASSWORD_REQUIRED,
     REASON_SNAPSHOT_MISSING,
-    TIMEOUT,
     VM_NOT_RUNNING,
     NtDriveError,
 )
+from ntdrive.hostproc import run_hidden
 from ntdrive.hypervisor.base import HypervisorAdapter, SnapshotNode, SnapshotTree
 
 Runner = Callable[[list[str], float], Awaitable[tuple[int, str]]]
@@ -48,26 +46,9 @@ def _mask_argv(argv: list[str]) -> str:
     return " ".join(out)
 
 
-async def subprocess_runner(args: list[str], timeout: float) -> tuple[int, str]:
-    """Run a command and return (exit code, combined stdout+stderr).
-
-    The daemon runs without a console, so on Windows every child would otherwise get a console
-    window of its own and flash it on the desktop. CREATE_NO_WINDOW keeps vmrun invisible.
-    """
-    kwargs: dict[str, Any] = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    proc = await asyncio.create_subprocess_exec(
-        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, **kwargs
-    )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        proc.kill()
-        raise NtDriveError(
-            TIMEOUT, f"{Path(args[0]).name} timed out after {timeout:.0f}s"
-        ) from None
-    return proc.returncode or 0, out.decode("utf-8", errors="replace")
+# vmrun goes through the shared hidden-window runner (ntdrive.hostproc). The name stays for
+# the adapter's `runner` parameter and the tests.
+subprocess_runner = run_hidden
 
 
 def _norm(path: str) -> str:

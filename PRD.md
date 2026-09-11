@@ -3,7 +3,7 @@
 
 | Field | Value |
 |---|---|
-| Version | 0.10 (draft). Serial kd transport promoted to the default (KD-11), `kd_setup_host` added, encrypted live snapshots through suspend (SNAP-1, SNAP-4). 0.9 translated to English, 0.8 added encryption (VM-6) |
+| Version | 0.10 (draft). Serial kd transport added as the alternative to KDNET (KD-11), `kd_setup_host` added, encrypted live snapshots through suspend (SNAP-1, SNAP-4). 0.9 translated to English, 0.8 added encryption (VM-6) |
 | Date | 2026-09-11 |
 | Status | Under review |
 | Callers | Agents use **MCP**, humans and scripts and CI use the **CLI**, tests and automation use the **Python SDK**. All three are clients of one local daemon (`ntdrived`) |
@@ -148,7 +148,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | KD-8 | Symbol path: pass `_NT_SYMBOL_PATH` or the configured value with `-y`. Provide a default local cache directory. | P0 |
 | KD-9 | On detach, resume the target (`g`) and then stop the process. Force-kill option. | P0 |
 | KD-10 | Reconnect the debugger after snapshot revert or reboot, for both transports. The target looks for the debugger again early in boot, so restarting the host-side kd.exe reconnects. A live session is kept through a reboot and waited on. A serial session that does not announce the reconnection within the timeout is respawned so the reported state is a known one. Retry policy (count, interval) on failure. | P0 |
-| KD-11 | **Serial transport (guest COM1 -> host named pipe), the recommended default for VMware.** `kd_setup_host` writes `serial0.*` (pipe server, `\\.\pipe\ntdrive-<vm>`) into the vmx while the VM is off and is idempotent. kd.exe connects as the pipe client, so there is no network, no host firewall rule and no administrator step, unlike KDNET. `sys_health` reports a missing pipe entry. Hyper-V would use `Set-VMComPort` (later). | P0 |
+| KD-11 | **Serial transport (guest COM1 -> host named pipe), the alternative to KDNET for hosts where nobody can approve a UAC prompt.** `kd_setup_host` writes `serial0.*` (pipe server, `\\.\pipe\ntdrive-<vm>`) into the vmx while the VM is off and is idempotent. kd.exe connects as the pipe client, so there is no network, no host firewall rule and no administrator step, unlike KDNET. `sys_health` reports a missing pipe entry. Hyper-V would use `Set-VMComPort` (later). | P0 |
 | KD-12 | Convenience wrappers for common commands (`kd_bp`, `kd_modules`). Internally call KD-2. | P2 |
 
 ### 5.4 FR-TERM: real-time terminal
@@ -208,13 +208,14 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 |---|---|---|
 | FACE-1 | **Daemon `ntdrived`**: the only process that holds sessions (SSH connections, PTY, `kd.exe`, ring buffers) and the StateStore. Exposes the tool API over local HTTP + WebSocket (127.0.0.1, default 8765). One instance per user (lock file). | P0 |
 | FACE-2 | **Single source tool registry**: tool name, argument schema (pydantic) and handler are defined once in the `ntdrive.core.tools` registry. MCP tools, HTTP endpoints, CLI subcommands and SDK methods are all **generated** from this registry. The same definition is never written three times by hand. | P0 |
-| FACE-3 | **MCP server `ntdrive-mcp`**: stdio, FastMCP. Stateless, and forwards tool calls to the daemon over HTTP. Auto-starts the daemon if absent. Registered in Claude Code with one line in `.mcp.json`. | P0 |
+| FACE-3 | **MCP server `ntdrive-mcp`**: stdio, FastMCP. Stateless, and forwards tool calls to the daemon over HTTP. Auto-starts the daemon if absent. Registered in Claude Code with one line in `.mcp.json`, whose command is the installed `ntdrive-mcp` (`uv tool install`, editable for contributors) so the entry carries no path and no `uv run`. At initialize the server sends `instructions`, a short digest of SKILL.md (call sys_health first, a broken-in debugger freezes the guest, revert and reboot reattach for you, destructive tools need confirm, no secrets in arguments), so an agent without the skill file still gets the rules. | P0 |
 | FACE-4 | **CLI `ntdrive`**: `ntdrive <group> <verb> [args]` maps one-to-one to tools (`ntdrive kd exec win11-dev "!process 0 0"`). Default output is a human table, `--json` gives the raw tool result. Exit codes map to `error.code`. To avoid shell quoting, command bodies can come from `--stdin`/`--file`. | P0 |
 | FACE-5 | **CLI `term attach <session>`**: connect the local console raw to a daemon PTY session (WebSocket). A person sits down in a session the agent opened. Detach key is `Ctrl+]`. Input is logged with a human tag. | P1 |
 | FACE-6 | **Python SDK `ntdrive`**: `NtDrive()` is a daemon client (default). `NtDrive(inprocess=True)` runs the core in the same process without the daemon (for tests and a REPL). Method names and arguments match the tools (`vt.kd.exec("win11-dev", "!process 0 0")`). | P0 |
 | FACE-7 | **Daemon lifecycle**: `ntdrive daemon start\|stop\|status\|restart`. Clients read `%LOCALAPPDATA%\ntdrive\daemon.json` (port, pid, token, version) and attach, and if the file is missing or the pid is dead they auto-start a detached process and wait for `/health`. The daemon stays up until an explicit stop (no idle exit). | P0 |
 | FACE-8 | **Auth and version**: every request carries the random token from `daemon.json` as a header. The file has per-user ACL. `/health` returns the version and a client with a different major version is refused. | P0 |
 | FACE-9 | **Front-door parity**: calling the same tool over MCP, CLI (`--json`) and SDK yields the same JSON (AT-9). Error codes and hints match too. | P0 |
+| FACE-10 | **`ntdrive setup`**: a CLI command that writes the `vms.yaml` entry for one VM so nobody edits YAML by hand. It lists the VMs in the VMware Workstation inventory (or takes `--vmx`), reads the vmx (display name, encryption, NIC, Secure Boot), asks for the guest account and the passwords with hidden input, stores the passwords as User environment variables (`--inline-secrets` keeps them in `vms.yaml` instead), writes the entry, restarts the daemon and prints the `sys_health` issues that remain. Running it again adds another VM or updates one. Passwords are never accepted on the command line. `scripts/setup-host.ps1` wraps it into the one-run host setup: tools check, `uv sync`, `ntdrive setup` per VM, daemon restart, `kd_setup_host` per VM, `sys_health`, with no elevated shell. | P1 |
 
 ### 5.9 Non-functional requirements
 
@@ -232,7 +233,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 **Common**
 - **While the debugger is broken in, the whole guest is frozen.** SSH, guest operations and screenshot updates all stop.
 - **`bcdedit /debug on` is constrained on a VM with Secure Boot on.** Both hypervisors make turning VM Secure Boot off the standard procedure (Windows 11 still boots with Secure Boot off after install).
-- **KDNET is independent of the guest firewall**, but the **host firewall must allow kd.exe/WinDbg UDP inbound**. Ports 50000-50039 recommended, unique per target.
+- **KDNET is independent of the guest firewall**, but the **host firewall must allow kd.exe/WinDbg UDP inbound**. Ports 50000-50039 recommended, unique per target. Windows adds inbound Block rules for kd.exe when its first listen raises the firewall prompt and nobody clicks Allow, and a Block rule wins over any Allow rule. `kd_setup_host` reads the rules without privilege and repairs them through one UAC prompt.
 - Store-distributed WinDbg has included `kdnet.exe` and `VerifiedNicList.xml` since 2026-03 (the `kdnet` alias is added to PATH).
 
 **VMware Workstation**
@@ -345,7 +346,7 @@ Transition rules (partial):
 - **Why a daemon.** (1) Sessions must outlive a process lifetime. Terminal and debugger sessions survive a Claude Code restart. (2) A person can sit down with CLI `term attach` in a session the agent opened over MCP. Without a daemon the MCP server process and the CLI process would hold different sessions. (3) The CoView web server needs a long-lived process anyway.
 - **Why not MCP only.** For a person poking around by hand the CLI is far faster, and CI and scripts cannot use MCP. For an agent, MCP is better: no passing kd and PowerShell commands through three layers of shell quoting, and `error.code` plus `hint` structured errors and long-poll tools come naturally. So keep all three, but **generate the definitions from one place (ToolRegistry)** to make the upkeep one-fold.
 - **Cost.** One process and an IPC layer (local HTTP+WS, token, lifecycle management) are added in M0. In exchange, there is no later work to split the daemon out.
-- **Lifecycle.** The first client auto-starts it, and it stays up until an explicit `ntdrive daemon stop`. Shutdown order: if KD is `broken`, `g` -> stop `kd.exe` -> close SSH channels -> flush session logs. Even after an abnormal exit the KDNET target waits for the debugger, so the next `kd_attach` recovers.
+- **Lifecycle.** The first client auto-starts it, and it stays up until an explicit `ntdrive daemon stop`. The client resolves `vms.yaml` (explicit path, `NTDRIVE_CONFIG`, then `%LOCALAPPDATA%\ntdrive`, never the working directory, because the config belongs to the user and not to a checkout) and hands it to the daemon it starts, and a daemon that runs without any config is restarted by the next client that can find one, which is safe because such a daemon holds no sessions. Shutdown order: if KD is `broken`, `g` -> stop `kd.exe` -> close SSH channels -> flush session logs. Even after an abnormal exit the KDNET target waits for the debugger, so the next `kd_attach` recovers.
 - **Claude Code setup.** Register `ntdrive-mcp` in `.mcp.json`, allow with the single rule `mcp__ntdrive__*`. Because of long-poll tools, set the MCP tool-call timeout longer than the server cap (600 s default) (ST-8). Allowing `Bash(ntdrive *)` lets an agent use the CLI too, but `SKILL.md` recommends MCP by default.
 
 ---
@@ -378,7 +379,7 @@ messages are written in English (ST-9).
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `kd_setup_host` | `vm` (serial: VM must be off, edits the vmx. net: reports the admin firewall step) | `{transport, changed, serial_pipe?, next}` |
+| `kd_setup_host` | `vm`, `fix_firewall=true`, `timeout=120` (serial: VM must be off, edits the vmx. net: reads the host firewall rules for kd.exe and, when they block KDNET, removes the Block rules and adds an Allow rule through one UAC prompt. `fix_firewall=false` only reports) | `{transport, changed, serial_pipe?, firewall?, next}` |
 | `kd_setup_guest` | `vm, port?, key?` (needs SSH to the guest) | `{transport, port?, key_saved, needs_reboot:true, steps}` |
 | `kd_attach` | `vm, port?, key?, symbol_path?, wait_for_target=true, timeout=120` | `{state, transport, target_info?}` |
 | `kd_detach` | `vm, force=false` | `{state}` |
@@ -410,7 +411,7 @@ messages are written in English (ST-9).
 | `file_push` | `vm, local, remote, verify=true` (`local` is an absolute host path, the CLI and SDK absolutize) | `{files, bytes, verified, via: sftp\|guest_tools, copied:[...], note?}` |
 | `file_pull` | `vm, remote, local` (a trailing separator on `local` means directory) | `{bytes, via, note?}` |
 | `sys_state` | `vm?` | unified VM, KD, TERM state |
-| `sys_health` | - | binary paths and versions, backend capabilities, hypervisor service, and per VM: config `issues`, `power`, `kd_state`, `guest {ip, ssh_port, ssh_open, skipped}`, and `serial_pipe {path, open}` or `kdnet_port {port, free, held_by_ntdrive}`. The guest probe is bounded to a few seconds and skipped while the VM is off or frozen by the debugger |
+| `sys_health` | - | binary paths and versions, backend capabilities, hypervisor service, a `kdnet_firewall` read when any VM uses net, and per VM: config `issues` (missing vmx, Secure Boot on, wrong NIC for KDNET, encrypted VM without a password, empty password environment variables, missing serial pipe or KDNET key, each naming the fix), `power`, `kd_state`, `guest {ip, ssh_port, ssh_open, skipped}`, and `serial_pipe {path, open}` or `kdnet_port {port, free, held_by_ntdrive, firewall_ok}`. The guest probe is bounded to a few seconds and skipped while the VM is off or frozen by the debugger |
 
 ### 7.5 Config file (`vms.yaml`)
 
@@ -429,7 +430,7 @@ vms:
     kdnet_hostip: "192.168.126.1"  # VMnet8 (NAT) host adapter IP, used by kd_transport: net only
     encryption_password_env: ""    # env var name holding the password if the VM is encrypted
     encryption_password: ""        # or the password itself (vms.yaml is git-ignored)
-    kd_transport: serial           # serial (named pipe, no admin) or net (KDNET, firewall step)
+    kd_transport: net              # net (KDNET, the default, one UAC prompt) or serial (named pipe, no prompt)
     serial_pipe: ""                # empty = \\.\pipe\ntdrive-<vm name>
     guest:
       user: "dev"
@@ -475,8 +476,8 @@ tool JSON. Exit codes: 0 ok, 2 bad arguments, 3 `confirm_required`, 4 `guest_fro
 | OS | Windows 11 |
 | Debugger | Debugging Tools for Windows from the SDK/WDK (`kd.exe`, `kdnet.exe`, `VerifiedNicList.xml`), or Store WinDbg (includes `kdnet` since 2026-03) |
 | Runtime | Python 3.12, uv |
-| Firewall | Allow kd.exe UDP inbound (all three profiles) |
-| Package | One Python package provides three entry points `ntdrived`, `ntdrive`, `ntdrive-mcp`. Install with `uv tool install` |
+| Firewall | Allow kd.exe UDP inbound (all three profiles), and no inbound Block rule for kd.exe. `kd_setup_host` (net) sets this up through one UAC prompt. `scripts/setup-host.ps1 -FirewallOnly` as Administrator is the manual route. The serial transport needs none of this |
+| Package | One Python package provides three entry points `ntdrived`, `ntdrive`, `ntdrive-mcp`. Users install with `uv tool install git+<repo>`, contributors with `uv tool install -e .` (`scripts/setup-host.ps1` does it), and both get the commands on PATH |
 | Dev tools | uv, Ruff, mypy, pre-commit. Prettier is not installed separately because pre-commit builds a Node environment and runs it |
 
 ### 8.2 Host (VMware backend)
@@ -504,15 +505,18 @@ tool JSON. Exit codes: 0 ok, 2 bad arguments, 3 `confirm_required`, 4 `guest_fro
 
 | Item | Requirement |
 |---|---|
-| OpenSSH Server | `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`, service auto-start, default shell set to PowerShell (`HKLM:\SOFTWARE\OpenSSH\DefaultShell`) |
-| Kernel debug | `bcdedit /debug on` plus either `bcdedit /dbgsettings serial debugport:1 baudrate:115200` (serial, default) or `bcdedit /dbgsettings net hostip:<hostip> port:<n> key:<key>` (KDNET), then reboot. `kd_setup_guest` does this over SSH |
+| OpenSSH Server | `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`, or the Win32-OpenSSH zip (`install-sshd.ps1`) where the capability cannot be installed (Insider builds have no Feature-on-Demand package). `scripts/setup-guest.ps1` tries the capability and falls back to the zip. Service auto-start, default shell set to PowerShell (`HKLM:\SOFTWARE\OpenSSH\DefaultShell`) |
+| Kernel debug | `bcdedit /debug on` plus either `bcdedit /dbgsettings serial debugport:1 baudrate:115200` (serial) or `bcdedit /dbgsettings net hostip:<hostip> port:<n> key:<key>` (KDNET, the default), then reboot. `kd_setup_guest` does this over SSH |
 | Login | At least one local account (for PowerShell Direct and SSH auth) |
 
 ### 8.5 First-time setup flow (run by the agent)
 
 ```
-0. kd_setup_host win11-dev             -> serial: add the named-pipe COM port to the vmx (VM off)
-                                          net: run scripts/setup-host.ps1 as Administrator once
+   ntdrive setup                       -> a person: pick the VM, enter the account and passwords,
+                                          vms.yaml written, daemon restarted (FACE-10)
+0. kd_setup_host win11-dev             -> net (default): read the host firewall rules for kd.exe,
+                                          repair them through one UAC prompt when they block KDNET
+                                          serial: add the named-pipe COM port to the vmx (VM off)
 1. sys_health                          -> check binaries, config and backend capability
 2. vm_start win11-dev                  -> boot
 3. term_open win11-dev transport=auto  -> enter SSH (falls back to psdirect on Hyper-V if SSH is not up)
@@ -546,7 +550,7 @@ tool JSON. Exit codes: 0 ok, 2 bad arguments, 3 `confirm_required`, 4 `guest_fro
 | AT-1 | Snapshot basics | On a running VM, `snap_take` -> shows in the `snap_list` tree -> after `snap_revert` the VM is running and its IP is queryable |
 | AT-2 | Terminal streaming | After `term_send "ping -t 127.0.0.1"`, calling `term_read(delta)` five times at 1 s intervals shows new lines each time, and after `{ctrl+c}` the prompt returns via an `until` match |
 | AT-3 | Screen mode | After `term_send "cls; Get-Process \| Select -First 5"`, the text of `term_read(screen)` matches the xterm.js co-view screen |
-| AT-4 | Kernel debugger round trip | On a new guest, `kd_setup_host` (serial) or the firewall step (net) -> `kd_setup_guest` -> reboot -> `kd_attach` -> `kd_state` reaches `running` within 120 s -> `kd_break` reaches `broken` within 10 s -> `kd_exec "!process 0 0"` output contains `System` -> `kd_go`. Verified live over the serial pipe on 2026-09-11 (encrypted Windows 11 Insider guest, build 29648) |
+| AT-4 | Kernel debugger round trip | On a new guest, `kd_setup_host` (serial pipe, or the firewall repair for net) -> `kd_setup_guest` -> reboot -> `kd_attach` -> `kd_state` reaches `running` within 120 s -> `kd_break` reaches `broken` within 10 s -> `kd_exec "!process 0 0"` output contains `System` -> `kd_go`. Verified live over the serial pipe on 2026-09-11 (encrypted Windows 11 Insider guest, build 29648) |
 | AT-5 | Recovery after revert | From `broken`, `snap_take` -> `kd_go` -> some work -> `snap_revert(reattach_kd, reopen_term)` -> all `steps` ok, `kd_state.running`, a successor session in `term_list` |
 | AT-6 | BSOD loop | Deliberate bugcheck in the guest (NotMyFault, etc.) -> `kd_wait_event` returns `bugcheck` -> `kd_exec "!analyze -v"` -> `con_screenshot` has an image -> `snap_revert` -> guest healthy |
 | AT-7 | Human intervention | When a person types `echo hi` in co-view, the agent's `term_read(delta)` shows that input (human tag) and its output |
@@ -584,7 +588,7 @@ tool JSON. Exit codes: 0 ok, 2 bad arguments, 3 `confirm_required`, 4 `guest_fro
 - KD backend MVP: `kd.exe` subprocess plus sentinel framing. Whether to swap to DbgEng COM is decided by the M3 break-in verification.
 - **Scope: VMware Workstation only this version (settled 2026-09-10).** `vmrun` single path, no vmrest. Hyper-V and VirtualBox get only the `HypervisorAdapter` interface, not an implementation. VirtualBox was found feasible (`VBoxManage`, Intel PRO/1000 KDNET support) but deferred. Reason: shrink scope to finish M0 through M5 quickly, and Hyper-V cannot even be verified on the dev host (Windows 11 Home).
 - Terminal transport: SSH PTY is the common primary for both backends. PowerShell Direct is secondary for Hyper-V setup and one-shot commands. Serial (as a terminal), hvc and VNC are interface-reserved only.
-- **Kernel debug transport: serial named pipe is the recommended default (2026-09-11).** KDNET on this host was blocked by a pre-existing inbound Block rule for kd.exe that only an administrator can remove, and a named pipe needs no network, firewall or elevation. KDNET stays fully supported as `kd_transport: net` for hosts where the one-time admin step is fine (KD-11).
+- **Kernel debug transport: KDNET is the default, serial is the alternative (2026-09-11, revised the same day).** The first decision of the day made the serial pipe the default because KDNET on this host was blocked by a pre-existing inbound Block rule for kd.exe that only an administrator could remove. `kd_setup_host` now repairs those rules itself through one UAC prompt, so the owner set KDNET back as the default: it is faster and needs no vmx edit. Serial stays fully supported as `kd_transport: serial` for hosts where nobody can approve a prompt (KD-11). The code default must stay `net`: a `serial` default makes every entry without the field count as configured (`kd_configured`), so reboot and revert try to attach over a pipe that was never set up.
 - **Encrypted live snapshots go through suspend (2026-09-11).** vmrun refuses to create or delete a memory snapshot of a running encrypted VM even with the correct password, while every other operation works with `-vp`. `allow_suspend` on `snap_take` and `snap_delete` suspends, runs the operation, resumes and reattaches the debugger (SNAP-1, SNAP-4). The VMware UI can still snapshot in place if a human prefers that.
 - **Front doors: MCP + CLI + Python SDK (re-decided 2026-09-10).** Set to MCP-only in v0.3 and then reversed. Agents use MCP, humans and CI the CLI, tests and automation the SDK. The three definitions are generated from one place, the ToolRegistry (FACE-2). Reasoning in section 6.5.
 - **Process model: split out the `ntdrived` daemon from M0.** The MCP server, CLI and SDK are stateless clients. IPC is local HTTP + WebSocket, 127.0.0.1, token auth.

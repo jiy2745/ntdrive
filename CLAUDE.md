@@ -10,9 +10,13 @@ Read `AGENTS.md` and follow it.
 
 ## Claude Code specifics
 
-- `.mcp.json` registers the `ntdrive` MCP server (`uv run ntdrive-mcp`). Allow its tools with the
-  permission rule `mcp__ntdrive__*`. The wait tools long-poll, so the MCP tool-call timeout must
-  be above the daemon cap (600 s by default).
+- `.mcp.json` registers the `ntdrive` MCP server as the installed `ntdrive-mcp` command, with no
+  path. Install it once with `uv tool install -e .` (`scripts/setup-host.ps1` does this), which
+  makes `ntdrive`, `ntdrive-mcp` and `ntdrived` run this checkout's code from any directory.
+  Allow its tools with the permission rule `mcp__ntdrive__*`. The wait tools long-poll, so the
+  MCP tool-call timeout must be above the daemon cap (600 s by default). After a dependency
+  change run `uv tool install -e . --reinstall` with Claude Code closed, because its MCP server
+  holds `ntdrive-mcp.exe`. While it is open, run the checks with `uv run --no-sync`.
 - After editing daemon-side code run `uv run ntdrive daemon restart`, or the running daemon keeps
   serving the old code.
 - Before committing, run `uv run ruff format`, `uv run ruff check`, `uv run mypy` and

@@ -130,7 +130,7 @@ async def test_websocket_streams_session(
 def test_cli_builds_commands_for_every_tool() -> None:
     cli = cli_main.build_cli(load_builtin_tools())
     groups = {name: cmd for name, cmd in cli.commands.items()}
-    assert set(groups) == {"vm", "snap", "kd", "term", "con", "file", "sys", "daemon"}
+    assert set(groups) == {"vm", "snap", "kd", "term", "con", "file", "sys", "daemon", "setup"}
     kd = groups["kd"]
     assert isinstance(kd, cli_main.click.Group)
     assert {"exec", "attach", "wait-event", "setup-guest"} <= set(kd.commands)

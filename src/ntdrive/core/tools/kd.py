@@ -13,6 +13,7 @@ from ntdrive.core.registry import tool
 from ntdrive.core.service import NtDriveService
 from ntdrive.core.tools.common import VmParams
 from ntdrive.errors import BACKEND_ERROR, INVALID_ARGS, NtDriveError
+from ntdrive.kd.firewall import MANUAL_FIREWALL_HINT
 from ntdrive.kd.session import generate_kdnet_key
 
 # A KDNET key is four base36 words joined by dots. Anything else must never reach the bcdedit
@@ -93,13 +94,24 @@ class LogTailParams(VmParams):
     bytes: int = Field(default=16384, ge=1, description="How many bytes from the end")
 
 
+class SetupHostParams(VmParams):
+    """kd_setup_host."""
+
+    fix_firewall: bool = Field(
+        default=True,
+        description="net: when the host firewall blocks kd.exe, repair it through one UAC prompt",
+    )
+    timeout: float = Field(default=120, ge=1, description="net: seconds to wait for the UAC prompt")
+
+
 @tool(
     "kd_setup_host",
     "Prepare the host side of the kd transport: serial adds the named-pipe COM port to the vmx "
-    "(VM must be off), net reports the one-time firewall step.",
-    VmParams,
+    "(VM must be off), net checks the host firewall for kd.exe and repairs it through one UAC "
+    "prompt.",
+    SetupHostParams,
 )
-async def kd_setup_host(service: NtDriveService, p: VmParams) -> dict[str, Any]:
+async def kd_setup_host(service: NtDriveService, p: SetupHostParams) -> dict[str, Any]:
     """Host-side transport setup. Nothing here touches the guest."""
     cfg = service.vm_cfg(p.vm)
     if cfg.kd_transport == "serial":
@@ -113,15 +125,39 @@ async def kd_setup_host(service: NtDriveService, p: VmParams) -> dict[str, Any]:
             "changed": changed,
             "next": "vm_start, then kd_setup_guest (bcdedit serial), then reboot the guest",
         }
+    # net: kd.exe must be allowed to receive UDP. Reading the rules is free, changing them
+    # takes one UAC prompt that a person at the desktop has to approve.
+    status = await service.kdnet_firewall()
+    changed = False
+    if not status.ok and p.fix_firewall:
+        if not status.checked:
+            raise NtDriveError(BACKEND_ERROR, status.problem(), MANUAL_FIREWALL_HINT)
+        status = await service.fix_kdnet_firewall(p.timeout)
+        changed = True
+        if not status.ok:
+            raise NtDriveError(
+                BACKEND_ERROR,
+                "the host firewall still blocks KDNET after the repair: " + status.problem(),
+                MANUAL_FIREWALL_HINT,
+            )
+    service.state.record_event(p.vm, "kd_setup_host", transport="net", changed=changed)
+    if status.ok:
+        next_step = "kd_setup_guest (bcdedit net), then reboot the guest, then kd_attach"
+    elif not status.checked:
+        # A repair needs a readable rule set first, so only the manual route applies.
+        next_step = MANUAL_FIREWALL_HINT
+    else:
+        next_step = (
+            "kd_setup_host with fix_firewall=true repairs the firewall through one UAC prompt, "
+            "or " + MANUAL_FIREWALL_HINT
+        )
     return {
         "vm": p.vm,
         "transport": "net",
-        "changed": False,
+        "changed": changed,
         "kdnet_hostip": cfg.kdnet_hostip,
-        "next": (
-            "run scripts/setup-host.ps1 as Administrator once so the firewall lets kd.exe "
-            "receive UDP, then kd_setup_guest"
-        ),
+        "firewall": status.as_dict(),
+        "next": next_step,
     }
 
 

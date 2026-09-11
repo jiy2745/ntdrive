@@ -50,6 +50,8 @@ Requirements live in `PRD.md`. Setup is in `README.md`.
 
 ```powershell
 uv sync                                  # install everything, including dev tools
+uv tool install -e .                     # ntdrive, ntdrive-mcp, ntdrived on PATH, running this checkout
+uv tool install -e . --reinstall         # after a dependency change, with Claude Code closed
 uv run pytest -q                         # unit tests with fakes for vmrun, kd.exe and SSH
 uv run ruff format src tests scripts     # the only formatter
 uv run ruff check src tests scripts      # the only linter
@@ -84,7 +86,9 @@ GitHub means one of those failed on a clean machine.
   `SshPtyTransport` (every paramiko failure becomes `NtDriveError`), key tokens like `{ctrl+c}`.
 - `src/ntdrive/daemon/`: aiohttp app, `daemon.json` lifecycle, `DaemonClient`, CoView page.
 - `src/ntdrive/mcp/server.py`, `src/ntdrive/cli/main.py`, `src/ntdrive/sdk/__init__.py`:
-  generated front doors.
+  generated front doors. Three CLI commands are hand-written because they are not daemon tools:
+  `term attach` and the `daemon` group in `main.py`, and `ntdrive setup` in `cli/setup.py`,
+  which writes `vms.yaml`.
 - `tests/conftest.py`: `FakeVmrun`, `FakeTransport`, `FakeKdProcess` and the `service` fixture.
   Live testing against a real VM is manual and described in `README.md`.
 
@@ -103,9 +107,12 @@ GitHub means one of those failed on a clean machine.
 - Right after a suspend `vmrun` may briefly report the vmx as unreadable, and a delete that worked
   can then report "does not exist". The suspend path checks the snapshot list, not the op result.
 - KDNET needs an inbound firewall allow for `kd.exe`, and Windows often has a leftover Block rule
-  that wins. The serial pipe transport avoids all of that and is the default recommendation.
+  that wins. `kd_setup_host` (net) reads the rules without privilege and repairs them through one
+  UAC prompt (`ntdrive.kd.firewall`). KDNET is the default. The serial pipe transport avoids
+  all of that for hosts where nobody can approve a prompt.
 - Win32-OpenSSH resolves `C:/x` relative to the home directory over SFTP. Paths must be `/C:/x`.
-- `Add-WindowsCapability` for OpenSSH fails on some Insider builds. The zip install works.
+- `Add-WindowsCapability` for OpenSSH fails on Insider builds (no Feature-on-Demand package for
+  them). The Win32-OpenSSH zip works, and `scripts/setup-guest.ps1` falls back to it on its own.
 - PSReadLine redraws the input line on every keystroke and floods terminal reads. The terminal
   unloads it at session start.
 - The daemon runs detached, without a console. Any child started without `CREATE_NO_WINDOW`
@@ -113,3 +120,14 @@ GitHub means one of those failed on a clean machine.
   kd.exe keeps a console of its own (CREATE_NO_WINDOW gives it one, just without a window)
   because break-in attaches to that console to send CTRL_BREAK. `tests/test_kd.py` checks that
   delivery from a detached parent, so keep it green when touching `spawn_kd`.
+- `vms.yaml` used to be looked up in the working directory too, so the daemon picked up whatever
+  checkout the first client ran from. The config now lives only in `%LOCALAPPDATA%\ntdrive` (or
+  `NTDRIVE_CONFIG`, or `--config`), clients resolve it and pass `--config`, and `ensure_daemon`
+  restarts a config-less daemon once a config exists.
+- `VmConfig.kd_transport` defaults to `net`, and every document says so. The default was flipped
+  to serial for a few hours on 2026-09-11 and flipped back: a serial default makes every entry
+  without the field count as configured (`kd_configured`), so reboot and revert tried to attach
+  over a pipe that was never set up.
+- `uv run` (when pyproject changed) and `uv tool install` rewrite `ntdrive-mcp.exe`, which fails
+  with os error 32 while Claude Code has the MCP server open. Close Claude Code for those, or
+  run the checks with `uv run --no-sync`.

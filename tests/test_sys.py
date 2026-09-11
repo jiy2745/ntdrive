@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -44,7 +45,12 @@ async def test_health_skips_guest_probe_while_vm_is_off(
         "skipped": "vm_not_running",
     }
     assert vm["serial_pipe"] is None
-    assert vm["kdnet_port"] == {"port": 50000, "free": True, "held_by_ntdrive": False}
+    assert vm["kdnet_port"] == {
+        "port": 50000,
+        "free": True,
+        "held_by_ntdrive": False,
+        "firewall_ok": True,
+    }
     assert vm["issues"] == []
     assert _calls(fake_vmrun, "getGuestIPAddress") == 0
 
@@ -125,7 +131,12 @@ async def test_health_reports_a_kdnet_port_conflict_unless_ntdrive_holds_it(
 ) -> None:
     monkeypatch.setattr(sys_tools, "_udp_port_free", lambda port: False)
     vm = await _vm(service)
-    assert vm["kdnet_port"] == {"port": 50000, "free": False, "held_by_ntdrive": False}
+    assert vm["kdnet_port"] == {
+        "port": 50000,
+        "free": False,
+        "held_by_ntdrive": False,
+        "firewall_ok": True,
+    }
     assert any("UDP port 50000" in issue for issue in vm["issues"])
 
     await service.call("vm_start", {"vm": "win11-dev"})
@@ -133,3 +144,44 @@ async def test_health_reports_a_kdnet_port_conflict_unless_ntdrive_holds_it(
     vm = await _vm(service)
     assert vm["kdnet_port"]["held_by_ntdrive"] is True
     assert not any("UDP port" in issue for issue in vm["issues"])
+
+
+async def test_health_names_the_fix_for_common_vmx_and_secret_mistakes(
+    service: NtDriveService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys_tools, "_udp_port_free", lambda port: True)
+    monkeypatch.delenv("NTDRIVE_TEST_PW", raising=False)
+    monkeypatch.setattr("ntdrive.config._user_environment", lambda name: "")
+    cfg = service.config.vms["win11-dev"]
+    Path(cfg.vmx).write_text(
+        'displayName = "win11-dev"\n'
+        'uefi.secureBoot.enabled = "TRUE"\n'
+        'ethernet0.virtualDev = "vmxnet3"\n'
+        'encryption.keySafe = "vmware:key/list/(pair/...)"\n'
+    )
+    cfg.guest.password = ""
+    cfg.guest.password_env = "NTDRIVE_TEST_PW"
+    cfg.encryption_password_env = "NTDRIVE_TEST_PW"
+    issues = (await _vm(service))["issues"]
+    assert any("Secure Boot is on" in i for i in issues)
+    assert any("guest NIC is vmxnet3" in i for i in issues)
+    # The same variable backs both passwords, so it is reported once, with the fix.
+    assert [i for i in issues if "NTDRIVE_TEST_PW" in i] == [
+        "environment variable NTDRIVE_TEST_PW is empty (set it at User scope: ntdrive reads it "
+        "from the registry at once, no new terminal needed)"
+    ]
+    assert not any("names no encryption password" in i for i in issues)
+
+    cfg.encryption_password_env = ""
+    monkeypatch.setenv("NTDRIVE_TEST_PW", "pw")
+    issues = (await _vm(service))["issues"]
+    assert any("encrypted" in i and "encryption_password_env" in i for i in issues)
+    assert not any("NTDRIVE_TEST_PW" in i for i in issues)
+
+    cfg.kd_transport = "serial"
+    Path(cfg.vmx).write_text('displayName = "win11-dev"\n')
+    cfg.guest.user = ""
+    issues = (await _vm(service))["issues"]
+    assert any("guest.user missing" in i for i in issues)
+    assert any("serial pipe not in the vmx" in i for i in issues)
+    assert not any("Secure Boot" in i or "NIC" in i or "encrypted" in i for i in issues)

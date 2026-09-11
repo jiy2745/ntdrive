@@ -1,8 +1,7 @@
 {
   "mcpServers": {
     "ntdrive": {
-      "command": "uv",
-      "args": ["run", "--directory", ".", "ntdrive-mcp"]
+      "command": "ntdrive-mcp"
     }
   }
 }

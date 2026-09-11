@@ -5,6 +5,18 @@ description = "Daemon plus MCP, CLI and SDK front doors that let an agent drive 
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
+keywords = ["mcp", "vmware", "kernel-debugging", "windbg", "kdnet", "windows"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Emulators",
+]
 dependencies = [
     "pydantic>=2.7",
     "pyyaml>=6.0",
@@ -16,6 +28,11 @@ dependencies = [
     "mcp>=1.2,<2",
     "psutil>=6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jiy2745/ntdrive"
+Repository = "https://github.com/jiy2745/ntdrive"
+Issues = "https://github.com/jiy2745/ntdrive/issues"
 
 [project.scripts]
 ntdrived = "ntdrive.daemon.app:main"
