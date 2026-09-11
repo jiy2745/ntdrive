@@ -88,24 +88,31 @@ clone: `uv tool install git+https://github.com/jiy2745/ntdrive`, then `ntdrive s
 **2. Guest.** Copy `scripts\setup-guest.cmd` and `scripts\setup-guest.ps1` into the guest (drag and
 drop works once VMware Tools are in) and run the `.cmd` from any shell or by double click. It asks
 for administrator rights itself (one UAC click), installs OpenSSH Server with PowerShell as the
-default shell and opens port 22. On Insider builds, where `Add-WindowsCapability` has no package,
-it falls back to the Win32-OpenSSH zip (`-OpenSshZip <file>` for a guest without internet).
-Running it again is safe.
+default shell, opens port 22 and turns on KDNET (the host IP comes from the NAT gateway, the key
+is generated in the guest and never needs copying). On Insider builds, where
+`Add-WindowsCapability` has no package, it falls back to the Win32-OpenSSH zip (`-OpenSshZip
+<file>` for a guest without internet). Running it again is safe. Reboot the guest when it says so.
+
+Several VMs: run `setup-host.cmd` again (or `ntdrive setup`) for each VM and `setup-guest.cmd` in
+each guest. Every guest picks its own KDNET port from its machine id, and the host moves a guest
+whose port collides with another VM's.
 
 **3. Connect.** KDNET is the default transport:
 
 ```powershell
-ntdrive kd setup-guest win11    # over SSH: generates the KDNET key, runs bcdedit /dbgsettings net
-ntdrive vm reboot win11 --mode soft --confirm
-ntdrive kd attach win11         # waiting until the guest boots with the debugger on
+ntdrive kd attach win11         # first time: reads the KDNET key the guest script set, over SSH
 ntdrive kd break win11          # a kd> prompt means the target is connected
 ```
+
+That is the whole setup: `setup-host.cmd` on the host, `setup-guest.cmd` in each guest, a reboot
+of the guest, then `kd attach`. On a guest set up by hand, `kd setup-guest` writes the KDNET
+settings itself and asks for a soft reboot (`ntdrive vm reboot win11 --mode soft --confirm`).
 
 `sys health` shows the firewall state, and `scripts\setup-host.cmd -FirewallOnly` from an
 Administrator shell is the manual repair. `kd_transport: serial` (a VMware named pipe: no firewall,
 no prompt, a little slower) is the alternative for a host where nobody can approve a UAC prompt:
-`ntdrive setup --transport serial`, then `ntdrive kd setup-host win11` with the VM off, then the
-same commands.
+`ntdrive setup --transport serial`, `setup-guest.cmd -Serial` in the guest, then
+`ntdrive kd setup-host win11` with the VM off, then the same commands.
 
 **4. Claude Code.** A clone carries `.mcp.json`. Elsewhere register the installed command, and in
 either case allow its tools with the permission rule `mcp__ntdrive__*` and set the MCP tool-call

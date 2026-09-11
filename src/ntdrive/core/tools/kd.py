@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import re
 from typing import Any
 
 from pydantic import Field
 
-from ntdrive.config import save_kdnet_settings
+from ntdrive.config import VmConfig, save_kdnet_settings
 from ntdrive.core.registry import tool
 from ntdrive.core.service import NtDriveService
 from ntdrive.core.tools.common import VmParams
@@ -161,79 +162,164 @@ async def kd_setup_host(service: NtDriveService, p: SetupHostParams) -> dict[str
     }
 
 
-@tool(
-    "kd_setup_guest",
-    "Enable kernel debugging in the guest with bcdedit over SSH (serial or KDNET per "
-    "kd_transport) and store the KDNET port and key in vms.yaml.",
-    SetupParams,
-)
-async def kd_setup_guest(service: NtDriveService, p: SetupParams) -> dict[str, Any]:
-    """Configure the target for kernel debugging. Needs SSH to the guest, then a reboot.
+def _parse_bcd(text: str) -> dict[str, str]:
+    """Bcdedit output as {name: value} with lower-cased names. Localized trailers are skipped."""
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        m = re.match(r"^\s*([A-Za-z]+)\s{2,}(\S.*?)\s*$", line)
+        if m:
+            values[m.group(1).lower()] = m.group(2)
+    return values
 
-    Uses the VM's kd_transport: `serial` writes a serial debug setting (no host firewall or admin
-    needed) and `net` writes KDNET with a host IP, port and key.
-    """
-    cfg = service.vm_cfg(p.vm)
+
+async def _configure_guest(
+    service: NtDriveService, cfg: VmConfig, port_override: int | None, key_override: str | None
+) -> dict[str, Any]:
+    """The work of kd_setup_guest. kd_attach runs it too when no KDNET key is saved yet."""
     serial = cfg.kd_transport == "serial"
     if not serial and not cfg.kdnet_hostip:
         raise NtDriveError(
             INVALID_ARGS,
-            f"vms.yaml has no kdnet_hostip for {p.vm}",
+            f"vms.yaml has no kdnet_hostip for {cfg.name}",
             "set it to the IPv4 of the host's VMnet8 adapter, or use kd_transport: serial",
         )
-    service.ensure_not_frozen(p.vm)
-    await service.ensure_running(cfg)
-    port = p.port or cfg.kdnet.port
-    key = "" if serial else _check_key(p.key or cfg.kdnet.key or generate_kdnet_key())
     if not serial:
         _check_hostip(cfg.kdnet_hostip)
+    service.ensure_not_frozen(cfg.name)
+    await service.ensure_running(cfg)
     transport = await service.transport(cfg)
     if not hasattr(transport, "exec_once"):
         raise NtDriveError(BACKEND_ERROR, "the transport cannot run commands")
+
+    # The KDNET key is a secret: it stays out of returns, hints and the audit log. The list grows
+    # as keys become known (the guest's, then the one written).
+    secrets: list[str] = []
+
+    def redact(text: str) -> str:
+        for secret in secrets:
+            text = text.replace(secret, "***")
+        return text
+
+    outputs: list[dict[str, Any]] = []
+
+    async def run(command: str) -> str:
+        code, out = await transport.exec_once(command, timeout=60)
+        outputs.append({"cmd": redact(command), "exit_code": code, "output": out.strip()[-2000:]})
+        if code != 0:
+            raise NtDriveError(
+                BACKEND_ERROR,
+                f"'{redact(command)}' failed in the guest: {redact(out.strip()[:300])}",
+                "the SSH user needs administrator rights and Secure Boot must be off",
+                outputs=[{**entry, "output": redact(entry["output"])} for entry in outputs],
+            )
+        return str(out)
+
+    # Ports the other net VMs of this host use: kd.exe listens on the host, one port per target.
+    taken = {
+        other.kdnet.port
+        for name, other in service.config.vms.items()
+        if name != cfg.name and other.kd_transport == "net"
+    }
+    adopted = False
+    debug_on = False
+    guest_key = ""
+    guest_port: int | None = None
+    note = ""
+    if not serial:
+        settings = _parse_bcd(await run("bcdedit /dbgsettings"))
+        current = _parse_bcd(await run("bcdedit /enum {current}"))
+        debug_on = current.get("debug", "").lower() in {"yes", "true"}
+        guest_key = settings.get("key", "")
+        if not re.match(KDNET_KEY, guest_key):
+            guest_key = ""
+        if guest_key:
+            secrets.append(guest_key)
+        with contextlib.suppress(ValueError):
+            guest_port = int(settings.get("port", ""))
+        to_this_host = (
+            settings.get("debugtype", "").upper() == "NET"
+            and settings.get("hostip", "") == cfg.kdnet_hostip
+            and bool(guest_key)
+            and guest_port is not None
+        )
+        adopted = (
+            to_this_host
+            and guest_port not in taken
+            and key_override is None
+            and port_override is None
+        )
+        if to_this_host and guest_port in taken and port_override is None:
+            note = (
+                f"the guest used port {guest_port}, which another VM of this host already has, "
+                "so a free port was written instead"
+            )
+    if serial:
+        port, key = cfg.kdnet.port, ""
+    elif adopted and guest_port is not None:
+        port, key = guest_port, guest_key
+    else:
+        port = port_override or cfg.kdnet.port
+        while port_override is None and port in taken:
+            port += 1
+        key = _check_key(key_override or cfg.kdnet.key or guest_key or generate_kdnet_key())
+        secrets.append(key)
+
     if serial:
         commands = [
             "bcdedit /debug on",
             "bcdedit /dbgsettings serial debugport:1 baudrate:115200",
             "bcdedit /dbgsettings",
         ]
+    elif adopted:
+        commands = [] if debug_on else ["bcdedit /debug on"]
     else:
         commands = [
             "bcdedit /debug on",
             f"bcdedit /dbgsettings net hostip:{cfg.kdnet_hostip} port:{port} key:{key}",
             "bcdedit /dbgsettings",
         ]
-
-    def redact(text: str) -> str:
-        # The KDNET key is a secret. Keep it out of returns, hints and the audit log.
-        return text.replace(key, "***") if key else text
-
-    outputs: list[dict[str, Any]] = []
     for command in commands:
-        code, out = await transport.exec_once(command, timeout=60)
-        outputs.append(
-            {"cmd": redact(command), "exit_code": code, "output": redact(out.strip()[-2000:])}
-        )
-        if code != 0:
-            raise NtDriveError(
-                BACKEND_ERROR,
-                f"'{redact(command)}' failed in the guest: {redact(out.strip()[:300])}",
-                "the SSH user needs administrator rights and Secure Boot must be off",
-                outputs=outputs,
-            )
+        await run(command)
+    for entry in outputs:
+        entry["output"] = redact(entry["output"])
+
     if not serial:
-        save_kdnet_settings(service.config, p.vm, port, key)
-        session = service.kd_sessions.get(p.vm)
+        save_kdnet_settings(service.config, cfg.name, port, key)
+        session = service.kd_sessions.get(cfg.name)
         if session is not None:
             session.port, session.key = port, key
-    service.state.record_event(p.vm, "kd_setup_guest", transport=cfg.kd_transport)
+    service.state.record_event(
+        cfg.name, "kd_setup_guest", transport=cfg.kd_transport, adopted=adopted
+    )
     return {
-        "vm": p.vm,
+        "vm": cfg.name,
         "transport": cfg.kd_transport,
         "port": None if serial else port,
         "key_saved": not serial,
-        "needs_reboot": True,
+        "adopted": adopted,
+        "needs_reboot": serial or not adopted or not debug_on,
+        "note": note or None,
         "steps": outputs,
     }
+
+
+@tool(
+    "kd_setup_guest",
+    "Enable kernel debugging in the guest with bcdedit over SSH (serial or KDNET per "
+    "kd_transport) and store the KDNET port and key in vms.yaml. A guest that already debugs to "
+    "this host (scripts/setup-guest.ps1 sets that up) is read back instead of rewritten.",
+    SetupParams,
+)
+async def kd_setup_guest(service: NtDriveService, p: SetupParams) -> dict[str, Any]:
+    """Configure the target for kernel debugging over SSH.
+
+    `serial` writes the serial debug setting and needs a reboot. `net` first reads what the guest
+    has: when it already debugs to this host's IP (the guest script sets that up), the port and
+    the key are read back and saved (`adopted`), and no reboot is needed if debugging is already
+    on. Otherwise the KDNET settings are written with the host IP, a port and a key. kd_attach
+    runs the same step itself when no key is saved yet.
+    """
+    return await _configure_guest(service, service.vm_cfg(p.vm), p.port, p.key)
 
 
 @tool(
@@ -247,11 +333,17 @@ async def kd_attach(service: NtDriveService, p: AttachParams) -> dict[str, Any]:
     cfg = service.vm_cfg(p.vm)
     key = p.key or cfg.kdnet.key
     if cfg.kd_transport == "net" and not key:
-        raise NtDriveError(
-            INVALID_ARGS,
-            f"no KDNET key for {p.vm}",
-            "run kd_setup_guest first or put kdnet.key into vms.yaml",
-        )
+        # A guest that ran scripts/setup-guest.ps1 already debugs to this host with a key of its
+        # own. Read it back over SSH, the kd_setup_guest step, instead of failing.
+        configured = await _configure_guest(service, cfg, None, None)
+        if configured["needs_reboot"]:
+            raise NtDriveError(
+                BACKEND_ERROR,
+                f"KDNET was just configured in the guest {p.vm} and needs a reboot",
+                "vm_reboot mode=soft confirm=true, then kd_attach again",
+                setup=configured,
+            )
+        key = cfg.kdnet.key
     session = service.kd_session(cfg, port=p.port, key=key)
     if p.symbol_path:
         session.symbol_path = p.symbol_path

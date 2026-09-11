@@ -6,9 +6,12 @@
 
 .DESCRIPTION
   Installs and starts OpenSSH Server with PowerShell as the default shell, and optionally enables
-  kernel debugging with bcdedit: -HostIp for KDNET (the ntdrive default) or -Serial for the serial
-  named-pipe transport. Without either, kd_setup_guest does that part over SSH later. Reboot the
-  guest afterwards when debugging was configured.
+  kernel debugging with bcdedit. By default that is KDNET: the host IP is inferred from the NAT
+  gateway (x.x.x.2 means the host is x.x.x.1, -HostIp overrides), the key is generated in the
+  guest and never needs copying, because the host reads it back over SSH on the first kd_attach.
+  The port comes from the machine id (50000-50039), so several guests of one host differ.
+  -Serial sets up the serial named-pipe transport instead, -OpenSshOnly skips debugging. Reboot
+  the guest afterwards.
 
   OpenSSH comes from the Windows capability (Feature on Demand) when Windows can install it. When
   that fails, which is normal on Insider builds because Windows Update publishes no capability
@@ -23,7 +26,7 @@
 
 .EXAMPLE
   setup-guest.cmd
-  The usual first step: OpenSSH only. kd_setup_guest configures the debugger over SSH afterwards.
+  The usual run: OpenSSH plus KDNET. Reboot, then ntdrive kd attach <vm> on the host reads the key.
   A plain .\setup-guest.ps1 is refused by the default execution policy, the .cmd is not.
   powershell -ExecutionPolicy Bypass -File setup-guest.ps1 is the same thing spelled out.
 
@@ -39,6 +42,7 @@
 [CmdletBinding()]
 param(
   [switch]$Serial,
+  [switch]$OpenSshOnly,
   [string]$HostIp,
   [int]$Port = 50000,
   [string]$Key,
@@ -162,24 +166,50 @@ if (-not (Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction Silentl
 $sshdPath = (Get-CimInstance Win32_Service -Filter "Name='sshd'").PathName
 Write-Host "  sshd running ($sshdPath), default shell = powershell"
 
+function Invoke-Bcdedit([string[]]$Arguments) {
+  # Output stays hidden: for KDNET it carries the key, which the host reads over SSH later.
+  $out = & bcdedit.exe @Arguments 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    $shown = ($Arguments -join ' ') -replace 'key:\S+', 'key:***'
+    throw "bcdedit $shown failed: $out"
+  }
+}
+
+$kdSummary = ""
 if ($Serial) {
   Write-Host "== kernel debugging over the serial pipe (COM1)"
   Assert-SecureBootOff
-  bcdedit /debug on | Out-Null
-  bcdedit /dbgsettings serial debugport:1 baudrate:115200
-  Write-Host "  reboot this guest, then kd_attach from the host"
-} elseif ($HostIp) {
-  Write-Host "== KDNET"
-  Assert-SecureBootOff
-  bcdedit /debug on | Out-Null
-  if ($Key) {
-    bcdedit /dbgsettings net hostip:$HostIp port:$Port key:$Key
-  } else {
-    bcdedit /dbgsettings net hostip:$HostIp port:$Port
+  Invoke-Bcdedit @("/debug", "on")
+  Invoke-Bcdedit @("/dbgsettings", "serial", "debugport:1", "baudrate:115200")
+  $kdSummary = "serial (COM1 pipe). Reboot this guest, then kd_attach from the host"
+} elseif (-not $OpenSshOnly) {
+  Write-Host "== KDNET (the ntdrive default)"
+  if (-not $HostIp) {
+    # VMware NAT: the guest's gateway is x.x.x.2 and the host's VMnet8 adapter is x.x.x.1.
+    $gateway = (Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
+      Sort-Object RouteMetric | Select-Object -First 1).NextHop
+    if ("$gateway" -match '^(\d+\.\d+\.\d+)\.\d+$') { $HostIp = "$($Matches[1]).1" }
   }
-  Write-Host "  copy the key above into vms.yaml (kdnet.key) and reboot this guest"
+  if (-not $HostIp) {
+    Write-Host "  no default gateway, so the host IP is unknown here. kd_setup_guest will set KDNET over SSH."
+  } else {
+    Assert-SecureBootOff
+    Invoke-Bcdedit @("/debug", "on")
+    if (-not $PSBoundParameters.ContainsKey("Port")) {
+      # Each guest picks its own port in 50000-50039 from its machine id, so several guests of
+      # one host rarely collide. The host moves a colliding guest when it reads the settings.
+      $guid = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Cryptography" -ErrorAction SilentlyContinue).MachineGuid
+      $sum = 0
+      foreach ($ch in [char[]]"$guid") { $sum = ($sum * 31 + [int]$ch) % 1000003 }
+      $Port = 50000 + ($sum % 40)
+    }
+    $net = @("/dbgsettings", "net", "hostip:$HostIp", "port:$Port")
+    if ($Key) { $net += "key:$Key" }
+    Invoke-Bcdedit $net
+    $kdSummary = "KDNET to host $HostIp port $Port. The key stays here, the host reads it on the first kd attach. Reboot this guest first"
+  }
 } else {
-  Write-Host "== kernel debugging skipped (no -Serial or -HostIp). kd_setup_guest can do it over SSH later."
+  Write-Host "== kernel debugging skipped (-OpenSshOnly). kd_setup_guest can do it over SSH later."
 }
 
 Write-Host "== for vms.yaml on the host"
@@ -191,4 +221,5 @@ $listening = [bool](Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorActio
 Write-Host "  guest.user: $user  (this account needs a password, SSH refuses empty ones)"
 Write-Host "  guest IPv4: $($ips -join ', ')  (ntdrive finds it through VMware Tools, this is for a manual ssh test)"
 Write-Host "  sshd listening on 22: $listening"
+if ($kdSummary) { Write-Host "  kernel debug: $kdSummary" }
 Write-Host "done"

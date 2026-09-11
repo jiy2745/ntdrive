@@ -138,4 +138,4 @@ try {
 }
 
 Write-Host "done. Next, in each guest: setup-guest.cmd (copy it with setup-guest.ps1, it asks for admin rights, add -Serial for"
-Write-Host "the serial transport), then on the host: ntdrive kd setup-guest <vm>, a soft reboot, ntdrive kd attach <vm>"
+Write-Host "the serial transport), reboot it, then on the host: ntdrive kd attach <vm> (reads the key the guest set)"

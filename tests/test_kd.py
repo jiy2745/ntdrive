@@ -240,8 +240,9 @@ async def test_kd_setup_guest_writes_config(service: NtDriveService, fake_transp
     await service.call("vm_start", {"vm": "win11-dev"})
     result = await service.call("kd_setup_guest", {"vm": "win11-dev", "port": 50005})
     assert result["needs_reboot"] and result["port"] == 50005
-    assert fake_transport.exec_log[0] == "bcdedit /debug on"
-    assert "hostip:192.168.126.1 port:50005 key:" in fake_transport.exec_log[1]
+    assert "bcdedit /debug on" in fake_transport.exec_log
+    assert any("hostip:192.168.126.1 port:50005 key:" in c for c in fake_transport.exec_log)
+    assert result["adopted"] is False
     assert service.config.vms["win11-dev"].kdnet.port == 50005
     key = service.config.vms["win11-dev"].kdnet.key
     assert key and "." in key
@@ -252,10 +253,98 @@ async def test_kd_setup_guest_writes_config(service: NtDriveService, fake_transp
     audit = (service.log_dir / "audit.jsonl").read_text()
     assert key not in audit
 
+    # A guest that already debugs to this host (setup-guest.ps1 did it): the port and key are
+    # read back and saved, nothing is rewritten, and no reboot is needed once debug is on.
+    fake_transport.exec_log.clear()
+    fake_transport.exec_responses["bcdedit /dbgsettings"] = (
+        "debugtype               NET\nhostip                  192.168.126.1\n"
+        "port                    50007\nkey                     ab12.cd34.ef56.7a8b\n"
+        "dhcp                    Yes\nThe operation completed successfully.\n"
+    )
+    fake_transport.exec_responses["bcdedit /enum"] = (
+        "Windows Boot Loader\n-------------------\nidentifier              {current}\n"
+        "debug                   Yes\n"
+    )
+    result = await service.call("kd_setup_guest", {"vm": "win11-dev"})
+    assert result["adopted"] is True and result["needs_reboot"] is False
+    assert result["port"] == 50007
+    assert service.config.vms["win11-dev"].kdnet.key == "ab12.cd34.ef56.7a8b"
+    assert not any("dbgsettings net" in c for c in fake_transport.exec_log)
+    assert "ab12.cd34.ef56.7a8b" not in str(result["steps"])
+    assert "ab12.cd34.ef56.7a8b" not in (service.log_dir / "audit.jsonl").read_text()
+
+    # Debug still off in the guest: adopted, but /debug on runs and a reboot is due.
+    fake_transport.exec_responses["bcdedit /enum"] = "debug                   No\n"
+    result = await service.call("kd_setup_guest", {"vm": "win11-dev"})
+    assert result["adopted"] is True and result["needs_reboot"] is True
+    assert fake_transport.exec_log[-1] == "bcdedit /debug on"
+
+    # Another host IP in the guest: the settings are rewritten for this host, reusing the key.
+    fake_transport.exec_responses["bcdedit /dbgsettings"] = (
+        "debugtype               NET\nhostip                  10.0.0.9\n"
+        "port                    50007\nkey                     ab12.cd34.ef56.7a8b\n"
+    )
+    result = await service.call("kd_setup_guest", {"vm": "win11-dev"})
+    assert result["adopted"] is False and result["needs_reboot"] is True
+    assert any("hostip:192.168.126.1 port:50007 key:***" in c["cmd"] for c in result["steps"])
+    # The guest's port is already used by another VM of this host: keep the guest's key,
+    # write the next free port, reboot needed.
+    from ntdrive.config import GuestConfig, KdnetConfig, VmConfig
+
+    service.config.vms["other"] = VmConfig(
+        name="other",
+        vmx=service.config.vms["win11-dev"].vmx,
+        kdnet_hostip="192.168.126.1",
+        guest=GuestConfig(user="u"),
+        kdnet=KdnetConfig(port=50007, key="9.9.9.9"),
+    )
+    fake_transport.exec_responses["bcdedit /dbgsettings"] = (
+        "debugtype               NET\nhostip                  192.168.126.1\n"
+        "port                    50007\nkey                     ab12.cd34.ef56.7a8b\n"
+    )
+    result = await service.call("kd_setup_guest", {"vm": "win11-dev"})
+    assert result["adopted"] is False and result["needs_reboot"] is True
+    assert result["port"] == 50008 and "50007" in result["note"]
+    assert any("port:50008 key:***" in c["cmd"] for c in result["steps"])
+    assert service.config.vms["win11-dev"].kdnet.key == "ab12.cd34.ef56.7a8b"
+    del service.config.vms["other"]
+    fake_transport.exec_responses.clear()
+
     # Serial: bcdedit serial settings, no key generated or saved.
     service.config.vms["win11-dev"].kd_transport = "serial"
     result = await service.call("kd_setup_guest", {"vm": "win11-dev"})
     assert result["transport"] == "serial" and result["port"] is None
     assert result["key_saved"] is False
     assert "serial debugport:1" in fake_transport.exec_log[-2]
-    assert service.config.vms["win11-dev"].kdnet.key == key  # untouched
+    assert service.config.vms["win11-dev"].kdnet.key == "ab12.cd34.ef56.7a8b"  # untouched
+
+
+async def test_kd_attach_reads_the_key_a_guest_script_set(
+    service: NtDriveService, fake_transport, kd_procs: list[FakeKdProcess]
+) -> None:  # type: ignore[no-untyped-def]
+    # setup-host.cmd wrote the entry without a key, setup-guest.cmd configured KDNET in the guest:
+    # the first attach reads the port and key back over SSH and saves them.
+    cfg = service.config.vms["win11-dev"]
+    cfg.kdnet.key = ""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_transport.exec_responses["bcdedit /dbgsettings"] = (
+        "debugtype               NET\nhostip                  192.168.126.1\n"
+        "port                    50011\nkey                     1a2b.3c4d.5e6f.7a8b\n"
+    )
+    fake_transport.exec_responses["bcdedit /enum"] = "debug                   Yes\n"
+    attached = await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    assert attached["state"] == "running"
+    assert cfg.kdnet.key == "1a2b.3c4d.5e6f.7a8b" and cfg.kdnet.port == 50011
+    assert any("port=50011,key=1a2b.3c4d.5e6f.7a8b" in arg for arg in kd_procs[-1].argv)
+    assert "1a2b.3c4d.5e6f.7a8b" not in (service.log_dir / "audit.jsonl").read_text()
+
+    # A guest that has nothing configured yet: the settings are written and a reboot is asked for
+    # instead of a bare "no key" error.
+    await service.call("kd_detach", {"vm": "win11-dev"})
+    cfg.kdnet.key = ""
+    fake_transport.exec_responses.clear()
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    assert "needs a reboot" in exc.value.message and "vm_reboot" in exc.value.hint
+    assert any("dbgsettings net hostip:192.168.126.1" in c for c in fake_transport.exec_log)
+    assert cfg.kdnet.key  # saved, so the attach after the reboot needs no SSH

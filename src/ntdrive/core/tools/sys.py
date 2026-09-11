@@ -107,7 +107,10 @@ def config_issues(cfg: VmConfig, backends: set[str]) -> list[str]:
         if not cfg.kdnet_hostip:
             issues.append("kdnet_hostip missing (IPv4 of the host's VMware Network Adapter VMnet8)")
         if not cfg.kdnet.key:
-            issues.append("kdnet key not set (run kd_setup_guest)")
+            issues.append(
+                "kdnet key not set (kd_attach reads it from a guest that ran setup-guest.ps1, "
+                "or run kd_setup_guest)"
+            )
         nic = settings.get("ethernet0.virtualdev", "")
         if nic and nic.lower() != "e1000e":
             issues.append(

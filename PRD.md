@@ -138,13 +138,13 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 
 | ID | Requirement | Priority |
 |---|---|---|
-| KD-1 | Debugger attach: spawn `kd.exe -k net:port=<n>,key=<k>` (KDNET) or `kd.exe -k com:pipe,port=\\.\pipe\<name>,baud=115200,resets=0,reconnect` (serial pipe), chosen by `kd_transport`, as a subprocess and collect stdout in real time. Detect the transition from waiting for the target (`waiting`) to connected (`running`). Over serial kd.exe announces the connection only on the first sync, so attach checks that the pipe exists and that kd.exe stays alive, then reports `running`. Same regardless of backend. | P0 |
+| KD-1 | Debugger attach: spawn `kd.exe -k net:port=<n>,key=<k>` (KDNET) or `kd.exe -k com:pipe,port=\\.\pipe\<name>,baud=115200,resets=0,reconnect` (serial pipe), chosen by `kd_transport`, as a subprocess and collect stdout in real time. Detect the transition from waiting for the target (`waiting`) to connected (`running`). Over serial kd.exe announces the connection only on the first sync, so attach checks that the pipe exists and that kd.exe stays alive, then reports `running`. Same regardless of backend. On `net` with no saved key, `kd_attach` first runs the `kd_setup_guest` step: it reads the guest's KDNET settings over SSH and saves the port and key it finds (`adopted`), or writes them and asks for a reboot. | P0 |
 | KD-2 | Command execution: send an arbitrary kd command (or a list) and return **only that command's output**, framed with `<cmd>; .echo <sentinel>`. Support a timeout and a max output size (truncation flagged). | P0 |
 | KD-3 | break / go. Break-in sends `CTRL_BREAK_EVENT` to the piped kd.exe (separate process group plus a hidden console). Fall back to DbgEng COM (`SetInterrupt`) if that fails. | P0 |
 | KD-4 | Wait for events: from `running`, wait until a prompt returns from a bugcheck, breakpoint, module load, and so on (with a timeout). Include the event kind and the preceding output in the result. | P0 |
 | KD-5 | State query: `detached / waiting / running / broken`, current port and key, connected target info, last event. | P0 |
 | KD-6 | Keep the full session log in a file (`-loga`), and let a tool read the last N KB. | P0 |
-| KD-7 | Automate guest debug setup (`kd_setup_guest`): over the terminal, apply `bcdedit /debug on` and, for `kd_transport: net`, `bcdedit /dbgsettings net hostip:<host virtual adapter IP> port:<n> key:<k>` (the server generates the key and saves it in `vms.yaml`), or, for `kd_transport: serial`, `bcdedit /dbgsettings serial debugport:1 baudrate:115200` (no key), then reboot. hostip is the VMnet8 host adapter for VMware, or the external/internal virtual switch vEthernet adapter IP for Hyper-V. | P0 |
+| KD-7 | Automate guest debug setup (`kd_setup_guest`): over the terminal, first read `bcdedit /dbgsettings`, and when the guest already debugs to this host's IP with a key (`scripts/setup-guest.ps1` configures KDNET by default, inferring the host IP from the NAT gateway) save that port and key without rewriting anything (`adopted`). Otherwise apply `bcdedit /debug on` and, for `kd_transport: net`, `bcdedit /dbgsettings net hostip:<host virtual adapter IP> port:<n> key:<k>` (the server generates the key and saves it in `vms.yaml`), or, for `kd_transport: serial`, `bcdedit /dbgsettings serial debugport:1 baudrate:115200` (no key), then reboot. hostip is the VMnet8 host adapter for VMware, or the external/internal virtual switch vEthernet adapter IP for Hyper-V. | P0 |
 | KD-8 | Symbol path: pass `_NT_SYMBOL_PATH` or the configured value with `-y`. Provide a default local cache directory. | P0 |
 | KD-9 | On detach, resume the target (`g`) and then stop the process. Force-kill option. | P0 |
 | KD-10 | Reconnect the debugger after snapshot revert or reboot, for both transports. The target looks for the debugger again early in boot, so restarting the host-side kd.exe reconnects. A live session is kept through a reboot and waited on. A serial session that does not announce the reconnection within the timeout is respawned so the reported state is a known one. Retry policy (count, interval) on failure. | P0 |
@@ -380,8 +380,8 @@ messages are written in English (ST-9).
 | Tool | Arguments | Returns |
 |---|---|---|
 | `kd_setup_host` | `vm`, `fix_firewall=true`, `timeout=120` (serial: VM must be off, edits the vmx. net: reads the host firewall rules for kd.exe and, when they block KDNET, removes the Block rules and adds an Allow rule through one UAC prompt. `fix_firewall=false` only reports) | `{transport, changed, serial_pipe?, firewall?, next}` |
-| `kd_setup_guest` | `vm, port?, key?` (needs SSH to the guest) | `{transport, port?, key_saved, needs_reboot:true, steps}` |
-| `kd_attach` | `vm, port?, key?, symbol_path?, wait_for_target=true, timeout=120` | `{state, transport, target_info?}` |
+| `kd_setup_guest` | `vm, port?, key?` (needs SSH to the guest) | `{transport, port?, key_saved, adopted, needs_reboot, steps}`. `adopted` means the guest already debugged to this host's IP (scripts/setup-guest.ps1 does that by default), so the port and key were read back over SSH instead of written, and `needs_reboot` is false when debugging was already on |
+| `kd_attach` | `vm, port?, key?, symbol_path?, wait_for_target=true, timeout=120` | `{state, transport, target_info?}`. On net with no saved key it runs the `kd_setup_guest` step first (reads the guest's settings over SSH, `adopted`) and fails with a reboot hint when settings had to be written |
 | `kd_detach` | `vm, force=false` | `{state}` |
 | `kd_break` | `vm, timeout=10` | `{state, output}` |
 | `kd_go` | `vm` | `{state}` |
@@ -520,8 +520,10 @@ tool JSON. Exit codes: 0 ok, 2 bad arguments, 3 `confirm_required`, 4 `guest_fro
 1. sys_health                          -> check binaries, config and backend capability
 2. vm_start win11-dev                  -> boot
 3. term_open win11-dev transport=auto  -> enter SSH (falls back to psdirect on Hyper-V if SSH is not up)
-4. kd_setup_guest win11-dev            -> apply bcdedit (serial or net), save the KDNET key if net
-5. vm_reboot win11-dev mode=soft       -> the guest boots with the debugger enabled
+4. kd_setup_guest win11-dev            -> optional on net: kd_attach does it when no key is saved.
+                                          Reads back the KDNET key the guest script set (adopted),
+                                          or applies bcdedit (serial or net) and saves the key
+5. vm_reboot win11-dev mode=soft       -> only when step 4 wrote settings (needs_reboot)
 6. kd_attach win11-dev                 -> serial: running at once, net: running once the target connects
 7. kd_break -> kd_exec "!process 0 0" -> kd_go
 8. snap_take win11-dev "base-kd"

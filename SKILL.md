@@ -55,16 +55,18 @@ in.
 KDNET is the default. `kd_setup_host` reads the host firewall rules for kd.exe and, when they
 block it, repairs them through one UAC prompt that a person at the desktop must approve (pass
 `fix_firewall=false` to only look, `sys_health` reports the same check as `kdnet_firewall`).
-`kd_setup_guest` generates and saves the KDNET key.
+When no KDNET key is saved yet, `kd_attach` first reads the port and key that
+scripts/setup-guest.ps1 configured in the guest and saves them. `kd_setup_guest` is the explicit
+form of that step (`adopted: true`), for a guest set up by hand (it then writes the settings,
+`needs_reboot: true`, so `vm_reboot mode=soft` next) or to change the port or key.
 
 ```
 sys_health                                 -> issues per VM, for example "host firewall blocks KDNET"
 kd_setup_host vm=win11-dev                 -> firewall checked, repaired after the UAC prompt
 vm_start vm=win11-dev
 term_open vm=win11-dev                     -> session_id (needs OpenSSH in the guest)
-kd_setup_guest vm=win11-dev                -> bcdedit /dbgsettings net, key saved, needs_reboot=true
-vm_reboot vm=win11-dev mode=soft confirm=true
-kd_attach vm=win11-dev                     -> waiting, then running once the guest boots with the debugger on
+kd_attach vm=win11-dev                     -> no key saved: reads the guest's KDNET settings over SSH
+                                              (adopted), then waiting, then running once the target connects
 kd_break vm=win11-dev                      -> broken, target_info filled in
 kd_exec vm=win11-dev cmd="!process 0 0"
 kd_go vm=win11-dev

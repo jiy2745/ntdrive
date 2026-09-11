@@ -170,6 +170,8 @@ class FakeTransport(TermTransport):
         self.channels: list[FakeChannel] = []
         self.files: dict[str, bytes] = {}
         self.exec_log: list[str] = []
+        # Canned exec_once output by command prefix, for tools that read the guest first.
+        self.exec_responses: dict[str, str] = {}
         self.closed = False
         self.responder: Any = None
         self.fail_files = False  # when True, SFTP-style file ops raise like a dead SSH link
@@ -226,6 +228,9 @@ class FakeTransport(TermTransport):
 
     async def exec_once(self, command: str, timeout: float = 60.0) -> tuple[int, str]:
         self.exec_log.append(command)
+        for prefix, out in self.exec_responses.items():
+            if command.startswith(prefix):
+                return 0, out
         return 0, "The operation completed successfully.\n"
 
 
