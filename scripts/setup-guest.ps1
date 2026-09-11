@@ -1,8 +1,9 @@
 <#
 .SYNOPSIS
   Prepare a Windows 10/11 guest for ntdrive. Run it inside the guest through setup-guest.cmd (any
-  shell or a double click, whatever the execution policy says): it asks for administrator rights
-  itself, one UAC click, and keeps everything in this one window.
+  shell or a double click, whatever the execution policy says). It asks for administrator rights
+  itself: a new window opens with those rights, does the work, shows the log and stays open until
+  you close it.
 
 .DESCRIPTION
   Creates a local administrator account for ntdrive (named ntdrive, -Account changes it, -NoAccount
@@ -32,28 +33,27 @@
   setup-guest.cmd
   The usual run: the ntdrive account, OpenSSH, KDNET. Then, on the host, ntdrive verify proves it.
   A plain .\setup-guest.ps1 is refused by the default execution policy, the .cmd is not.
-  powershell -ExecutionPolicy Bypass -File setup-guest.ps1 is the same thing spelled out.
 
 .EXAMPLE
   setup-guest.cmd -Serial
   Serial named-pipe transport instead of KDNET.
 
 .EXAMPLE
-  setup-guest.cmd -OpenSshZip D:\OpenSSH-Win64.zip
-  For a guest without internet access. Copy the zip in first.
+  setup-guest.cmd -NoAccount
+  Use your own Windows account for SSH instead of creating the ntdrive account.
 #>
 
 [CmdletBinding()]
 param(
   [string]$Account = "ntdrive",
   [switch]$NoAccount,
-  [string]$AccountSecretFile,
   [switch]$Serial,
   [switch]$OpenSshOnly,
   [string]$HostIp,
   [int]$Port = 50000,
   [string]$Key,
-  [string]$OpenSshZip = "https://github.com/PowerShell/Win32-OpenSSH/releases/latest/download/OpenSSH-Win64.zip"
+  [string]$OpenSshZip = "https://github.com/PowerShell/Win32-OpenSSH/releases/latest/download/OpenSSH-Win64.zip",
+  [switch]$Elevated
 )
 
 $ErrorActionPreference = "Stop"
@@ -113,58 +113,38 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]$identity
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   # Everything below needs administrator rights (a service, HKLM, a firewall rule, bcdedit).
-  # Relaunch elevated and hidden with the same arguments, and show its output here: one UAC
-  # click, one window.
+  # Relaunch elevated in a visible window that shows the whole log and stays open at the end
+  # (-Elevated makes it pause). One UAC click, and the window you read is the one doing the work.
   Info "needed for" "the OpenSSH service, the default shell (HKLM), the firewall rule and bcdedit"
-  $argText = ""
+  Info "opening an administrator window" "approve the UAC prompt. The setup runs and its log stays in that window"
+  $forward = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "-Elevated")
   foreach ($bound in $PSBoundParameters.GetEnumerator()) {
     if ($bound.Value -is [switch]) {
-      if ($bound.Value.IsPresent) { $argText += " -$($bound.Key)" }
+      if ($bound.Value.IsPresent) { $forward += "-$($bound.Key)" }
     } else {
-      $argText += " -$($bound.Key) '" + ([string]$bound.Value).Replace("'", "''") + "'"
+      $forward += @("-$($bound.Key)", "`"$($bound.Value)`"")
     }
   }
-  if ($Account -and -not $NoAccount -and -not $AccountSecretFile) {
-    # The hidden elevated instance has no console to ask in, so the password is taken here and
-    # handed over encrypted with DPAPI for this user (the elevated instance is the same user).
-    $secure = Read-AccountPassword $Account
-    $secretFile = Join-Path $env:TEMP ("ntdrive-account-" + [guid]::NewGuid().ToString("N") + ".dat")
-    Set-Content -LiteralPath $secretFile -Value (ConvertFrom-SecureString $secure) -Encoding ascii
-    $argText += " -AccountSecretFile '" + $secretFile.Replace("'", "''") + "'"
-  }
-  Info "approve the UAC prompt" "the work runs hidden and its output appears in this window"
-  $log = Join-Path $env:TEMP ("ntdrive-setup-guest-" + [guid]::NewGuid().ToString("N") + ".log")
-  $inner = "& '" + $PSCommandPath.Replace("'", "''") + "'" + $argText +
-    " *>&1 | ForEach-Object { Add-Content -LiteralPath '" + $log.Replace("'", "''") +
-    "' -Value ([string]`$_) -Encoding utf8 }; exit `$LASTEXITCODE"
-  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
   try {
-    $proc = Start-Process -FilePath "powershell.exe" -Verb RunAs -WindowStyle Hidden -PassThru `
-      -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encoded"
+    Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $forward | Out-Null
   } catch {
     Fail "administrator rights" "the UAC prompt was refused"
-    Fix "run setup-guest.cmd again and approve the prompt, or run setup-guest.ps1 from an Administrator PowerShell"
+    Fix "run setup-guest.cmd again and approve the prompt, or run it from an Administrator PowerShell"
     exit 1
   }
-  $shown = 0
-  do {
-    if (Test-Path -LiteralPath $log) {
-      $lines = @(Get-Content -LiteralPath $log -Encoding utf8)
-      while ($shown -lt $lines.Count) { Write-Host $lines[$shown]; $shown++ }
-    }
-    $exited = $proc.HasExited
-    if (-not $exited) { Start-Sleep -Milliseconds 400 }
-  } while (-not $exited)
-  if (Test-Path -LiteralPath $log) {
-    $lines = @(Get-Content -LiteralPath $log -Encoding utf8)
-    while ($shown -lt $lines.Count) { Write-Host $lines[$shown]; $shown++ }
-    Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
-  }
-  $code = 0
-  try { $code = [int]$proc.ExitCode } catch { $code = 0 }
-  exit $code
+  exit 0
 }
 Ok "elevated" $identity.Name
+
+# When this instance was relaunched with administrator rights, keep its window open at the end so
+# the log can be read. The launching window has already closed.
+function Complete([int]$Code) {
+  if ($Elevated) {
+    Write-Host ""
+    Read-Host "Press Enter to close this window" | Out-Null
+  }
+  exit $Code
+}
 
 # -- helpers -------------------------------------------------------------------------------------
 
@@ -258,12 +238,7 @@ try {
   if ($Account -and -not $NoAccount) {
     # A local administrator for ntdrive: SSH logs in with a Windows account and its password,
     # and a personal account may have no password or allow Windows Hello only.
-    if ($AccountSecretFile) {
-      $secure = ConvertTo-SecureString (Get-Content -LiteralPath $AccountSecretFile -Raw).Trim()
-      Remove-Item -LiteralPath $AccountSecretFile -Force -ErrorAction SilentlyContinue
-    } else {
-      $secure = Read-AccountPassword $Account
-    }
+    $secure = Read-AccountPassword $Account
     if (Get-LocalUser -Name $Account -ErrorAction SilentlyContinue) {
       Set-LocalUser -Name $Account -Password $secure -PasswordNeverExpires $true
       Ok "account" "$Account exists, password set"
@@ -359,10 +334,10 @@ try {
   }
   $steps += "on the host run ntdrive verify (or scripts\setup-host.cmd -Verify): it reads the KDNET key, reboots if needed and ends with ALL SET"
   NextSteps $steps
-  exit 0
+  Complete 0
 } catch {
   Fail "setup" $_.Exception.Message
   Fix "fix the cause above, then run setup-guest.cmd again (it skips what is already done)"
   Verdict "NOT READY" "this guest is not set up yet"
-  exit 1
+  Complete 1
 }
