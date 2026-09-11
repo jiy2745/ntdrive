@@ -189,3 +189,22 @@ def test_helpers() -> None:
     assert setup_mod.env_name("a.b", "VMPW") == "NTDRIVE_A_B_VMPW"
     assert setup_mod._next_kdnet_port({"a": {"kdnet": {"port": 50000}}, "b": None}) == 50001  # noqa: SLF001
     assert setup_mod._next_kdnet_port({"a": {"kdnet": {"port": "abc"}}}) == 50000  # noqa: SLF001
+
+
+def test_mask_shows_enough_to_recognize_a_password() -> None:
+    assert setup_mod.mask("") == "(empty)"
+    assert setup_mod.mask("ab") == "a* (2 chars)"
+    assert setup_mod.mask("abcd") == "ab*d (4 chars)"
+    assert setup_mod.mask("hunter2!") == "hu*****! (8 chars)"
+
+
+def test_setup_explains_the_passwords_before_asking(env: dict[str, Any]) -> None:
+    result = _run(env, ["--name", "dev", "--user", "u", "--no-restart"], "1\npw12\npw12\n\n")
+    assert result.exit_code == 0, result.output
+    assert "INFO  guest password: what you type at the guest's lock screen" in result.output
+    assert "INFO  VM encryption password: the one VMware asked for" in result.output
+    assert "INFO  entered: pw*2 (4 chars)" in result.output and "pw12" not in result.output
+    assert (
+        "== 3/3 Write and check" in result.output
+        and "DONE: dev is configured on the host" in result.output
+    )

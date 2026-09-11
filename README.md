@@ -79,8 +79,8 @@ scripts\setup-host.cmd
 
 It runs `uv sync`, puts the `ntdrive`, `ntdrive-mcp` and `ntdrived` commands on your PATH (an
 editable `uv tool install`, so they follow the clone), then for each VM you pick from the VMware
-library asks for the guest account and passwords (hidden, stored as User environment variables,
-never in a file), restarts the daemon, repairs the host firewall for KDNET through one UAC prompt
+library asks for the guest account and passwords (masked while you type, echoed partly masked so a typo shows, stored as User
+environment variables, never in a file), restarts the daemon, repairs the host firewall for KDNET through one UAC prompt
 and ends with `sys health`. Run it again to add a VM, or run `ntdrive setup` on its own. The config
 lands in `%LOCALAPPDATA%\ntdrive\vms.yaml`, and `vms.example.yaml` documents every field. Without a
 clone: `uv tool install git+https://github.com/jiy2745/ntdrive`, then `ntdrive setup`.

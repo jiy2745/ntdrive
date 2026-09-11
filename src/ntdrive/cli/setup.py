@@ -21,10 +21,12 @@ from typing import Any
 import click
 import psutil
 
+from ntdrive.cli import log
 from ntdrive.config import (
     find_config_path,
     load_config,
     read_raw_config,
+    secret_from_env,
     state_dir,
     write_raw_config,
 )
@@ -156,6 +158,81 @@ def _next_kdnet_port(vms: dict[str, Any]) -> int:
     return port
 
 
+# -- passwords: masked while typing, echoed partly masked so a typo is visible -------------------
+
+
+def mask(secret: str) -> str:
+    """Enough of a secret to recognize it: the first two and the last character, stars between."""
+    n = len(secret)
+    if n == 0:
+        return "(empty)"
+    if n <= 3:
+        return secret[:1] + "*" * (n - 1) + f" ({n} chars)"
+    return secret[:2] + "*" * (n - 3) + secret[-1:] + f" ({n} chars)"
+
+
+def _read_masked(label: str) -> str:
+    """Read one line on a Windows console, showing * per character. Backspace works."""
+    import msvcrt
+
+    click.echo(f"{label}: ", nl=False)
+    chars: list[str] = []
+    while True:
+        ch = msvcrt.getwch()
+        if ch in ("\r", "\n"):
+            click.echo("")
+            return "".join(chars)
+        if ch == "\x03":
+            raise click.Abort()
+        if ch in ("\x08", "\x7f"):
+            if chars:
+                chars.pop()
+                click.echo("\b \b", nl=False)
+            continue
+        if ch in ("\x00", "\xe0"):
+            msvcrt.getwch()  # an arrow or function key: two codes, ignored
+            continue
+        chars.append(ch)
+        click.echo("*", nl=False)
+
+
+def secret_prompt(label: str, confirm: bool) -> str:
+    """Ask for a password and echo it partly masked.
+
+    On a Windows console every character shows as * while typing. With confirm, an empty entry
+    is refused and the password is asked twice. Without confirm, Enter returns "" (keep).
+    Anywhere else (tests, pipes) click's hidden prompt is used.
+    """
+    if sys.platform == "win32" and sys.stdin.isatty():
+        while True:
+            value = _read_masked(label)
+            if not confirm:
+                if value:
+                    log.info("entered", mask(value))
+                return value
+            if not value:
+                log.warn("password", "a password is needed, the guest refuses empty ones for SSH")
+                continue
+            if value == _read_masked("Repeat it"):
+                log.info("entered", mask(value))
+                return value
+            log.warn("password", "the two entries differ, try again")
+    if confirm:
+        value = str(click.prompt(label, hide_input=True, confirmation_prompt=True))
+    else:
+        value = str(click.prompt(label, hide_input=True, default="", show_default=False))
+    if value:
+        log.info("entered", mask(value))
+    return value
+
+
+def _current_secret(env: Any, inline: Any) -> str:
+    """The value a stored secret has now, for the masked hint. Empty when it cannot be read."""
+    if env:
+        return secret_from_env(str(env))
+    return str(inline or "")
+
+
 # -- the command -------------------------------------------------------------------------------
 
 
@@ -163,12 +240,12 @@ def _pick_vmx(vms: dict[str, Any]) -> str:
     paths = inventory_vmx_paths()
     if not paths:
         return str(click.prompt("Path of the .vmx file", type=click.Path(exists=True)))
-    click.echo("VMs known to VMware Workstation:")
+    log.info("library", "VMs known to VMware Workstation, pick one")
     for i, path in enumerate(paths, start=1):
         display = vmx_settings(path).get("displayname", Path(path).stem)
         configured = _name_for_vmx(vms, path)
         note = f"  (configured as {configured})" if configured else ""
-        click.echo(f"  {i}. {display}{note}\n     {path}")
+        click.echo(f"    {i}. {display}{note}\n       {path}")
     answer = str(click.prompt("Which VM? (number, or the path of a .vmx file)", default="1"))
     if answer.isdigit() and 1 <= int(answer) <= len(paths):
         return paths[int(answer) - 1]
@@ -209,6 +286,7 @@ def run_setup(
         vms = {}
     data["vms"] = vms
 
+    log.section(1, 3, "VM")
     vmx = vmx_opt or _pick_vmx(vms)
     if not Path(vmx).is_file():
         raise NtDriveError(INVALID_ARGS, f"vmx not found: {vmx}")
@@ -217,7 +295,7 @@ def run_setup(
     facts = vmx_settings(vmx)
     display = facts.get("displayname", Path(vmx).stem)
     encrypted = "encryption.keysafe" in facts
-    click.echo(f"VM: {display}" + ("  (encrypted, a vTPM does this)" if encrypted else ""))
+    log.ok("vm", display + ("  (encrypted, a vTPM does this)" if encrypted else ""))
 
     existing_name = _name_for_vmx(vms, vmx)
     name = name_opt or str(
@@ -238,40 +316,52 @@ def run_setup(
     entry: dict[str, Any] = dict(vms.get(name) or {}) if isinstance(vms.get(name), dict) else {}
     guest: dict[str, Any] = dict(entry.get("guest") or {})
     if entry and not _same_file(str(entry.get("vmx", vmx)), vmx):
-        click.echo(f"  {name} now points at this vmx instead of {entry.get('vmx')}")
+        log.info("vmx", f"{name} now points at this vmx instead of {entry.get('vmx')}")
+
+    log.section(2, 3, "Guest account and passwords")
+    log.info(
+        "guest account",
+        "the Windows user you log in with inside the VM (whoami in the guest prints it)",
+    )
+    log.info(
+        "guest password",
+        "what you type at the guest's lock screen for that user. ntdrive uses it for SSH",
+    )
+    if encrypted:
+        log.info(
+            "VM encryption password",
+            "the one VMware asked for when this VM was created with a TPM. VM > Settings > "
+            "Options > Access Control shows whether it is set. Not the Windows password",
+        )
+    log.info("typing", "passwords show as * while you type, then partly masked so you can check")
+    log.info(
+        "storage",
+        "inline in vms.yaml (--inline-secrets)"
+        if inline_secrets
+        else "User environment variables on this host, never a file",
+    )
 
     user = user_opt or str(
-        click.prompt(
-            "Guest account for SSH (a local account with a password)",
-            default=guest.get("user") or None,
-        )
+        click.prompt("Windows account inside the guest", default=guest.get("user") or None)
     )
     had_secret = bool(guest.get("password") or guest.get("password_env"))
     if had_secret:
-        password = str(
-            click.prompt(
-                "Guest password (Enter keeps the current one)",
-                hide_input=True,
-                default="",
-                show_default=False,
-            )
-        )
+        current = _current_secret(guest.get("password_env"), guest.get("password"))
+        keep = "Enter keeps the current one" + (f", {mask(current)}" if current else "")
+        password = secret_prompt(f"Password of {user} ({keep})", confirm=False)
     else:
-        password = str(click.prompt("Guest password", hide_input=True, confirmation_prompt=True))
+        password = secret_prompt(f"Password of {user}", confirm=True)
     vm_password = ""
     had_vm_secret = bool(entry.get("encryption_password") or entry.get("encryption_password_env"))
     if encrypted:
-        hint = (
-            "Enter keeps the current one" if had_vm_secret else "Enter: same as the guest password"
-        )
-        vm_password = str(
-            click.prompt(
-                f"VM encryption password ({hint})",
-                hide_input=True,
-                default="",
-                show_default=False,
+        if had_vm_secret:
+            current = _current_secret(
+                entry.get("encryption_password_env"), entry.get("encryption_password")
             )
-        )
+            hint = "Enter keeps the current one" + (f", {mask(current)}" if current else "")
+        else:
+            hint = "Enter: same as the guest password"
+        vm_password = secret_prompt(f"VM encryption password ({hint})", confirm=False)
 
     transport = transport_opt or str(entry.get("kd_transport") or "net")
     hostip = str(entry.get("kdnet_hostip") or vmnet8_ip())
@@ -325,30 +415,32 @@ def run_setup(
         }
     )
     vms[name] = entry
+
+    log.section(3, 3, "Write and check")
     write_raw_config(config_path, data)
-
-    click.echo(f"wrote {name} to {config_path}")
+    log.ok("vms.yaml", f"{name} written to {config_path}")
     for note in notes:
-        click.echo(f"  {note}")
+        log.info("secret", note)
     if inline_secrets:
-        click.echo("  passwords stored inline in vms.yaml (git-ignored, keep it private)")
-
+        log.info("secret", "passwords stored inline in vms.yaml (git-ignored, keep it private)")
     if restart:
         issues = restart_and_check(config_path, name)
         source = "sys_health"
     else:
         issues = config_issues(load_config(config_path).vm(name), BACKENDS)
-        source = "the config check"
-    if issues:
-        click.echo(f"{source} still reports:")
-        for issue in issues:
-            click.echo(f"  - {issue}")
-    else:
-        click.echo(f"{source} reports no issues for this VM")
-    click.echo(
-        "next: in the guest run setup-guest.cmd (next to setup-guest.ps1, installs OpenSSH, asks "
-        "for admin rights), "
-        f"then on the host: ntdrive kd setup-host {name}"
+        source = "config check"
+    for issue in issues:
+        log.warn(source, issue)
+    if not issues:
+        log.ok(source, "no issues for this VM")
+    log.verdict("DONE", f"{name} is configured on the host")
+    log.next_steps(
+        [
+            "in the guest: copy setup-guest.cmd and setup-guest.ps1 in and run the .cmd (OpenSSH "
+            "and KDNET, one UAC click)",
+            f"on the host: ntdrive kd setup-host {name} for the firewall (scripts\\setup-host.cmd "
+            "does it), then ntdrive verify",
+        ]
     )
 
 

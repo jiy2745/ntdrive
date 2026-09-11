@@ -46,6 +46,20 @@ Requirements live in `PRD.md`. Setup is in `README.md`.
 - Never commit `vms.yaml`, `policy.yaml`, `logs/` or anything under `.venv/`. They are ignored,
   keep it that way.
 
+## Output of the setup commands and scripts
+
+`ntdrive setup`, `ntdrive verify`, `scripts/setup-host.ps1` and `scripts/setup-guest.ps1` share
+one shape, defined in `src/ntdrive/cli/log.py` and copied as small functions in the scripts:
+
+- A section is `== n/total title`.
+- A result line is two spaces, a tag padded to five characters (`OK`, `FAIL`, `WARN`, `INFO`, or
+  `..` for something still running), a space, the subject, and a detail after a colon.
+- A `FAIL` line is followed by `        fix: <the exact command or action>`.
+- The last line is a verdict: `ALL SET: ...`, `DONE: ...` or `NOT READY: ...`, and NOT READY is
+  followed by `  next:` with numbered steps.
+- Passwords are typed masked and echoed partly masked (`mask()` in `cli/setup.py`). Nothing
+  else about a secret is printed, ever.
+
 ## Commands
 
 ```powershell

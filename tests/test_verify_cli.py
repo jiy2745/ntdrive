@@ -12,6 +12,7 @@ from click.testing import CliRunner, Result
 
 import ntdrive.cli.verify as verify_mod
 from ntdrive.cli.main import build_cli
+from ntdrive.cli.verify import ssh_fix
 from ntdrive.core.registry import load_builtin_tools
 from ntdrive.core.service import NtDriveService
 
@@ -51,7 +52,7 @@ async def test_verify_says_all_set_and_leaves_nothing_attached(
 ) -> None:
     result = await _verify(service, monkeypatch, ["verify", "win11-dev"])
     assert result.exit_code == 0, result.output
-    for line in ("ok    config", "ok    power", "ok    ssh", "ok    firewall", "ok    debugger"):
+    for line in ("OK    config", "OK    power", "OK    ssh", "OK    firewall", "OK    debugger"):
         assert line in result.output
     assert result.output.strip().endswith("all worked.") and "ALL SET: win11-dev" in result.output
     # The debugger verify attached is detached again, so the guest is not left frozen.
@@ -80,8 +81,17 @@ async def test_verify_stops_at_the_first_failure_with_the_fix(
         "FAIL  firewall: inbound Block rules for kd.exe: Windows Kernel Debugger" in result.output
     )
     assert "fix: run scripts\\setup-host.cmd" in result.output
-    assert "ok    debugger" not in result.output and "NOT READY: win11-dev" in result.output
+    assert "OK    debugger" not in result.output and "NOT READY: win11-dev" in result.output
+    assert "  next:" in result.output and "1. win11-dev (firewall):" in result.output
 
     service.config.vms.clear()
     empty = await _verify(service, monkeypatch, ["verify"])
     assert empty.exit_code == 1 and "no VM is configured" in empty.output
+
+
+def test_ssh_fix_names_the_cause() -> None:
+    assert "ntdrive setup --name dev" in ssh_fix(
+        "ssh connect to 10.0.0.5:22 failed: Authentication failed.", "dev"
+    )
+    assert "VMware Tools" in ssh_fix("guest IP unknown, VMware Tools may not be running", "dev")
+    assert "setup-guest.cmd" in ssh_fix("ssh connect to 10.0.0.5:22 refused: timed out", "dev")

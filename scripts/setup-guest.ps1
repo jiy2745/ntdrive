@@ -2,17 +2,16 @@
 .SYNOPSIS
   Prepare a Windows 10/11 guest for ntdrive. Run it inside the guest through setup-guest.cmd (any
   shell or a double click, whatever the execution policy says): it asks for administrator rights
-  itself, one UAC click.
+  itself, one UAC click, and keeps everything in this one window.
 
 .DESCRIPTION
-  Installs and starts OpenSSH Server with PowerShell as the default shell, and optionally enables
-  kernel debugging with bcdedit. By default that is KDNET: the host IP is inferred from the NAT
-  gateway (x.x.x.2 means the host is x.x.x.1, -HostIp overrides), the key is generated in the
+  Installs and starts OpenSSH Server with PowerShell as the default shell, opens port 22, and
+  enables kernel debugging with bcdedit. By default that is KDNET: the host IP is inferred from the
+  NAT gateway (x.x.x.2 means the host is x.x.x.1, -HostIp overrides), the key is generated in the
   guest and never needs copying, because the host reads it back over SSH (ntdrive verify, or the
-  first kd_attach).
-  The port comes from the machine id (50000-50039), so several guests of one host differ.
-  -Serial sets up the serial named-pipe transport instead, -OpenSshOnly skips debugging. Reboot
-  the guest afterwards.
+  first kd_attach). The port comes from the machine id (50000-50039), so several guests of one host
+  differ. -Serial sets up the serial named-pipe transport instead, -OpenSshOnly skips debugging.
+  Reboot the guest afterwards, or let ntdrive verify on the host do it.
 
   OpenSSH comes from the Windows capability (Feature on Demand) when Windows can install it. When
   that fails, which is normal on Insider builds because Windows Update publishes no capability
@@ -21,9 +20,8 @@
   and runs its install-sshd.ps1. A guest that already has an sshd service keeps it, so the script
   is safe to run again.
 
-  The kd_setup_guest tool performs the same bcdedit steps over SSH. This script exists for the very
-  first setup, when SSH is not available yet. ntdrive unloads PSReadLine per terminal session
-  itself, so no profile change is needed here.
+  Output follows the ntdrive convention: `== n/total title` sections, OK / FAIL / WARN / INFO
+  lines, `fix:` under a FAIL, and a DONE or NOT READY verdict with numbered next steps.
 
 .EXAMPLE
   setup-guest.cmd
@@ -33,11 +31,11 @@
 
 .EXAMPLE
   setup-guest.cmd -Serial
-  One command for a fresh guest on the serial transport. Reboot when it says so.
+  Serial named-pipe transport instead of KDNET.
 
 .EXAMPLE
-  setup-guest.cmd -Serial -OpenSshZip D:\OpenSSH-Win64.zip
-  Same, for a guest without internet access. Copy the zip in first.
+  setup-guest.cmd -OpenSshZip D:\OpenSSH-Win64.zip
+  For a guest without internet access. Copy the zip in first.
 #>
 
 [CmdletBinding()]
@@ -53,36 +51,80 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+# -- output convention (the same shapes as ntdrive setup and ntdrive verify) --------------------
+
+function Step([int]$Index, [int]$Total, [string]$Title) { Write-Host "== $Index/$Total $Title" }
+function Line([string]$Tag, [string]$Subject, [string]$Detail) {
+  $text = "  " + $Tag.PadRight(5) + " " + $Subject
+  if ($Detail) { $text += ": " + $Detail }
+  Write-Host $text
+}
+function Ok([string]$Subject, [string]$Detail) { Line "OK" $Subject $Detail }
+function Fail([string]$Subject, [string]$Detail) { Line "FAIL" $Subject $Detail }
+function Warn([string]$Subject, [string]$Detail) { Line "WARN" $Subject $Detail }
+function Info([string]$Subject, [string]$Detail) { Line "INFO" $Subject $Detail }
+function Running([string]$Subject, [string]$Detail) { Line ".." $Subject $Detail }
+function Fix([string]$Text) { Write-Host "        fix: $Text" }
+function Verdict([string]$Word, [string]$Text) { Write-Host "${Word}: $Text" }
+function NextSteps([string[]]$Steps) {
+  Write-Host "  next:"
+  $i = 1
+  foreach ($step in $Steps) { Write-Host "    $i. $step"; $i++ }
+}
+
+# -- 1/4 administrator rights -----------------------------------------------------------------
+
+Step 1 4 "Administrator rights"
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]$identity
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   # Everything below needs administrator rights (a service, HKLM, a firewall rule, bcdedit).
-  # Relaunch elevated with the same arguments: one UAC click instead of opening an admin shell.
-  $relaunch = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-NoExit", "-File", "`"$PSCommandPath`"")
+  # Relaunch elevated and hidden with the same arguments, and show its output here: one UAC
+  # click, one window.
+  Info "needed for" "the OpenSSH service, the default shell (HKLM), the firewall rule and bcdedit"
+  Info "approve the UAC prompt" "the work runs hidden and its output appears in this window"
+  $argText = ""
   foreach ($bound in $PSBoundParameters.GetEnumerator()) {
     if ($bound.Value -is [switch]) {
-      if ($bound.Value.IsPresent) { $relaunch += "-$($bound.Key)" }
+      if ($bound.Value.IsPresent) { $argText += " -$($bound.Key)" }
     } else {
-      $relaunch += @("-$($bound.Key)", "`"$($bound.Value)`"")
+      $argText += " -$($bound.Key) '" + ([string]$bound.Value).Replace("'", "''") + "'"
     }
   }
-  Write-Host "administrator rights are needed: approve the UAC prompt, the script continues in the new window"
+  $log = Join-Path $env:TEMP ("ntdrive-setup-guest-" + [guid]::NewGuid().ToString("N") + ".log")
+  $inner = "& '" + $PSCommandPath.Replace("'", "''") + "'" + $argText +
+    " *>&1 | ForEach-Object { Add-Content -LiteralPath '" + $log.Replace("'", "''") +
+    "' -Value ([string]`$_) -Encoding utf8 }; exit `$LASTEXITCODE"
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
   try {
-    Start-Process -FilePath "powershell.exe" -ArgumentList $relaunch -Verb RunAs | Out-Null
+    $proc = Start-Process -FilePath "powershell.exe" -Verb RunAs -WindowStyle Hidden -PassThru `
+      -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encoded"
   } catch {
-    throw "the UAC prompt was refused. Approve it, or open an Administrator PowerShell and run the script there."
+    Fail "administrator rights" "the UAC prompt was refused"
+    Fix "run setup-guest.cmd again and approve the prompt, or run setup-guest.ps1 from an Administrator PowerShell"
+    exit 1
   }
-  exit 0
+  $shown = 0
+  do {
+    if (Test-Path -LiteralPath $log) {
+      $lines = @(Get-Content -LiteralPath $log -Encoding utf8)
+      while ($shown -lt $lines.Count) { Write-Host $lines[$shown]; $shown++ }
+    }
+    $exited = $proc.HasExited
+    if (-not $exited) { Start-Sleep -Milliseconds 400 }
+  } while (-not $exited)
+  if (Test-Path -LiteralPath $log) {
+    $lines = @(Get-Content -LiteralPath $log -Encoding utf8)
+    while ($shown -lt $lines.Count) { Write-Host $lines[$shown]; $shown++ }
+    Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
+  }
+  $code = 0
+  try { $code = [int]$proc.ExitCode } catch { $code = 0 }
+  exit $code
 }
+Ok "elevated" $identity.Name
 
-function Assert-SecureBootOff {
-  # bcdedit /debug on is refused while Secure Boot is on. BIOS firmware has no Secure Boot and
-  # Confirm-SecureBootUEFI throws there, which means there is nothing to check.
-  try { $on = Confirm-SecureBootUEFI } catch { return }
-  if ($on) {
-    throw "Secure Boot is on, so bcdedit /debug on would be refused. Power off the VM, turn Secure Boot off (VM settings > Options > Advanced), then run this script again."
-  }
-}
+# -- helpers -------------------------------------------------------------------------------------
 
 function Install-OpenSshCapability {
   # True when the Windows capability is installed (already, or by this call). False when Windows
@@ -90,23 +132,24 @@ function Install-OpenSshCapability {
   try {
     $cap = Get-WindowsCapability -Online -Name "OpenSSH.Server*" | Select-Object -First 1
   } catch {
-    Write-Host "  Get-WindowsCapability failed: $($_.Exception.Message)"
+    Warn "capability" "Get-WindowsCapability failed: $($_.Exception.Message)"
     return $false
   }
   if (-not $cap) {
-    Write-Host "  this build lists no OpenSSH.Server capability"
+    Warn "capability" "this build lists no OpenSSH.Server capability"
     return $false
   }
   if ($cap.State -eq "Installed") {
-    Write-Host "  capability $($cap.Name) already installed"
+    Ok "capability" "$($cap.Name) already installed"
     return $true
   }
   try {
+    Running "capability" "Add-WindowsCapability $($cap.Name), this asks Windows Update"
     Add-WindowsCapability -Online -Name $cap.Name | Out-Null
-    Write-Host "  installed capability $($cap.Name)"
+    Ok "capability" "$($cap.Name) installed"
     return $true
   } catch {
-    Write-Host "  Add-WindowsCapability failed: $($_.Exception.Message)"
+    Warn "capability" "Add-WindowsCapability failed: $($_.Exception.Message)"
     return $false
   }
 }
@@ -116,18 +159,18 @@ function Install-OpenSshZip([string]$Source) {
   $dest = Join-Path $env:ProgramFiles "OpenSSH"
   $installer = Join-Path $dest "install-sshd.ps1"
   if (Test-Path $installer) {
-    Write-Host "  reusing the files already in $dest"
+    Ok "zip" "reusing the files already in $dest"
   } else {
     $work = Join-Path $env:TEMP "ntdrive-openssh"
     if (Test-Path $work) { Remove-Item $work -Recurse -Force }
     New-Item -ItemType Directory -Path $work | Out-Null
     $zip = Join-Path $work "OpenSSH-Win64.zip"
     if ($Source -match "^https?://") {
-      Write-Host "  downloading $Source"
+      Running "zip" "downloading $Source"
       [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
       Invoke-WebRequest -Uri $Source -OutFile $zip -UseBasicParsing
     } else {
-      Write-Host "  using $Source"
+      Info "zip" "using $Source"
       Copy-Item $Source $zip
     }
     Unblock-File $zip
@@ -140,32 +183,22 @@ function Install-OpenSshZip([string]$Source) {
     Move-Item $unpacked $dest
     Get-ChildItem $dest -Recurse | Unblock-File
     Remove-Item $work -Recurse -Force
-    Write-Host "  expanded to $dest"
+    Ok "zip" "expanded to $dest"
   }
   # install-sshd.ps1 registers the sshd and ssh-agent services and fixes permissions. -Confirm:$false
   # keeps its ShouldProcess helpers from prompting.
-  & $installer -Confirm:$false
+  & $installer -Confirm:$false | Out-Null
+  Ok "zip" "sshd and ssh-agent services registered"
 }
 
-Write-Host "== OpenSSH Server"
-if (Get-Service sshd -ErrorAction SilentlyContinue) {
-  Write-Host "  sshd service already present, keeping it"
-} elseif (-not (Install-OpenSshCapability)) {
-  Write-Host "  falling back to the Win32-OpenSSH zip"
-  Install-OpenSshZip $OpenSshZip
+function Assert-SecureBootOff {
+  # bcdedit /debug on is refused while Secure Boot is on. BIOS firmware has no Secure Boot and
+  # Confirm-SecureBootUEFI throws there, which means there is nothing to check.
+  try { $on = Confirm-SecureBootUEFI } catch { return }
+  if ($on) {
+    throw "Secure Boot is on, so bcdedit /debug on would be refused. Power off the VM, turn Secure Boot off (VM settings > Options > Advanced), then run this script again."
+  }
 }
-Set-Service -Name sshd -StartupType Automatic
-Start-Service sshd
-$regPath = "HKLM:\SOFTWARE\OpenSSH"
-if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-New-ItemProperty -Path $regPath -Name DefaultShell `
-  -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -PropertyType String -Force | Out-Null
-if (-not (Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue)) {
-  New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -DisplayName "OpenSSH Server (sshd)" `
-    -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
-}
-$sshdPath = (Get-CimInstance Win32_Service -Filter "Name='sshd'").PathName
-Write-Host "  sshd running ($sshdPath), default shell = powershell"
 
 function Invoke-Bcdedit([string[]]$Arguments) {
   # Output stays hidden: for KDNET it carries the key, which the host reads over SSH later.
@@ -176,51 +209,90 @@ function Invoke-Bcdedit([string[]]$Arguments) {
   }
 }
 
-$kdSummary = ""
-if ($Serial) {
-  Write-Host "== kernel debugging over the serial pipe (COM1)"
-  Assert-SecureBootOff
-  Invoke-Bcdedit @("/debug", "on")
-  Invoke-Bcdedit @("/dbgsettings", "serial", "debugport:1", "baudrate:115200")
-  $kdSummary = "serial (COM1 pipe). On the host run ntdrive verify (or setup-host.cmd -Verify)"
-} elseif (-not $OpenSshOnly) {
-  Write-Host "== KDNET (the ntdrive default)"
-  if (-not $HostIp) {
-    # VMware NAT: the guest's gateway is x.x.x.2 and the host's VMnet8 adapter is x.x.x.1.
-    $gateway = (Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
-      Sort-Object RouteMetric | Select-Object -First 1).NextHop
-    if ("$gateway" -match '^(\d+\.\d+\.\d+)\.\d+$') { $HostIp = "$($Matches[1]).1" }
+# -- 2/4 OpenSSH, 3/4 kernel debugging, 4/4 summary ---------------------------------------------
+
+try {
+  Step 2 4 "OpenSSH Server"
+  if (Get-Service sshd -ErrorAction SilentlyContinue) {
+    Ok "sshd" "service already present, keeping it"
+  } elseif (-not (Install-OpenSshCapability)) {
+    Info "fallback" "the Win32-OpenSSH zip"
+    Install-OpenSshZip $OpenSshZip
   }
-  if (-not $HostIp) {
-    Write-Host "  no default gateway, so the host IP is unknown here. kd_setup_guest will set KDNET over SSH."
-  } else {
+  Set-Service -Name sshd -StartupType Automatic
+  Start-Service sshd
+  $regPath = "HKLM:\SOFTWARE\OpenSSH"
+  if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+  New-ItemProperty -Path $regPath -Name DefaultShell `
+    -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -PropertyType String -Force | Out-Null
+  if (-not (Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -DisplayName "OpenSSH Server (sshd)" `
+      -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+  }
+  $sshdPath = (Get-CimInstance Win32_Service -Filter "Name='sshd'").PathName
+  Ok "sshd" "running ($sshdPath), default shell PowerShell, port 22 open"
+
+  Step 3 4 "Kernel debugging"
+  $kdSummary = ""
+  if ($Serial) {
     Assert-SecureBootOff
     Invoke-Bcdedit @("/debug", "on")
-    if (-not $PSBoundParameters.ContainsKey("Port")) {
-      # Each guest picks its own port in 50000-50039 from its machine id, so several guests of
-      # one host rarely collide. The host moves a colliding guest when it reads the settings.
-      $guid = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Cryptography" -ErrorAction SilentlyContinue).MachineGuid
-      $sum = 0
-      foreach ($ch in [char[]]"$guid") { $sum = ($sum * 31 + [int]$ch) % 1000003 }
-      $Port = 50000 + ($sum % 40)
+    Invoke-Bcdedit @("/dbgsettings", "serial", "debugport:1", "baudrate:115200")
+    Ok "serial" "COM1 named pipe, bcdedit written"
+    $kdSummary = "serial"
+  } elseif (-not $OpenSshOnly) {
+    if (-not $HostIp) {
+      # VMware NAT: the guest's gateway is x.x.x.2 and the host's VMnet8 adapter is x.x.x.1.
+      $gateway = (Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
+        Sort-Object RouteMetric | Select-Object -First 1).NextHop
+      if ("$gateway" -match '^(\d+\.\d+\.\d+)\.\d+$') { $HostIp = "$($Matches[1]).1" }
     }
-    $net = @("/dbgsettings", "net", "hostip:$HostIp", "port:$Port")
-    if ($Key) { $net += "key:$Key" }
-    Invoke-Bcdedit $net
-    $kdSummary = "KDNET to host $HostIp port $Port. The key stays here. On the host run ntdrive verify (or setup-host.cmd -Verify): it reads the key, reboots this guest if needed and ends with ALL SET"
+    if (-not $HostIp) {
+      Warn "kdnet" "no default gateway, so the host IP is unknown here"
+      Fix "nothing to do now: ntdrive verify on the host configures KDNET over SSH"
+    } else {
+      if (-not $PSBoundParameters.ContainsKey("Port")) {
+        # Each guest picks its own port in 50000-50039 from its machine id, so several guests of
+        # one host rarely collide. The host moves a colliding guest when it reads the settings.
+        $guid = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Cryptography" -ErrorAction SilentlyContinue).MachineGuid
+        $sum = 0
+        foreach ($ch in [char[]]"$guid") { $sum = ($sum * 31 + [int]$ch) % 1000003 }
+        $Port = 50000 + ($sum % 40)
+      }
+      Assert-SecureBootOff
+      Invoke-Bcdedit @("/debug", "on")
+      $net = @("/dbgsettings", "net", "hostip:$HostIp", "port:$Port")
+      if ($Key) { $net += "key:$Key" }
+      Invoke-Bcdedit $net
+      Ok "kdnet" "host $HostIp port $Port, key generated here (the host reads it over SSH)"
+      $kdSummary = "kdnet"
+    }
+  } else {
+    Info "skipped" "-OpenSshOnly, ntdrive verify on the host can configure the debugger over SSH"
   }
-} else {
-  Write-Host "== kernel debugging skipped (-OpenSshOnly). kd_setup_guest can do it over SSH later."
-}
 
-Write-Host "== for vms.yaml on the host"
-$user = $identity.Name.Split('\')[-1]
-$ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-  Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
-  Select-Object -ExpandProperty IPAddress
-$listening = [bool](Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue)
-Write-Host "  guest.user: $user  (this account needs a password, SSH refuses empty ones)"
-Write-Host "  guest IPv4: $($ips -join ', ')  (ntdrive finds it through VMware Tools, this is for a manual ssh test)"
-Write-Host "  sshd listening on 22: $listening"
-if ($kdSummary) { Write-Host "  kernel debug: $kdSummary" }
-Write-Host "done"
+  Step 4 4 "Summary"
+  $user = $identity.Name.Split('\')[-1]
+  $ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
+    Select-Object -ExpandProperty IPAddress
+  $listening = [bool](Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue)
+  Info "guest account" "$user (use this name and its Windows password in ntdrive setup on the host)"
+  Info "guest IPv4" "$($ips -join ', ') (ntdrive finds it through VMware Tools, this is for a manual ssh test)"
+  if ($listening) { Ok "sshd listening" "port 22" } else { Warn "sshd listening" "port 22 is not listening yet" }
+  $steps = @()
+  if ($kdSummary) {
+    Verdict "DONE" "OpenSSH and the $kdSummary debugger are configured in this guest"
+    $steps += "reboot this guest so it boots with the debugger on (ntdrive verify can do it for you)"
+  } else {
+    Verdict "DONE" "OpenSSH is configured in this guest, the debugger is not yet"
+  }
+  $steps += "on the host run ntdrive verify (or scripts\setup-host.cmd -Verify): it reads the KDNET key, reboots if needed and ends with ALL SET"
+  NextSteps $steps
+  exit 0
+} catch {
+  Fail "setup" $_.Exception.Message
+  Fix "fix the cause above, then run setup-guest.cmd again (it skips what is already done)"
+  Verdict "NOT READY" "this guest is not set up yet"
+  exit 1
+}

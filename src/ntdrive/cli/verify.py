@@ -5,7 +5,7 @@ in order, and stops at the first failure with the fix: config and host (sys_heal
 running, an SSH login as the configured account, the debugger transport on the host (firewall
 or serial pipe), then a real debugger round trip (attach, break in, resume, detach). A guest that
 was just configured for KDNET and still needs a reboot is rebooted here. The last line is either
-ALL SET or NOT READY with what to do, and the exit code says the same.
+ALL SET or NOT READY with numbered next steps, and the exit code says the same.
 """
 
 from __future__ import annotations
@@ -13,30 +13,46 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
-from collections.abc import Callable
 from typing import Any
 
 import click
 
+from ntdrive.cli import log
+from ntdrive.cli.log import Out
 from ntdrive.daemon.client import DaemonClient, connect
 from ntdrive.errors import NtDriveError
 
-Echo = Callable[[str], None]
 Report = list[dict[str, Any]]
 
 
-def verify_vm(client: DaemonClient, name: str, echo: Echo) -> Report:
+def ssh_fix(message: str, vm: str) -> str:
+    """The fix for a failed SSH login, from the error text."""
+    lower = message.lower()
+    if "authentication" in lower:
+        return (
+            f"the account or password is wrong: run ntdrive setup --name {vm} and type the "
+            "guest's Windows account and its password again"
+        )
+    if "guest ip" in lower or "vmware tools" in lower:
+        return "VMware Tools are not running in the guest: install them (VM > Install VMware Tools)"
+    return (
+        "OpenSSH does not answer: in the guest run setup-guest.cmd (installs OpenSSH, one UAC "
+        "click), then verify again"
+    )
+
+
+def verify_vm(client: DaemonClient, name: str, out: Out) -> Report:
     """Run the checks for one VM in order and stop at the first failure."""
     report: Report = []
 
     def passed(check: str, detail: str) -> None:
         report.append({"check": check, "ok": True, "detail": detail, "fix": ""})
-        echo(f"  ok    {check}: {detail}")
+        log.ok(check, detail, out)
 
     def failed(check: str, detail: str, fix: str) -> Report:
         report.append({"check": check, "ok": False, "detail": detail, "fix": fix})
-        echo(f"  FAIL  {check}: {detail}")
-        echo(f"        fix: {fix}")
+        log.fail(check, detail, out)
+        log.fix(fix, out)
         return report
 
     health = client.call("sys_health", {})
@@ -54,7 +70,7 @@ def verify_vm(client: DaemonClient, name: str, echo: Echo) -> Report:
     later = ("kdnet key not set", "host firewall", "SSH port")
     blocking = [str(issue) for issue in vm.get("issues", []) if not str(issue).startswith(later)]
     if blocking:
-        return failed("config", blocking[0], "the message names the fix, then verify again")
+        return failed("config", "vms.yaml or the VM settings", blocking[0])
     passed("config", f"{vm.get('kd_transport')} transport, {health.get('config_path')}")
 
     if vm.get("power") != "running":
@@ -71,13 +87,7 @@ def verify_vm(client: DaemonClient, name: str, echo: Echo) -> Report:
     try:
         opened = client.call("term_open", {"vm": name})
     except NtDriveError as exc:
-        return failed(
-            "ssh",
-            exc.message,
-            exc.hint
-            or "in the guest run setup-guest.cmd (installs OpenSSH), and check the account and "
-            "password with ntdrive setup",
-        )
+        return failed("ssh", exc.message, ssh_fix(exc.message, name))
     with contextlib.suppress(NtDriveError):
         client.call("term_close", {"session_id": opened["session_id"]})
     passed("ssh", "logged in as the configured account and got a shell")
@@ -116,13 +126,14 @@ def verify_vm(client: DaemonClient, name: str, echo: Echo) -> Report:
     attached_here = False
     if state.get("state") == "detached":
         try:
+            log.running("debugger", "attaching, this waits for the target", out)
             client.call("kd_attach", {"vm": name, "timeout": 120})
         except NtDriveError as exc:
             if "needs a reboot" not in exc.message:
                 return failed("debugger", exc.message, exc.hint or "look at the guest console")
             # setup-guest.cmd (or the attach itself) configured KDNET a moment ago. The reboot is
             # part of the setup, so do it here rather than sending the person back and forth.
-            echo("  ..    debugger: KDNET was configured in the guest just now, rebooting it")
+            log.running("debugger", "KDNET was configured in the guest just now, rebooting it", out)
             try:
                 client.call(
                     "vm_reboot",
@@ -174,16 +185,16 @@ def verify_command() -> click.Command:
     def verify(ctx: click.Context, vms: tuple[str, ...]) -> None:
         obj = ctx.ensure_object(dict)
         as_json = bool(obj.get("json"))
-        echo: Echo = (lambda line: None) if as_json else click.echo
+        out: Out = (lambda line: None) if as_json else click.echo
         report: dict[str, Report] = {}
         try:
             client = connect(obj.get("config"), autostart=True, caller="cli")
             names = list(vms) or [
                 str(v.get("name")) for v in client.call("vm_list", {}).get("vms", [])
             ]
-            for name in names:
-                echo(f"== {name}")
-                report[name] = verify_vm(client, name, echo)
+            for index, name in enumerate(names, start=1):
+                log.section(index, len(names), name, out)
+                report[name] = verify_vm(client, name, out)
         except NtDriveError as exc:
             # main imports this module at load, so the back-import waits until a call.
             from ntdrive.cli.main import fail
@@ -194,19 +205,20 @@ def verify_command() -> click.Command:
         if as_json:
             click.echo(json.dumps({"ready": ready, "vms": report}, indent=2))
         elif not names:
-            click.echo(
-                "NOT READY: no VM is configured. Run scripts\\setup-host.cmd or ntdrive setup."
-            )
+            log.verdict("NOT READY", "no VM is configured")
+            log.next_steps(["run scripts\\setup-host.cmd (or ntdrive setup) and pick the VM"])
         elif ready:
-            click.echo(
-                "ALL SET: " + ", ".join(names) + " ready. SSH login, debugger attach, break in and "
-                "resume all worked."
+            log.verdict(
+                "ALL SET",
+                ", ".join(names)
+                + " ready. SSH login, debugger attach, break in and resume all worked.",
             )
         else:
-            bad = [n for n, checks in report.items() if not all(c["ok"] for c in checks)]
-            click.echo(
-                "NOT READY: " + ", ".join(bad) + ". Fix the FAIL line above, then run "
-                "ntdrive verify again."
+            bad = {n: checks[-1] for n, checks in report.items() if not checks[-1]["ok"]}
+            log.verdict("NOT READY", ", ".join(bad))
+            log.next_steps(
+                [f"{n} ({last['check']}): {last['fix']}" for n, last in bad.items()]
+                + ["then run ntdrive verify again (or scripts\\setup-host.cmd -Verify)"]
             )
         if not ready:
             sys.exit(1)
