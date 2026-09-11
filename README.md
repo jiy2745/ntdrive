@@ -93,7 +93,8 @@ blocked firewall, a missing serial pipe), so run it after each host step until t
 
 1. Host tools: VMware Workstation Pro, the Debugging Tools for Windows and uv (see Requirements),
    then `git clone` and `cd ntdrive`.
-2. Host, one command, no admin: `powershell -ExecutionPolicy Bypass -File scripts\setup-host.ps1`.
+2. Host, one command, no admin: `scripts\setup-host.cmd` (a launcher for `setup-host.ps1` that
+   works whatever the PowerShell execution policy says).
    It runs `uv sync`, then `ntdrive setup` for each VM you pick (guest account and passwords,
    hidden, stored as User environment variables and never in a file), restarts the daemon, runs
    `kd setup-host` for each VM (net: one UAC prompt for the firewall. serial: the pipe goes into
@@ -101,8 +102,9 @@ blocked firewall, a missing serial pipe), so run it after each host step until t
 3. VM settings, with the VM off: Secure Boot off (Options > Advanced), NAT networking, and the
    `e1000e` NIC for KDNET (the default).
 4. Guest: install VMware Tools, create a local account with a password, copy
-   `scripts/setup-guest.ps1` in (drag and drop works once Tools are in) and run it from any
-   PowerShell: it asks for administrator rights itself, one UAC click. It installs OpenSSH, and
+   `scripts/setup-guest.cmd` and `scripts/setup-guest.ps1` in (drag and drop works once Tools
+   are in) and run `setup-guest.cmd` from any shell or by double click: it asks for
+   administrator rights itself, one UAC click. It installs OpenSSH, and
    `kd setup-guest` does the bcdedit part from the host afterwards (`-Serial` sets up the serial
    transport in the guest instead). Reboot when it says so.
 5. Host: `vm start`, `term open`, `kd setup-guest` (unless the guest script already did it), a
@@ -126,15 +128,18 @@ publishes no Feature-on-Demand package for them. The build-independent alternati
 [Win32-OpenSSH](https://github.com/PowerShell/Win32-OpenSSH/releases) zip: expand `OpenSSH-Win64.zip`
 to `C:\Program Files\OpenSSH`, run its `install-sshd.ps1`, then start the `sshd` service.
 
-`scripts/setup-guest.ps1` does all of this in one run. It tries the capability first and falls back
+`scripts/setup-guest.ps1` does all of this in one run (`setup-guest.cmd` next to it launches it
+whatever the PowerShell execution policy says, which refuses a plain `.\setup-guest.ps1` on a
+default Windows install). It tries the capability first and falls back
 to the zip on its own (downloaded from GitHub, or pass `-OpenSshZip` with a local copy for a guest
 without internet), sets the default shell and the firewall rule, and with `-Serial` (or `-HostIp`
 for KDNET) also runs the `bcdedit` step that `kd_setup_guest` would otherwise do over SSH. Copy it
 into the guest (VMware drag and drop, or `file_push`, which falls back to VMware Tools while SSH is
-not up yet) and run it from any PowerShell. It asks for administrator rights itself, so one UAC
-click replaces opening an elevated shell:
+not up yet) together with `setup-guest.cmd`, then run the .cmd from any shell or by double click. It
+asks for administrator rights itself, so one UAC click replaces opening an elevated shell:
 
 ```powershell
+.\setup-guest.cmd                                        # or, spelled out:
 powershell -ExecutionPolicy Bypass -File setup-guest.ps1
 ```
 
@@ -146,7 +151,7 @@ flags are optional. Reboot the guest when it says so. Running it again on a gues
 ```powershell
 git clone https://github.com/jiy2745/ntdrive
 cd ntdrive
-powershell -ExecutionPolicy Bypass -File scripts\setup-host.ps1   # uv tool install -e ., ntdrive setup, kd setup-host, sys health
+scripts\setup-host.cmd          # uv tool install -e ., ntdrive setup, kd setup-host, sys health
 ```
 
 That installs three commands on your PATH with `uv tool install`: `ntdrive` (the CLI), `ntdrive-mcp`
@@ -206,7 +211,7 @@ ntdrive kd attach win11         # waiting until the guest boots with the debugge
 ```
 
 `sys health` runs the same firewall check and lists the offending rules. Pass `--no-fix-firewall`
-to only look. `scripts\setup-host.ps1 -FirewallOnly` from an Administrator PowerShell does the same
+to only look. `scripts\setup-host.cmd -FirewallOnly` from an Administrator shell does the same
 repair by hand. The guest needs a KDNET-capable NIC (`e1000e`).
 
 **serial (no network, no prompt).** kd.exe talks to the guest over a VMware serial port exposed as

@@ -17,15 +17,16 @@
   PowerShell.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File scripts\setup-host.ps1
-  Interactive: lists the VMs VMware knows, asks for the account and passwords.
+  scripts\setup-host.cmd
+  Interactive: lists the VMs VMware knows, asks for the account and passwords. The .cmd launcher
+  runs this script whatever the PowerShell execution policy says.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File scripts\setup-host.ps1 -Vmx D:\VMs\win11\win11.vmx -Name win11 -User dev
+  scripts\setup-host.cmd -Vmx D:\VMs\win11\win11.vmx -Name win11 -User dev
   One VM with the answers given up front. Only the passwords are asked.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File scripts\setup-host.ps1 -FirewallOnly
+  scripts\setup-host.cmd -FirewallOnly
   Administrator PowerShell: remove the kd.exe Block rules and recreate the Allow rule, nothing else.
 #>
 
@@ -136,5 +137,5 @@ try {
   Pop-Location
 }
 
-Write-Host "done. Next, in each guest: scripts\setup-guest.ps1 from any PowerShell (it asks for admin rights, add -Serial for"
+Write-Host "done. Next, in each guest: setup-guest.cmd (copy it with setup-guest.ps1, it asks for admin rights, add -Serial for"
 Write-Host "the serial transport), then on the host: ntdrive kd setup-guest <vm>, a soft reboot, ntdrive kd attach <vm>"

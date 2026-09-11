@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
-  Prepare a Windows 10/11 guest for ntdrive. Run it inside the guest from any PowerShell: it asks
-  for administrator rights itself, one UAC click.
+  Prepare a Windows 10/11 guest for ntdrive. Run it inside the guest through setup-guest.cmd (any
+  shell or a double click, whatever the execution policy says): it asks for administrator rights
+  itself, one UAC click.
 
 .DESCRIPTION
   Installs and starts OpenSSH Server with PowerShell as the default shell, and optionally enables
@@ -21,16 +22,17 @@
   itself, so no profile change is needed here.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File setup-guest.ps1
+  setup-guest.cmd
   The usual first step: OpenSSH only. kd_setup_guest configures the debugger over SSH afterwards.
-  Right click, "Run with PowerShell" does the same. Both end in one UAC prompt.
+  A plain .\setup-guest.ps1 is refused by the default execution policy, the .cmd is not.
+  powershell -ExecutionPolicy Bypass -File setup-guest.ps1 is the same thing spelled out.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File setup-guest.ps1 -Serial
+  setup-guest.cmd -Serial
   One command for a fresh guest on the serial transport. Reboot when it says so.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File setup-guest.ps1 -Serial -OpenSshZip D:\OpenSSH-Win64.zip
+  setup-guest.cmd -Serial -OpenSshZip D:\OpenSSH-Win64.zip
   Same, for a guest without internet access. Copy the zip in first.
 #>
 
