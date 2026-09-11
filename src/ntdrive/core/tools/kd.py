@@ -227,7 +227,10 @@ async def _configure_guest(
     note = ""
     if not serial:
         settings = _parse_bcd(await run("bcdedit /dbgsettings"))
-        current = _parse_bcd(await run("bcdedit /enum {current}"))
+        # The guest shell is PowerShell (setup-guest.ps1 sets DefaultShell). PowerShell parses a
+        # bare {current} as a script block and, worse, turns it into -encodedCommand for the native
+        # exe, so bcdedit sees /encodedCommand and fails. Single quotes keep it a literal.
+        current = _parse_bcd(await run("bcdedit /enum '{current}'"))
         debug_on = current.get("debug", "").lower() in {"yes", "true"}
         guest_key = settings.get("key", "")
         if not re.match(KDNET_KEY, guest_key):

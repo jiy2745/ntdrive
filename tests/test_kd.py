@@ -267,6 +267,9 @@ async def test_kd_setup_guest_writes_config(service: NtDriveService, fake_transp
     )
     result = await service.call("kd_setup_guest", {"vm": "win11-dev"})
     assert result["adopted"] is True and result["needs_reboot"] is False
+    # {current} must be quoted, or PowerShell turns it into -encodedCommand and bcdedit fails.
+    assert "bcdedit /enum '{current}'" in fake_transport.exec_log
+    assert "bcdedit /enum {current}" not in fake_transport.exec_log
     assert result["port"] == 50007
     assert service.config.vms["win11-dev"].kdnet.key == "ab12.cd34.ef56.7a8b"
     assert not any("dbgsettings net" in c for c in fake_transport.exec_log)
