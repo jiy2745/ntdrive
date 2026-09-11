@@ -31,7 +31,8 @@ def ssh_fix(message: str, vm: str) -> str:
     if "authentication" in lower:
         return (
             f"the account or password is wrong: run ntdrive setup --name {vm} and type the "
-            "guest's Windows account and its password again"
+            "account and password that setup-guest.cmd created in the guest (ntdrive by default), "
+            "or run setup-guest.cmd there first"
         )
     if "guest ip" in lower or "vmware tools" in lower:
         return "VMware Tools are not running in the guest: install them (VM > Install VMware Tools)"

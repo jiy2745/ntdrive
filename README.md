@@ -87,8 +87,10 @@ clone: `uv tool install git+https://github.com/jiy2745/ntdrive`, then `ntdrive s
 
 **2. Guest.** Copy `scripts\setup-guest.cmd` and `scripts\setup-guest.ps1` into the guest (drag and
 drop works once VMware Tools are in) and run the `.cmd` from any shell or by double click. It asks
-for administrator rights itself (one UAC click), installs OpenSSH Server with PowerShell as the
-default shell, opens port 22 and turns on KDNET (the host IP comes from the NAT gateway, the key
+for administrator rights itself (one UAC click), creates a local administrator `ntdrive` and asks
+for its password (type the same one in `ntdrive setup` on the host, `-NoAccount` uses your own
+account instead), installs OpenSSH Server with PowerShell as the default shell, opens port 22 and
+turns on KDNET (the host IP comes from the NAT gateway, the key
 is generated in the guest and never needs copying). On Insider builds, where
 `Add-WindowsCapability` has no package, it falls back to the Win32-OpenSSH zip (`-OpenSshZip
 <file>` for a guest without internet). Running it again is safe. Reboot the guest when it says so.

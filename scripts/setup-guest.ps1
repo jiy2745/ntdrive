@@ -5,6 +5,11 @@
   itself, one UAC click, and keeps everything in this one window.
 
 .DESCRIPTION
+  Creates a local administrator account for ntdrive (named ntdrive, -Account changes it, -NoAccount
+  skips it and you use your own Windows account instead) and asks for its password, typed masked:
+  SSH logs in with a Windows account and its password, and a personal account may have none or
+  allow Windows Hello only. Type the same password in ntdrive setup on the host.
+
   Installs and starts OpenSSH Server with PowerShell as the default shell, opens port 22, and
   enables kernel debugging with bcdedit. By default that is KDNET: the host IP is inferred from the
   NAT gateway (x.x.x.2 means the host is x.x.x.1, -HostIp overrides), the key is generated in the
@@ -25,7 +30,7 @@
 
 .EXAMPLE
   setup-guest.cmd
-  The usual run: OpenSSH plus KDNET. Then, on the host, ntdrive verify proves the whole setup.
+  The usual run: the ntdrive account, OpenSSH, KDNET. Then, on the host, ntdrive verify proves it.
   A plain .\setup-guest.ps1 is refused by the default execution policy, the .cmd is not.
   powershell -ExecutionPolicy Bypass -File setup-guest.ps1 is the same thing spelled out.
 
@@ -40,6 +45,9 @@
 
 [CmdletBinding()]
 param(
+  [string]$Account = "ntdrive",
+  [switch]$NoAccount,
+  [string]$AccountSecretFile,
   [switch]$Serial,
   [switch]$OpenSshOnly,
   [string]$HostIp,
@@ -71,6 +79,32 @@ function NextSteps([string[]]$Steps) {
   $i = 1
   foreach ($step in $Steps) { Write-Host "    $i. $step"; $i++ }
 }
+function Mask([string]$Secret) {
+  # Enough to recognize a password: the first two and the last character, stars between.
+  $n = $Secret.Length
+  if ($n -eq 0) { return "(empty)" }
+  if ($n -le 3) { return $Secret.Substring(0, 1) + ("*" * ($n - 1)) + " ($n chars)" }
+  return $Secret.Substring(0, 2) + ("*" * ($n - 3)) + $Secret.Substring($n - 1) + " ($n chars)"
+}
+function Plain([securestring]$Secure) {
+  $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
+  try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+}
+function Read-AccountPassword([string]$Name) {
+  # Typed masked (Read-Host -AsSecureString shows *), twice, echoed partly masked. This is the
+  # Windows password of the local account, which is also what SSH checks.
+  Info "account password" "the Windows password for $Name. Type the same one in ntdrive setup on the host"
+  while ($true) {
+    $first = Read-Host -AsSecureString "Password for $Name"
+    $plain = Plain $first
+    if (-not $plain) { Warn "password" "a password is needed, OpenSSH refuses empty ones"; continue }
+    $second = Read-Host -AsSecureString "Repeat it"
+    if ($plain -ne (Plain $second)) { Warn "password" "the two entries differ, try again"; continue }
+    Info "entered" (Mask $plain)
+    return $first
+  }
+}
 
 # -- 1/4 administrator rights -----------------------------------------------------------------
 
@@ -82,7 +116,6 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
   # Relaunch elevated and hidden with the same arguments, and show its output here: one UAC
   # click, one window.
   Info "needed for" "the OpenSSH service, the default shell (HKLM), the firewall rule and bcdedit"
-  Info "approve the UAC prompt" "the work runs hidden and its output appears in this window"
   $argText = ""
   foreach ($bound in $PSBoundParameters.GetEnumerator()) {
     if ($bound.Value -is [switch]) {
@@ -91,6 +124,15 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
       $argText += " -$($bound.Key) '" + ([string]$bound.Value).Replace("'", "''") + "'"
     }
   }
+  if ($Account -and -not $NoAccount -and -not $AccountSecretFile) {
+    # The hidden elevated instance has no console to ask in, so the password is taken here and
+    # handed over encrypted with DPAPI for this user (the elevated instance is the same user).
+    $secure = Read-AccountPassword $Account
+    $secretFile = Join-Path $env:TEMP ("ntdrive-account-" + [guid]::NewGuid().ToString("N") + ".dat")
+    Set-Content -LiteralPath $secretFile -Value (ConvertFrom-SecureString $secure) -Encoding ascii
+    $argText += " -AccountSecretFile '" + $secretFile.Replace("'", "''") + "'"
+  }
+  Info "approve the UAC prompt" "the work runs hidden and its output appears in this window"
   $log = Join-Path $env:TEMP ("ntdrive-setup-guest-" + [guid]::NewGuid().ToString("N") + ".log")
   $inner = "& '" + $PSCommandPath.Replace("'", "''") + "'" + $argText +
     " *>&1 | ForEach-Object { Add-Content -LiteralPath '" + $log.Replace("'", "''") +
@@ -213,6 +255,29 @@ function Invoke-Bcdedit([string[]]$Arguments) {
 
 try {
   Step 2 4 "OpenSSH Server"
+  if ($Account -and -not $NoAccount) {
+    # A local administrator for ntdrive: SSH logs in with a Windows account and its password,
+    # and a personal account may have no password or allow Windows Hello only.
+    if ($AccountSecretFile) {
+      $secure = ConvertTo-SecureString (Get-Content -LiteralPath $AccountSecretFile -Raw).Trim()
+      Remove-Item -LiteralPath $AccountSecretFile -Force -ErrorAction SilentlyContinue
+    } else {
+      $secure = Read-AccountPassword $Account
+    }
+    if (Get-LocalUser -Name $Account -ErrorAction SilentlyContinue) {
+      Set-LocalUser -Name $Account -Password $secure -PasswordNeverExpires $true
+      Ok "account" "$Account exists, password set"
+    } else {
+      New-LocalUser -Name $Account -Password $secure -PasswordNeverExpires -AccountNeverExpires `
+        -Description "ntdrive: SSH and kernel debugging" | Out-Null
+      Ok "account" "$Account created"
+    }
+    $admins = Get-LocalGroup -SID "S-1-5-32-544"
+    if (-not (Get-LocalGroupMember -Group $admins -Member $Account -ErrorAction SilentlyContinue)) {
+      Add-LocalGroupMember -Group $admins -Member $Account
+    }
+    Ok "account" "$Account is an administrator (bcdedit over SSH needs that)"
+  }
   if (Get-Service sshd -ErrorAction SilentlyContinue) {
     Ok "sshd" "service already present, keeping it"
   } elseif (-not (Install-OpenSshCapability)) {
@@ -277,7 +342,12 @@ try {
     Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
     Select-Object -ExpandProperty IPAddress
   $listening = [bool](Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue)
-  Info "guest account" "$user (use this name and its Windows password in ntdrive setup on the host)"
+  if ($Account -and -not $NoAccount) {
+    Info "guest account" "$Account (use this name and the password you just typed in ntdrive setup on the host)"
+  } else {
+    Info "guest account" "$user (use this name and its Windows password in ntdrive setup on the host)"
+    Info "no password or Windows Hello only?" "run setup-guest.cmd without -NoAccount to get a local administrator for ntdrive"
+  }
   Info "guest IPv4" "$($ips -join ', ') (ntdrive finds it through VMware Tools, this is for a manual ssh test)"
   if ($listening) { Ok "sshd listening" "port 22" } else { Warn "sshd listening" "port 22 is not listening yet" }
   $steps = @()

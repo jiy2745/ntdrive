@@ -201,7 +201,7 @@ def test_mask_shows_enough_to_recognize_a_password() -> None:
 def test_setup_explains_the_passwords_before_asking(env: dict[str, Any]) -> None:
     result = _run(env, ["--name", "dev", "--user", "u", "--no-restart"], "1\npw12\npw12\n\n")
     assert result.exit_code == 0, result.output
-    assert "INFO  guest password: what you type at the guest's lock screen" in result.output
+    assert "INFO  guest password: the Windows password of that account" in result.output
     assert "INFO  VM encryption password: the one VMware asked for" in result.output
     assert "INFO  entered: pw*2 (4 chars)" in result.output and "pw12" not in result.output
     assert (

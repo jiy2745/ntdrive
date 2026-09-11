@@ -321,11 +321,13 @@ def run_setup(
     log.section(2, 3, "Guest account and passwords")
     log.info(
         "guest account",
-        "the Windows user you log in with inside the VM (whoami in the guest prints it)",
+        "ntdrive, the local administrator setup-guest.cmd creates in the VM, or any Windows "
+        "account you log in with there (whoami in the guest prints it)",
     )
     log.info(
         "guest password",
-        "what you type at the guest's lock screen for that user. ntdrive uses it for SSH",
+        "the Windows password of that account, the one setup-guest.cmd asked for (or what you "
+        "type at the guest's lock screen). ntdrive uses it for SSH",
     )
     if encrypted:
         log.info(
@@ -342,7 +344,7 @@ def run_setup(
     )
 
     user = user_opt or str(
-        click.prompt("Windows account inside the guest", default=guest.get("user") or None)
+        click.prompt("Windows account inside the guest", default=guest.get("user") or "ntdrive")
     )
     had_secret = bool(guest.get("password") or guest.get("password_env"))
     if had_secret:
