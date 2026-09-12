@@ -95,3 +95,18 @@ def test_ssh_fix_names_the_cause() -> None:
     )
     assert "VMware Tools" in ssh_fix("guest IP unknown, VMware Tools may not be running", "dev")
     assert "setup-guest.cmd" in ssh_fix("ssh connect to 10.0.0.5:22 refused: timed out", "dev")
+
+
+async def test_verify_proves_the_standard_account_when_one_is_configured(
+    service: NtDriveService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = service.config.vms["win11-dev"]
+    cfg.guest.standard_user = "ntdrive-user"
+    cfg.guest.standard_password = "plain-pw"
+    result = await _verify(service, monkeypatch, ["verify", "win11-dev"])
+    assert result.exit_code == 0, result.output
+    assert "OK    ssh: logged in as dev and got a shell" in result.output
+    assert "OK    ssh standard: logged in as ntdrive-user, a plain user" in result.output
+    assert "ALL SET: win11-dev" in result.output
+    fix = ssh_fix("Authentication failed.", "win11-dev", "ntdrive-user")
+    assert "password of ntdrive-user is wrong" in fix and "setup-guest.cmd -Standard" in fix

@@ -89,22 +89,48 @@ def _user_environment(name: str) -> str:
     return str(value)
 
 
+GuestAccount = Literal["admin", "standard"]
+
+
 class GuestConfig(BaseModel):
-    """Credentials and shell for the guest OS."""
+    """Credentials and shell for the guest OS.
+
+    `user` is the administrator account: ntdrive's own guest work (bcdedit over SSH, SFTP) runs
+    as it, and it is the default for terminals. `standard_user` is an optional second account
+    that is not an administrator, for driving the guest the way a plain user would
+    (`term_open account=standard`).
+    """
 
     user: str
     password_env: str = ""
     password: str = ""
+    standard_user: str = ""
+    standard_password_env: str = ""
+    standard_password: str = ""
     ssh_port: int = 22
     shell: Literal["powershell", "cmd", "pwsh"] = "powershell"
 
     def resolve_password(self) -> str:
         """Password from the environment variable, falling back to the inline value."""
-        if self.password_env:
-            value = secret_from_env(self.password_env)
-            if value:
-                return value
-        return self.password
+        return _resolve_secret(self.password_env, self.password)
+
+    def resolve_standard_password(self) -> str:
+        """Password of the standard account, from its variable or the inline value."""
+        return _resolve_secret(self.standard_password_env, self.standard_password)
+
+    def credentials(self, account: GuestAccount) -> tuple[str, str]:
+        """(user, password) for one of the two accounts."""
+        if account == "standard":
+            return self.standard_user, self.resolve_standard_password()
+        return self.user, self.resolve_password()
+
+
+def _resolve_secret(env: str, inline: str) -> str:
+    if env:
+        value = secret_from_env(env)
+        if value:
+            return value
+    return inline
 
 
 class KdnetConfig(BaseModel):
@@ -134,11 +160,7 @@ class VmConfig(BaseModel):
 
     def resolve_encryption_password(self) -> str:
         """VM encryption password from the environment variable, else the inline value."""
-        if self.encryption_password_env:
-            value = secret_from_env(self.encryption_password_env)
-            if value:
-                return value
-        return self.encryption_password
+        return _resolve_secret(self.encryption_password_env, self.encryption_password)
 
     @field_validator("kdnet", mode="before")
     @classmethod

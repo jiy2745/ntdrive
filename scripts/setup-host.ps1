@@ -45,6 +45,7 @@ param(
   [string]$Vmx,
   [string]$Name,
   [string]$User,
+  [string]$StandardUser,
   [string]$Transport,
   [switch]$InlineSecrets,
   [switch]$SkipVms,
@@ -182,6 +183,7 @@ try {
     if ($Vmx) { $first += @("--vmx", $Vmx) }
     if ($Name) { $first += @("--name", $Name) }
     if ($User) { $first += @("--user", $User) }
+    if ($StandardUser) { $first += @("--standard-user", $StandardUser) }
     if ($Transport) { $first += @("--transport", $Transport) }
     $again = @("setup")
     if ($InlineSecrets) { $first += "--inline-secrets"; $again += "--inline-secrets" }

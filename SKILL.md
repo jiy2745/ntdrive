@@ -131,6 +131,11 @@ same flag. A snapshot of a powered-off VM never needs it.
 
 - `term_exec` is for short commands with a clear end. For interactive or streaming programs use
   `term_send` plus `term_read`.
+- `term_open account=standard` opens the shell as the guest's plain account (`guest.standard_user`
+  in vms.yaml, created by `setup-guest.cmd -Standard`) instead of the administrator. Use it when
+  the question is what a normal user sees: UAC, access denied, per-user settings. `file_push`,
+  `file_pull` and `kd_setup_guest` always use the administrator account. Without a standard
+  account configured the call fails with `invalid_args` and says how to add one.
 - `term_read mode=screen` shows exactly what a person sees on the terminal (rows x cols). Use it
   for menus, progress bars and anything that redraws the screen.
 - `kd_exec` accepts a list in `cmds` so that several debugger commands cost one tool call.

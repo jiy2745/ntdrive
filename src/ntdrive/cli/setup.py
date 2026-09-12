@@ -140,7 +140,12 @@ def _other_vm_using(vms: dict[str, Any], var: str, name: str) -> str | None:
         if other == name or not isinstance(body, dict):
             continue
         guest = body.get("guest") or {}
-        if var in (guest.get("password_env"), body.get("encryption_password_env")):
+        used = (
+            guest.get("password_env"),
+            guest.get("standard_password_env"),
+            body.get("encryption_password_env"),
+        )
+        if var in used:
             return other
     return None
 
@@ -274,6 +279,7 @@ def run_setup(
     vmx_opt: str | None,
     name_opt: str | None,
     user_opt: str | None,
+    standard_opt: str | None,
     transport_opt: str | None,
     inline_secrets: bool,
     restart: bool,
@@ -304,7 +310,7 @@ def run_setup(
     if not NAME_RE.match(name):
         raise NtDriveError(INVALID_ARGS, "the name may use letters, digits, dash and underscore")
     if not inline_secrets:
-        for suffix in ("PW", "VMPW"):
+        for suffix in ("PW", "STDPW", "VMPW"):
             var = env_name(name, suffix)
             other = _other_vm_using(vms, var, name)
             if other:
@@ -353,6 +359,33 @@ def run_setup(
         password = secret_prompt(f"Password of {user} ({keep})", confirm=False)
     else:
         password = secret_prompt(f"Password of {user}", confirm=True)
+
+    log.info(
+        "standard account",
+        "optional: a second guest account without administrator rights. term_open "
+        "account=standard logs in as it, to drive the guest the way a plain user sees it. "
+        "setup-guest.cmd -Standard creates ntdrive-user for this. Enter or none skips it",
+    )
+    if standard_opt is not None:
+        standard = standard_opt
+    else:
+        standard = str(
+            click.prompt(
+                "Standard account inside the guest, or none",
+                default=guest.get("standard_user") or "none",
+            )
+        )
+    standard = "" if standard.strip().lower() in ("", "none", "-") else standard.strip()
+    standard_password = ""
+    had_standard_secret = bool(guest.get("standard_password") or guest.get("standard_password_env"))
+    if standard and had_standard_secret and standard == guest.get("standard_user"):
+        current = _current_secret(
+            guest.get("standard_password_env"), guest.get("standard_password")
+        )
+        keep = "Enter keeps the current one" + (f", {mask(current)}" if current else "")
+        standard_password = secret_prompt(f"Password of {standard} ({keep})", confirm=False)
+    elif standard:
+        standard_password = secret_prompt(f"Password of {standard}", confirm=True)
     vm_password = ""
     had_vm_secret = bool(entry.get("encryption_password") or entry.get("encryption_password_env"))
     if encrypted:
@@ -381,6 +414,19 @@ def run_setup(
             notes.append(store_secret(var, password))
             guest["password_env"] = var
             guest.pop("password", None)
+    if standard:
+        guest["standard_user"] = standard
+        if standard_password and inline_secrets:
+            guest["standard_password"] = standard_password
+            guest.pop("standard_password_env", None)
+        elif standard_password:
+            var = env_name(name, "STDPW")
+            notes.append(store_secret(var, standard_password))
+            guest["standard_password_env"] = var
+            guest.pop("standard_password", None)
+    else:
+        for key in ("standard_user", "standard_password", "standard_password_env"):
+            guest.pop(key, None)
     if encrypted:
         if vm_password and inline_secrets:
             entry["encryption_password"] = vm_password
@@ -436,10 +482,16 @@ def run_setup(
     if not issues:
         log.ok(source, "no issues for this VM")
     log.verdict("DONE", f"{name} is configured on the host")
+    guest_cmd, guest_does = "setup-guest.cmd", "OpenSSH and KDNET"
+    if standard:
+        guest_cmd += " -Standard"
+        if standard != "ntdrive-user":
+            guest_cmd += f" -StandardAccount {standard}"
+        guest_does = f"OpenSSH, KDNET and the {standard} account"
     log.next_steps(
         [
-            "in the guest: copy setup-guest.cmd and setup-guest.ps1 in and run the .cmd (OpenSSH "
-            "and KDNET, one UAC click)",
+            f"in the guest: copy setup-guest.cmd and setup-guest.ps1 in and run {guest_cmd} "
+            f"({guest_does}, one UAC click)",
             f"on the host: ntdrive kd setup-host {name} for the firewall (scripts\\setup-host.cmd "
             "does it), then ntdrive verify",
         ]
@@ -458,7 +510,12 @@ def setup_command() -> click.Command:
     )
     @click.option("--vmx", "vmx_opt", type=click.Path(), help="The .vmx file (skips the list)")
     @click.option("--name", "name_opt", help="Name for ntdrive (default: from the display name)")
-    @click.option("--user", "user_opt", help="Guest account for SSH")
+    @click.option("--user", "user_opt", help="Guest account for SSH (an administrator)")
+    @click.option(
+        "--standard-user",
+        "standard_opt",
+        help="A second guest account without administrator rights, or none to drop it",
+    )
     @click.option(
         "--transport",
         "transport_opt",
@@ -477,6 +534,7 @@ def setup_command() -> click.Command:
         vmx_opt: str | None,
         name_opt: str | None,
         user_opt: str | None,
+        standard_opt: str | None,
         transport_opt: str | None,
         inline_secrets: bool,
         no_restart: bool,
@@ -488,6 +546,7 @@ def setup_command() -> click.Command:
                 vmx_opt,
                 name_opt,
                 user_opt,
+                standard_opt,
                 transport_opt,
                 inline_secrets,
                 restart=not no_restart,

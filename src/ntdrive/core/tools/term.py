@@ -24,6 +24,13 @@ class OpenParams(VmParams):
         default=None, description="Shell to start; defaults to guest.shell from vms.yaml"
     )
     transport: Literal["auto", "ssh"] = Field(default="auto", description="Transport")
+    account: Literal["admin", "standard"] = Field(
+        default="admin",
+        description=(
+            "Guest account to log in as: admin (guest.user, the administrator, the default) or "
+            "standard (guest.standard_user, a plain user without administrator rights)"
+        ),
+    )
     cols: int = Field(default=120, ge=20, le=500)
     rows: int = Field(default=40, ge=5, le=200)
 
@@ -92,25 +99,36 @@ def _touch(service: NtDriveService, session: TermSession) -> None:
 
 @tool(
     "term_open",
-    "Open a real-time PTY session (SSH) on the guest and return its session_id.",
+    "Open a real-time PTY session (SSH) on the guest, as the administrator or as a standard "
+    "user, and return its session_id.",
     OpenParams,
     touches_guest=True,
 )
 async def term_open(service: NtDriveService, p: OpenParams) -> dict[str, Any]:
     """Open a session."""
     cfg = service.vm_cfg(p.vm)
+    if p.account == "standard" and not cfg.guest.standard_user:
+        raise NtDriveError(
+            INVALID_ARGS,
+            f"{p.vm} has no standard account (guest.standard_user is empty)",
+            "in the guest run setup-guest.cmd -Standard (creates ntdrive-user), then ntdrive "
+            "setup on the host and answer the standard account prompt; or use account=admin",
+        )
     service.ensure_not_frozen(p.vm)
     await service.ensure_running(cfg)
     ip = await service.guest_ip(cfg)
     shell = p.shell or cfg.guest.shell
-    session = await service.term.open(cfg, ip, shell, p.cols, p.rows, p.transport)
+    session = await service.term.open(
+        cfg, ip, shell, p.cols, p.rows, p.transport, account=p.account
+    )
     info = service.state.term(session.session_id)
-    service.state.record_event(p.vm, "term_open", session_id=session.session_id)
+    service.state.record_event(p.vm, "term_open", session_id=session.session_id, account=p.account)
     return {
         "session_id": session.session_id,
         "vm": p.vm,
         "shell": shell,
         "transport": session.transport_name,
+        "account": p.account,
         "coview_url": info.coview_url if info else "",
         "cols": p.cols,
         "rows": p.rows,

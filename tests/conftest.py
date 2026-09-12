@@ -170,6 +170,8 @@ class FakeTransport(TermTransport):
         self.channels: list[FakeChannel] = []
         self.files: dict[str, bytes] = {}
         self.exec_log: list[str] = []
+        # (vm, account) for every transport the manager asked the factory for.
+        self.opened_as: list[tuple[str, str]] = []
         # Canned exec_once output by command prefix, for tools that read the guest first.
         self.exec_responses: dict[str, str] = {}
         self.closed = False
@@ -448,11 +450,15 @@ def service(
     def breaker(proc: Any) -> None:
         proc.break_in()
 
+    def transport_factory(vm: VmConfig, ip: str, account: str) -> FakeTransport:
+        fake_transport.opened_as.append((vm.name, account))
+        return fake_transport
+
     svc = NtDriveService(
         config,
         adapters={"vmware": VmwareAdapter(config.host.vmrun, runner=fake_vmrun)},
         policy=PolicyConfig(),
-        transport_factory=lambda vm, ip: fake_transport,
+        transport_factory=transport_factory,
         kd_spawner=spawner,
         kd_breaker=breaker,
         kd_pipe_check=lambda pipe: True,

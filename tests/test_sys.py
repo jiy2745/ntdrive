@@ -40,6 +40,8 @@ async def test_health_skips_guest_probe_while_vm_is_off(
     assert vm["power"] == "off" and vm["kd_state"] == "detached"
     assert vm["guest"] == {
         "ip": None,
+        "user": "dev",
+        "standard_user": None,
         "ssh_port": service.config.vms["win11-dev"].guest.ssh_port,
         "ssh_open": None,
         "skipped": "vm_not_running",
@@ -185,3 +187,19 @@ async def test_health_names_the_fix_for_common_vmx_and_secret_mistakes(
     assert any("guest.user missing" in i for i in issues)
     assert any("serial pipe not in the vmx" in i for i in issues)
     assert not any("Secure Boot" in i or "NIC" in i or "encrypted" in i for i in issues)
+
+
+async def test_health_names_the_accounts_and_an_empty_standard_password_variable(
+    service: NtDriveService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys_tools, "_udp_port_free", lambda port: True)
+    monkeypatch.delenv("NTDRIVE_TEST_STDPW", raising=False)
+    monkeypatch.setattr("ntdrive.config._user_environment", lambda name: "")
+    cfg = service.config.vms["win11-dev"]
+    vm = await _vm(service)
+    assert vm["guest"]["user"] == "dev" and vm["guest"]["standard_user"] is None
+    cfg.guest.standard_user = "ntdrive-user"
+    cfg.guest.standard_password_env = "NTDRIVE_TEST_STDPW"
+    vm = await _vm(service)
+    assert vm["guest"]["standard_user"] == "ntdrive-user"
+    assert any("NTDRIVE_TEST_STDPW is empty" in issue for issue in vm["issues"])

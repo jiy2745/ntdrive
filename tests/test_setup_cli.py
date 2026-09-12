@@ -50,7 +50,7 @@ def _run(env: dict[str, Any], args: list[str], input_text: str) -> Result:
 def test_setup_writes_the_entry_and_keeps_secrets_out_of_the_file(env: dict[str, Any]) -> None:
     # Pick VM 1, accept the suggested name, type the account, the password twice, then Enter for
     # "encryption password = guest password".
-    result = _run(env, [], "1\n\nalice\npw1\npw1\n\n")
+    result = _run(env, [], "1\n\nalice\npw1\npw1\n\n\n")
     assert result.exit_code == 0, result.output
     vm = load_config(env["config"]).vms["win11-dev"]
     assert Path(vm.vmx) == env["vmx"].resolve() and vm.kd_transport == "net"
@@ -68,12 +68,12 @@ def test_setup_adds_a_second_vm_and_updates_an_existing_one(
     env: dict[str, Any], tmp_path: Path
 ) -> None:
     first = _run(
-        env, ["--name", "one", "--user", "u1", "--transport", "serial"], "1\npw\npw\nvmpw\n"
+        env, ["--name", "one", "--user", "u1", "--transport", "serial"], "1\npw\npw\n\nvmpw\n"
     )
     assert first.exit_code == 0, first.output
     other = tmp_path / "other.vmx"
     other.write_text('displayName = "Other"\n')
-    second = _run(env, ["--vmx", str(other), "--name", "two", "--user", "u2"], "pw2\npw2\n")
+    second = _run(env, ["--vmx", str(other), "--name", "two", "--user", "u2"], "pw2\npw2\n\n")
     assert second.exit_code == 0, second.output
     cfg = load_config(env["config"])
     assert set(cfg.vms) == {"one", "two"}
@@ -89,7 +89,7 @@ def test_setup_adds_a_second_vm_and_updates_an_existing_one(
     }
 
     # Running again for "one": Enter keeps both stored passwords, the account can change.
-    again = _run(env, ["--name", "one", "--user", "u9"], "1\n\n\n")
+    again = _run(env, ["--name", "one", "--user", "u9"], "1\n\n\n\n")
     assert again.exit_code == 0, again.output
     cfg = load_config(env["config"])
     one = cfg.vms["one"]
@@ -99,7 +99,7 @@ def test_setup_adds_a_second_vm_and_updates_an_existing_one(
 
 
 def test_enter_at_the_vm_password_shares_a_kept_guest_password(env: dict[str, Any]) -> None:
-    first = _run(env, ["--name", "dev", "--user", "u"], "1\npw\npw\n\n")
+    first = _run(env, ["--name", "dev", "--user", "u"], "1\npw\npw\n\n\n")
     assert first.exit_code == 0, first.output
     # The VM was encrypted after the first run, or the entry was written by hand.
     raw = yaml.safe_load(env["config"].read_text())
@@ -107,7 +107,7 @@ def test_enter_at_the_vm_password_shares_a_kept_guest_password(env: dict[str, An
     env["config"].write_text(yaml.safe_dump(raw, sort_keys=False))
     assert load_config(env["config"]).vms["dev"].encryption_password_env == ""
 
-    again = _run(env, ["--name", "dev", "--user", "u"], "1\n\n\n")
+    again = _run(env, ["--name", "dev", "--user", "u"], "1\n\n\n\n")
     assert again.exit_code == 0, again.output
     vm = load_config(env["config"]).vms["dev"]
     assert (
@@ -117,7 +117,7 @@ def test_enter_at_the_vm_password_shares_a_kept_guest_password(env: dict[str, An
 
 
 def test_setup_can_store_secrets_inline(env: dict[str, Any]) -> None:
-    result = _run(env, ["--inline-secrets", "--name", "dev", "--user", "u"], "1\npw\npw\n\n")
+    result = _run(env, ["--inline-secrets", "--name", "dev", "--user", "u"], "1\npw\npw\n\n\n")
     assert result.exit_code == 0, result.output
     vm = load_config(env["config"]).vms["dev"]
     assert vm.guest.password == "pw" and vm.encryption_password == "pw"
@@ -127,9 +127,9 @@ def test_setup_can_store_secrets_inline(env: dict[str, Any]) -> None:
 def test_setup_refuses_a_name_that_would_share_another_vms_variable(
     env: dict[str, Any],
 ) -> None:
-    first = _run(env, ["--name", "win11-dev", "--user", "u"], "1\npw\npw\n\n")
+    first = _run(env, ["--name", "win11-dev", "--user", "u"], "1\npw\npw\n\n\n")
     assert first.exit_code == 0, first.output
-    clash = _run(env, ["--name", "win11_dev", "--user", "v", "--no-restart"], "1\npw\npw\n\n")
+    clash = _run(env, ["--name", "win11_dev", "--user", "v", "--no-restart"], "1\npw\npw\n\n\n")
     assert clash.exit_code == 2, clash.output
     assert "NTDRIVE_WIN11_DEV_PW" in clash.output and "win11-dev" in clash.output
     assert set(load_config(env["config"]).vms) == {"win11-dev"}
@@ -139,7 +139,7 @@ def test_setup_survives_a_null_kdnet_in_another_entry(env: dict[str, Any]) -> No
     env["config"].write_text(
         "vms:\n  old:\n    vmx: D:/x/x.vmx\n    guest:\n      user: u\n    kdnet:\n"
     )
-    result = _run(env, ["--name", "dev", "--user", "u", "--no-restart"], "1\npw\npw\n\n")
+    result = _run(env, ["--name", "dev", "--user", "u", "--no-restart"], "1\npw\npw\n\n\n")
     assert result.exit_code == 0, result.output
     cfg = load_config(env["config"])
     assert set(cfg.vms) == {"old", "dev"} and cfg.vms["dev"].kdnet.port == 50000
@@ -151,7 +151,7 @@ def test_setup_without_restart_prints_the_config_checks(
     vmx = tmp_path / "sb.vmx"
     vmx.write_text('displayName = "sb"\nuefi.secureBoot.enabled = "TRUE"\n')
     result = _run(
-        env, ["--vmx", str(vmx), "--name", "sb", "--user", "u", "--no-restart"], "pw\npw\n"
+        env, ["--vmx", str(vmx), "--name", "sb", "--user", "u", "--no-restart"], "pw\npw\n\n"
     )
     assert result.exit_code == 0, result.output
     assert "Secure Boot is on" in result.output and "kdnet key not set" in result.output
@@ -164,14 +164,14 @@ def test_setup_honours_ntdrive_config_before_the_file_exists(
     monkeypatch.setenv("NTDRIVE_CONFIG", str(target))
     cli = build_cli(load_builtin_tools())
     result = CliRunner().invoke(
-        cli, ["setup", "--name", "dev", "--user", "u", "--no-restart"], input="1\npw\npw\n\n"
+        cli, ["setup", "--name", "dev", "--user", "u", "--no-restart"], input="1\npw\npw\n\n\n"
     )
     assert result.exit_code == 0, result.output
     assert target.is_file() and "dev" in load_config(target).vms
 
 
 def test_setup_rejects_a_bad_name_and_a_missing_vmx(env: dict[str, Any], tmp_path: Path) -> None:
-    bad = _run(env, ["--name", "no spaces", "--user", "u", "--no-restart"], "1\npw\npw\n\n")
+    bad = _run(env, ["--name", "no spaces", "--user", "u", "--no-restart"], "1\npw\npw\n\n\n")
     assert bad.exit_code == 2 and "letters, digits" in bad.output
     missing = _run(env, ["--vmx", str(tmp_path / "nope.vmx"), "--no-restart"], "")
     assert missing.exit_code == 2 and "vmx not found" in missing.output
@@ -199,7 +199,7 @@ def test_mask_shows_enough_to_recognize_a_password() -> None:
 
 
 def test_setup_explains_the_passwords_before_asking(env: dict[str, Any]) -> None:
-    result = _run(env, ["--name", "dev", "--user", "u", "--no-restart"], "1\npw12\npw12\n\n")
+    result = _run(env, ["--name", "dev", "--user", "u", "--no-restart"], "1\npw12\npw12\n\n\n")
     assert result.exit_code == 0, result.output
     assert "INFO  guest password: the Windows password of that account" in result.output
     assert "INFO  VM encryption password: the one VMware asked for" in result.output
@@ -208,3 +208,28 @@ def test_setup_explains_the_passwords_before_asking(env: dict[str, Any]) -> None
         "== 3/3 Write and check" in result.output
         and "DONE: dev is configured on the host" in result.output
     )
+
+
+def test_setup_stores_an_optional_standard_account(env: dict[str, Any]) -> None:
+    # Account and password, then the standard account and its password, Enter for encryption.
+    result = _run(env, ["--name", "dev"], "1\nalice\npw1\npw1\ntester\npw2\npw2\n\n")
+    assert result.exit_code == 0, result.output
+    vm = load_config(env["config"]).vms["dev"]
+    assert vm.guest.user == "alice" and vm.guest.standard_user == "tester"
+    assert vm.guest.standard_password_env == "NTDRIVE_DEV_STDPW"
+    assert env["store"] == {"NTDRIVE_DEV_PW": "pw1", "NTDRIVE_DEV_STDPW": "pw2"}
+    assert "pw2" not in env["config"].read_text()
+    assert "INFO  standard account: optional" in result.output
+    assert "run setup-guest.cmd -Standard -StandardAccount tester" in result.output
+    # Enter everywhere keeps both accounts and both passwords.
+    again = _run(env, ["--name", "dev"], "1\n\n\n\n\n\n")
+    assert again.exit_code == 0, again.output
+    vm = load_config(env["config"]).vms["dev"]
+    assert vm.guest.standard_user == "tester" and len(env["store"]) == 2
+    assert "Password of tester (Enter keeps the current one" in again.output
+    # "none" drops the standard account (the option or the prompt).
+    dropped = _run(env, ["--name", "dev", "--standard-user", "none"], "1\n\n\n\n")
+    assert dropped.exit_code == 0, dropped.output
+    vm = load_config(env["config"]).vms["dev"]
+    assert vm.guest.standard_user == "" and vm.guest.standard_password_env == ""
+    assert "run setup-guest.cmd (OpenSSH and KDNET" in dropped.output

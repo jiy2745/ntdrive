@@ -76,7 +76,9 @@ for administrator rights itself (one UAC click), creates a local administrator `
 for its password (type the same one in `ntdrive setup` on the host, `-NoAccount` uses your own
 account instead), installs OpenSSH Server with PowerShell as the default shell, opens port 22 and
 turns on KDNET (the host IP comes from the NAT gateway, the key
-is generated in the guest and never needs copying). On Insider builds, where
+is generated in the guest and never needs copying). `-Standard` also creates `ntdrive-user`, a
+plain account without administrator rights, for terminals opened with `term_open
+account=standard` (the agent then sees what a normal user sees). On Insider builds, where
 `Add-WindowsCapability` has no package, it falls back to the Win32-OpenSSH zip (`-OpenSshZip
 <file>` for a guest without internet). Running it again is safe. Reboot the guest when it says so.
 
@@ -95,7 +97,7 @@ scripts\setup-host.cmd
 It runs `uv sync`, puts the `ntdrive`, `ntdrive-mcp` and `ntdrived` commands on your PATH (an
 editable `uv tool install`, so they follow the clone), then for each VM you pick from the VMware
 library asks for the guest account and passwords (masked while you type, echoed partly masked so a typo shows, stored as User
-environment variables, never in a file), restarts the daemon, repairs the host firewall for KDNET through one UAC prompt
+environment variables, never in a file, and Enter skips the optional standard account), restarts the daemon, repairs the host firewall for KDNET through one UAC prompt
 and ends with `sys health`. Run it again to add a VM, or run `ntdrive setup` on its own. The config
 lands in `%LOCALAPPDATA%\ntdrive\vms.yaml`, and `vms.example.yaml` documents every field. Without a
 clone: `uv tool install git+https://github.com/jiy2745/ntdrive`, then `ntdrive setup`.

@@ -124,6 +124,8 @@ def config_issues(cfg: VmConfig, backends: set[str]) -> list[str]:
     empty_envs: list[str] = []
     if cfg.guest.password_env and not cfg.guest.resolve_password():
         empty_envs.append(cfg.guest.password_env)
+    if cfg.guest.standard_password_env and not cfg.guest.resolve_standard_password():
+        empty_envs.append(cfg.guest.standard_password_env)
     if cfg.encryption_password_env and not cfg.resolve_encryption_password():
         empty_envs.append(cfg.encryption_password_env)
     for env in dict.fromkeys(empty_envs):
@@ -194,6 +196,8 @@ async def _probe_vm(
                 issues.append(status.issue())
     guest: dict[str, Any] = {
         "ip": None,
+        "user": cfg.guest.user,
+        "standard_user": cfg.guest.standard_user or None,
         "ssh_port": cfg.guest.ssh_port,
         "ssh_open": None,
         "skipped": None,

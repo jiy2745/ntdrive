@@ -31,8 +31,14 @@ vms:
     kdnet_hostip: "192.168.126.1" # net only: IPv4 of "VMware Network Adapter VMnet8" on the host
 
     guest:
+      # The administrator account SSH logs in with: ntdrive's own guest work (bcdedit, SFTP)
+      # and the default for terminals. setup-guest.cmd creates "ntdrive".
       user: "dev"
       password_env: "NTDRIVE_WIN11_DEV_PW" # the password is read from this environment variable
+      # Optional second account without administrator rights, for term_open account=standard
+      # (drive the guest the way a plain user sees it). setup-guest.cmd -Standard creates it.
+      standard_user: "" # for example "ntdrive-user"
+      standard_password_env: "" # for example "NTDRIVE_WIN11_DEV_STDPW" (or standard_password inline)
       ssh_port: 22
       shell: powershell # powershell | cmd | pwsh
     kdnet: # net only

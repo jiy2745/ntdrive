@@ -11,6 +11,12 @@
   SSH logs in with a Windows account and its password, and a personal account may have none or
   allow Windows Hello only. Type the same password in ntdrive setup on the host.
 
+  -Standard also creates a second account without administrator rights (ntdrive-user,
+  -StandardAccount changes the name) and asks for its password. ntdrive opens a terminal as it
+  when asked (term_open account=standard), so the guest can be driven the way a plain user sees
+  it: UAC prompts, access-denied paths, per-user settings. The administrator account stays,
+  because ntdrive's own work (reading the KDNET key over SSH, file copies) needs it.
+
   Installs and starts OpenSSH Server with PowerShell as the default shell, opens port 22, and
   enables kernel debugging with bcdedit. By default that is KDNET: the host IP is inferred from the
   NAT gateway (x.x.x.2 means the host is x.x.x.1, -HostIp overrides), the key is generated in the
@@ -41,12 +47,18 @@
 .EXAMPLE
   setup-guest.cmd -NoAccount
   Use your own Windows account for SSH instead of creating the ntdrive account.
+
+.EXAMPLE
+  setup-guest.cmd -Standard
+  Also create ntdrive-user, a plain account, for terminals opened as a standard user.
 #>
 
 [CmdletBinding()]
 param(
   [string]$Account = "ntdrive",
   [switch]$NoAccount,
+  [switch]$Standard,
+  [string]$StandardAccount = "ntdrive-user",
   [switch]$Serial,
   [switch]$OpenSshOnly,
   [string]$HostIp,
@@ -253,6 +265,31 @@ try {
     }
     Ok "account" "$Account is an administrator (bcdedit over SSH needs that)"
   }
+  if ($Standard) {
+    # A second account with no administrator rights, so the host can open a shell that sees the
+    # guest the way a plain user does. Users group only: that is what grants it a logon.
+    if (-not $NoAccount -and $StandardAccount -eq $Account) {
+      throw "-StandardAccount $StandardAccount is the administrator account, pick another name"
+    }
+    $secureStandard = Read-AccountPassword $StandardAccount
+    if (Get-LocalUser -Name $StandardAccount -ErrorAction SilentlyContinue) {
+      Set-LocalUser -Name $StandardAccount -Password $secureStandard -PasswordNeverExpires $true
+      Ok "standard account" "$StandardAccount exists, password set"
+    } else {
+      New-LocalUser -Name $StandardAccount -Password $secureStandard -PasswordNeverExpires `
+        -AccountNeverExpires -Description "ntdrive: standard user for terminals" | Out-Null
+      Ok "standard account" "$StandardAccount created"
+    }
+    $adminGroup = Get-LocalGroup -SID "S-1-5-32-544"
+    if (Get-LocalGroupMember -Group $adminGroup -Member $StandardAccount -ErrorAction SilentlyContinue) {
+      throw "$StandardAccount is an administrator and a standard account must not be: pick another name with -StandardAccount"
+    }
+    $userGroup = Get-LocalGroup -SID "S-1-5-32-545"
+    if (-not (Get-LocalGroupMember -Group $userGroup -Member $StandardAccount -ErrorAction SilentlyContinue)) {
+      Add-LocalGroupMember -Group $userGroup -Member $StandardAccount
+    }
+    Ok "standard account" "$StandardAccount is a plain user (Users group, no administrator rights)"
+  }
   if (Get-Service sshd -ErrorAction SilentlyContinue) {
     Ok "sshd" "service already present, keeping it"
   } elseif (-not (Install-OpenSshCapability)) {
@@ -331,6 +368,9 @@ try {
   } else {
     Info "guest account" "$user (use this name and its Windows password in ntdrive setup on the host)"
     Info "no password or Windows Hello only?" "run setup-guest.cmd without -NoAccount to get a local administrator for ntdrive"
+  }
+  if ($Standard) {
+    Info "standard account" "$StandardAccount (a plain user: at the standard account prompt of ntdrive setup on the host type this name and its password)"
   }
   Info "guest IPv4" "$($ips -join ', ') (ntdrive finds it through VMware Tools, this is for a manual ssh test)"
   if ($listening) { Ok "sshd listening" "port 22" } else { Warn "sshd listening" "port 22 is not listening yet" }

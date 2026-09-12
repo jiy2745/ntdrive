@@ -3,7 +3,12 @@ import asyncio
 import pytest
 
 from ntdrive.core.service import NtDriveService
-from ntdrive.errors import GUEST_FROZEN_BY_DEBUGGER, SESSION_DISCONNECTED, NtDriveError
+from ntdrive.errors import (
+    GUEST_FROZEN_BY_DEBUGGER,
+    INVALID_ARGS,
+    SESSION_DISCONNECTED,
+    NtDriveError,
+)
 from ntdrive.term.keys import encode_key_list, encode_keys
 from ntdrive.term.session import RingBuffer, TermSession, clean_text
 
@@ -114,3 +119,42 @@ async def test_terminal_refused_while_debugger_holds_guest(
     assert (await service.call("term_read", {"session_id": opened["session_id"]}))[
         "state"
     ] == "open"
+
+
+async def test_term_open_as_the_standard_account(
+    service: NtDriveService, fake_transport: FakeTransport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("term_open", {"vm": "win11-dev", "account": "standard"})
+    assert exc.value.code == INVALID_ARGS and "setup-guest.cmd -Standard" in exc.value.hint
+    assert fake_transport.opened_as == []  # refused before any SSH login
+
+    cfg = service.config.vms["win11-dev"]
+    cfg.guest.standard_user = "ntdrive-user"
+    cfg.guest.standard_password = "plain-pw"
+    plain = await service.call("term_open", {"vm": "win11-dev", "account": "standard"})
+    assert plain["account"] == "standard"
+    assert fake_transport.opened_as == [("win11-dev", "standard")]
+    listed = await service.call("term_list", {"vm": "win11-dev"})
+    assert listed["sessions"][0]["account"] == "standard"
+    # The default stays the administrator, on its own SSH connection.
+    admin = await service.call("term_open", {"vm": "win11-dev"})
+    assert admin["account"] == "admin"
+    assert fake_transport.opened_as == [("win11-dev", "standard"), ("win11-dev", "admin")]
+
+    # After a reboot each session is reopened as the account it had.
+    import ntdrive.term.manager as manager_mod
+
+    async def fake_wait(host: str, port: int, timeout: float, interval: float = 2.0) -> bool:
+        return True
+
+    monkeypatch.setattr(manager_mod, "wait_for_port", fake_wait)
+    dropped = service.term.mark_disconnected("win11-dev")
+    await service.term.drop_transport("win11-dev")
+    successors = await service.term.reopen(cfg, "10.0.0.5", dropped, 1)
+    pairs = [
+        (service.term.get(old).account, new.account)
+        for old, new in zip(dropped, successors, strict=True)
+    ]
+    assert len(pairs) == 2 and all(old == new for old, new in pairs)

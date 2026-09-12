@@ -170,6 +170,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | TERM-13 | Output size cap: a single `term_read` is at most 64 KB. Beyond that it returns `truncated: true` and the next cursor. | P0 |
 | TERM-14 | **PowerShell Direct transport** (Hyper-V only): run guest commands without a network via `New-PSSession -VMName`. It is not a PTY, so `screen` mode is unsupported and only `term_exec` and `delta` work. Used for early setup (installing OpenSSH, KDNET bcdedit) before SSH works. Later version. | P2 |
 | TERM-15 | `hvc ssh` (SSH over a Hyper-V socket) transport: a PTY without a network for Linux guests. Excluded for Windows guests because Win32-OpenSSH does not yet accept Hyper-V sockets. | P2 |
+| TERM-16 | **Standard-user terminals.** A VM may name a second guest account without administrator rights (`guest.standard_user`, its password in `standard_password_env` or `standard_password`). `term_open account=standard` logs in as it, so the agent can drive the guest the way a plain user sees it (UAC prompts, access-denied paths, per-user settings). The default `account=admin` (`guest.user`) stays what ntdrive itself uses for bcdedit over SSH and SFTP, and each account gets its own SSH connection. Reopened sessions keep their account. `scripts/setup-guest.ps1 -Standard` creates the account (`ntdrive-user`), `ntdrive setup` asks for it, `ntdrive verify` proves its login. | P1 |
 | TERM-16 | Serial console transport for Linux guests. Same interface. | P2 |
 
 ### 5.5 FR-CON: console screen (secondary)
@@ -395,13 +396,13 @@ messages are written in English (ST-9).
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `term_open` | `vm, shell=powershell\|cmd\|pwsh, transport=auto\|ssh\|psdirect, cols=120, rows=40` | `{session_id, transport, coview_url}` |
+| `term_open` | `vm, shell=powershell\|cmd\|pwsh, transport=auto\|ssh\|psdirect, account=admin\|standard, cols=120, rows=40` | `{session_id, transport, account, coview_url}` |
 | `term_send` | `session_id, text | keys[], enter=true` | `{bytes_sent}` |
 | `term_read` | `session_id, mode=delta\|screen, until?, timeout=0, max_bytes=65536` | `{text, cursor, truncated, matched?, state}` |
 | `term_exec` | `session_id, cmd, timeout=60` | `{output, exit_code?, elapsed_ms}` |
 | `term_resize` | `session_id, cols, rows` | `{}` |
 | `term_close` | `session_id` | `{}` |
-| `term_list` | `vm?` | `[{session_id, vm, shell, transport, state, last_activity, successor?}]` |
+| `term_list` | `vm?` | `[{session_id, vm, shell, transport, account, state, last_activity, successor?}]` |
 
 ### 7.4 Console / file / system
 
@@ -412,7 +413,7 @@ messages are written in English (ST-9).
 | `file_push` | `vm, local, remote, verify=true` (`local` is an absolute host path, the CLI and SDK absolutize) | `{files, bytes, verified, via: sftp\|guest_tools, copied:[...], note?}` |
 | `file_pull` | `vm, remote, local` (a trailing separator on `local` means directory) | `{bytes, via, note?}` |
 | `sys_state` | `vm?` | unified VM, KD, TERM state |
-| `sys_health` | - | binary paths and versions, backend capabilities, hypervisor service, a `kdnet_firewall` read when any VM uses net, and per VM: config `issues` (missing vmx, Secure Boot on, wrong NIC for KDNET, encrypted VM without a password, empty password environment variables, missing serial pipe or KDNET key, each naming the fix), `power`, `kd_state`, `guest {ip, ssh_port, ssh_open, skipped}`, and `serial_pipe {path, open}` or `kdnet_port {port, free, held_by_ntdrive, firewall_ok}`. The guest probe is bounded to a few seconds and skipped while the VM is off or frozen by the debugger |
+| `sys_health` | - | binary paths and versions, backend capabilities, hypervisor service, a `kdnet_firewall` read when any VM uses net, and per VM: config `issues` (missing vmx, Secure Boot on, wrong NIC for KDNET, encrypted VM without a password, empty password environment variables, missing serial pipe or KDNET key, each naming the fix), `power`, `kd_state`, `guest {ip, user, standard_user, ssh_port, ssh_open, skipped}`, and `serial_pipe {path, open}` or `kdnet_port {port, free, held_by_ntdrive, firewall_ok}`. The guest probe is bounded to a few seconds and skipped while the VM is off or frozen by the debugger |
 
 ### 7.5 Config file (`vms.yaml`)
 
@@ -434,8 +435,10 @@ vms:
     kd_transport: net              # net (KDNET, the default, one UAC prompt) or serial (named pipe, no prompt)
     serial_pipe: ""                # empty = \\.\pipe\ntdrive-<vm name>
     guest:
-      user: "dev"
+      user: "dev"                  # an administrator: ntdrive's own guest work and the default for terminals
       password_env: "NTDRIVE_WIN11_DEV_PW"
+      standard_user: ""            # optional: a plain account for term_open account=standard
+      standard_password_env: ""    # its password (or standard_password inline)
       ssh_port: 22
       shell: powershell
     kdnet:
@@ -508,7 +511,7 @@ tool JSON. Exit codes: 0 ok, 2 bad arguments, 3 `confirm_required`, 4 `guest_fro
 |---|---|
 | OpenSSH Server | `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`, or the Win32-OpenSSH zip (`install-sshd.ps1`) where the capability cannot be installed (Insider builds have no Feature-on-Demand package). `scripts/setup-guest.ps1` tries the capability and falls back to the zip. Service auto-start, default shell set to PowerShell (`HKLM:\SOFTWARE\OpenSSH\DefaultShell`) |
 | Kernel debug | `bcdedit /debug on` plus either `bcdedit /dbgsettings serial debugport:1 baudrate:115200` (serial) or `bcdedit /dbgsettings net hostip:<hostip> port:<n> key:<key>` (KDNET, the default), then reboot. `kd_setup_guest` does this over SSH |
-| Login | At least one local account (for PowerShell Direct and SSH auth). `scripts/setup-guest.ps1` creates a local administrator (`ntdrive`) for this |
+| Login | At least one local administrator account with a password (for PowerShell Direct and SSH auth, and bcdedit over SSH). `scripts/setup-guest.ps1` creates `ntdrive` for this. `-Standard` also creates `ntdrive-user`, a member of Users only, for terminals opened with `account=standard` |
 | Power | Sleep and hibernate off: a debugged or remotely driven VM must never sleep (it freezes and drops SSH) or hibernate (it tears down the KDNET/serial link). `scripts/setup-guest.ps1` sets `powercfg /change standby-timeout-* 0` and `/hibernate off` |
 
 ### 8.5 First-time setup flow (run by the agent)

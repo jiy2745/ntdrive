@@ -9,14 +9,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ntdrive.config import HostConfig, VmConfig, state_dir
+from ntdrive.config import GuestAccount, HostConfig, VmConfig, state_dir
 from ntdrive.core.state import StateStore, TermInfo, TermState
 from ntdrive.errors import BACKEND_UNSUPPORTED, SESSION_NOT_FOUND, TIMEOUT, NtDriveError
 from ntdrive.term.session import TermSession
 from ntdrive.term.ssh import SHELL_COMMANDS, SshPtyTransport, wait_for_port
 from ntdrive.term.transport import TermTransport
 
-TransportFactory = Callable[[VmConfig, str], TermTransport]
+# (vm, guest ip, account) -> a transport logged in as that account ("admin" or "standard").
+TransportFactory = Callable[[VmConfig, str, GuestAccount], TermTransport]
 
 # PSReadLine redraws the input line on every keystroke, which floods delta reads with echo
 # fragments ("ping -t ping -t 1ping -t 12..."). Unloading it gives a plain line editor.
@@ -29,15 +30,17 @@ SHELL_READY_TIMEOUT = 5.0
 def default_transport_factory(host: HostConfig) -> TransportFactory:
     """Build SSH transports from the VM config."""
 
-    def factory(vm: VmConfig, ip: str) -> TermTransport:
+    def factory(vm: VmConfig, ip: str, account: GuestAccount) -> TermTransport:
+        user, password = vm.guest.credentials(account)
         return SshPtyTransport(
             ip,
             vm.guest.ssh_port,
-            vm.guest.user,
-            vm.guest.resolve_password(),
+            user,
+            password,
             connect_timeout=host.ssh_connect_timeout,
-            # Pinned per VM so a reverted or rebooted guest keeps working and a stranger on the
-            # same DHCP address is refused before the password is sent.
+            # Pinned per VM (both accounts talk to the same sshd) so a reverted or rebooted guest
+            # keeps working and a stranger on the same DHCP address is refused before the
+            # password is sent.
             host_key_file=state_dir() / "hostkeys" / f"{vm.name}.json",
         )
 
@@ -61,8 +64,9 @@ class TermManager:
         self._factory = transport_factory or default_transport_factory(host)
         self.coview_base = coview_base
         self._sessions: dict[str, TermSession] = {}
-        self._transports: dict[str, TermTransport] = {}
-        self._ips: dict[str, str] = {}
+        # One SSH connection per VM and account, so admin and standard shells never share one.
+        self._transports: dict[tuple[str, str], TermTransport] = {}
+        self._ips: dict[tuple[str, str], str] = {}
 
     # -- lookup -------------------------------------------------------------------------
 
@@ -87,20 +91,23 @@ class TermManager:
                 out.append(info.to_dict())
         return out
 
-    def transport_for(self, vm: VmConfig) -> TermTransport | None:
-        """The live transport for a VM, if any (used by file tools)."""
-        return self._transports.get(vm.name)
+    def transport_for(self, vm: VmConfig, account: GuestAccount = "admin") -> TermTransport | None:
+        """The live transport for a VM and account, if any (file tools use the admin one)."""
+        return self._transports.get((vm.name, account))
 
-    async def transport(self, vm: VmConfig, ip: str) -> TermTransport:
-        """Transport for a VM, creating it on first use or when the IP changed."""
-        existing = self._transports.get(vm.name)
-        if existing is not None and self._ips.get(vm.name) == ip:
+    async def transport(
+        self, vm: VmConfig, ip: str, account: GuestAccount = "admin"
+    ) -> TermTransport:
+        """Transport for a VM and account, created on first use or when the IP changed."""
+        key = (vm.name, account)
+        existing = self._transports.get(key)
+        if existing is not None and self._ips.get(key) == ip:
             return existing
         if existing is not None:
             await existing.close()
-        transport = self._factory(vm, ip)
-        self._transports[vm.name] = transport
-        self._ips[vm.name] = ip
+        transport = self._factory(vm, ip, account)
+        self._transports[key] = transport
+        self._ips[key] = ip
         return transport
 
     # -- lifecycle ----------------------------------------------------------------------
@@ -113,20 +120,21 @@ class TermManager:
         cols: int,
         rows: int,
         transport_kind: str = "auto",
+        account: GuestAccount = "admin",
     ) -> TermSession:
-        """Open a new PTY session on the VM."""
+        """Open a new PTY session on the VM, logged in as one of its two accounts."""
         if transport_kind not in ("auto", "ssh"):
             raise NtDriveError(
                 BACKEND_UNSUPPORTED,
                 f"transport {transport_kind} is not available in this version",
                 "use transport=ssh",
             )
-        transport = await self.transport(vm, ip)
+        transport = await self.transport(vm, ip, account)
         session_id = f"t-{secrets.token_hex(4)}"
         loop = asyncio.get_running_loop()
         log_path = self.log_dir / "term" / f"{vm.name}-{session_id}.cast"
         session = TermSession(
-            session_id, vm.name, shell, transport.name, cols, rows, log_path, loop
+            session_id, vm.name, shell, transport.name, cols, rows, log_path, loop, account=account
         )
         channel = await transport.open_channel(
             SHELL_COMMANDS.get(shell),
@@ -142,6 +150,7 @@ class TermManager:
             vm=vm.name,
             shell=shell,
             transport=transport.name,
+            account=account,
             coview_url=f"{self.coview_base}#{session_id}" if self.coview_base else "",
         )
         self.state.vm(vm.name).terms[session_id] = info
@@ -185,10 +194,10 @@ class TermManager:
         return dropped
 
     async def drop_transport(self, vm: str) -> None:
-        """Forget the SSH connection for a VM (its TCP state is stale after a revert)."""
-        transport = self._transports.pop(vm, None)
-        self._ips.pop(vm, None)
-        if transport is not None:
+        """Forget the SSH connections of a VM (their TCP state is stale after a revert)."""
+        for key in [k for k in self._transports if k[0] == vm]:
+            transport = self._transports.pop(key)
+            self._ips.pop(key, None)
             await transport.close()
 
     async def reopen(
@@ -211,7 +220,8 @@ class TermManager:
             shell = old.shell if old else vm.guest.shell
             cols = old.cols if old else 120
             rows = old.rows if old else 40
-            new = await self.open(vm, ip, shell, cols, rows)
+            account: GuestAccount = "standard" if old and old.account == "standard" else "admin"
+            new = await self.open(vm, ip, shell, cols, rows, account=account)
             if old is not None:
                 old.successor = new.session_id
             info = self.state.term(old_id)

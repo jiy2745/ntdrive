@@ -47,6 +47,7 @@ class TermInfo:
     vm: str
     shell: str
     transport: str
+    account: str = "admin"
     state: TermState = TermState.OPEN
     opened_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
@@ -60,6 +61,7 @@ class TermInfo:
             "vm": self.vm,
             "shell": self.shell,
             "transport": self.transport,
+            "account": self.account,
             "state": str(self.state),
             "opened_at": self.opened_at,
             "last_activity": self.last_activity,

@@ -25,9 +25,15 @@ from ntdrive.errors import NtDriveError
 Report = list[dict[str, Any]]
 
 
-def ssh_fix(message: str, vm: str) -> str:
-    """The fix for a failed SSH login, from the error text."""
+def ssh_fix(message: str, vm: str, standard: str = "") -> str:
+    """The fix for a failed SSH login, from the error text (`standard` names that account)."""
     lower = message.lower()
+    if "authentication" in lower and standard:
+        return (
+            f"the password of {standard} is wrong: run ntdrive setup --name {vm} and, at the "
+            "standard account prompt, type the name and password that setup-guest.cmd -Standard "
+            "set in the guest, or run that there first"
+        )
     if "authentication" in lower:
         return (
             f"the account or password is wrong: run ntdrive setup --name {vm} and type the "
@@ -85,13 +91,25 @@ def verify_vm(client: DaemonClient, name: str, out: Out) -> Report:
     else:
         passed("power", "running")
 
+    guest = vm.get("guest") or {}
     try:
         opened = client.call("term_open", {"vm": name})
     except NtDriveError as exc:
         return failed("ssh", exc.message, ssh_fix(exc.message, name))
     with contextlib.suppress(NtDriveError):
         client.call("term_close", {"session_id": opened["session_id"]})
-    passed("ssh", "logged in as the configured account and got a shell")
+    passed("ssh", f"logged in as {guest.get('user') or 'the configured account'} and got a shell")
+    standard = str(guest.get("standard_user") or "")
+    if standard:
+        # The optional second account, without administrator rights. Its password is a separate
+        # secret, so a typo there would only show up on the first term_open account=standard.
+        try:
+            opened = client.call("term_open", {"vm": name, "account": "standard"})
+        except NtDriveError as exc:
+            return failed("ssh standard", exc.message, ssh_fix(exc.message, name, standard))
+        with contextlib.suppress(NtDriveError):
+            client.call("term_close", {"session_id": opened["session_id"]})
+        passed("ssh standard", f"logged in as {standard}, a plain user, and got a shell")
 
     if vm.get("kd_transport") == "net":
         try:

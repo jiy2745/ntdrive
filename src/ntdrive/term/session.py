@@ -84,11 +84,13 @@ class TermSession:
         log_path: Path | None,
         loop: asyncio.AbstractEventLoop,
         ring_capacity: int = 1 << 20,
+        account: str = "admin",
     ) -> None:
         self.session_id = session_id
         self.vm = vm
         self.shell = shell
         self.transport_name = transport_name
+        self.account = account  # which guest account the shell runs as: admin or standard
         self.cols = cols
         self.rows = rows
         self._loop = loop
