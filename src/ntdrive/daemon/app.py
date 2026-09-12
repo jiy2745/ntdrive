@@ -244,8 +244,21 @@ def create_app(service: NtDriveService, token: str, view_token: str = "") -> web
     return app
 
 
+def _log_loop_exception(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """Record errors asyncio would otherwise swallow, so a crash leaves a trace in the log.
+
+    A client that drops a long-poll connection (a `kd_wait_event` that the agent abandons) can
+    surface as a ConnectionResetError (WinError 10054) inside a transport callback, where the
+    default handler logs only a terse message. Logging the full traceback here makes such an
+    event diagnosable from daemon.out.log instead of appearing as an unexplained restart.
+    """
+    exc = context.get("exception")
+    log.error("unhandled event-loop error: %s", context.get("message"), exc_info=exc)
+
+
 async def serve(config_path: str | None = None, bind: str | None = None) -> None:
     """Run the daemon until /api/shutdown or SIGINT."""
+    asyncio.get_running_loop().set_exception_handler(_log_loop_exception)
     config = load_config(config_path)
     if bind:
         config.host.daemon_bind = bind

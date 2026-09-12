@@ -14,9 +14,14 @@ Read `AGENTS.md` and follow it.
   path. Install it once with `uv tool install -e .` (`scripts/setup-host.ps1` does this), which
   makes `ntdrive`, `ntdrive-mcp` and `ntdrived` run this checkout's code from any directory.
   Allow its tools with the permission rule `mcp__ntdrive__*`. The wait tools long-poll, so the
-  MCP tool-call timeout must be above the daemon cap (600 s by default). After a dependency
-  change run `uv tool install -e . --reinstall` with Claude Code closed, because its MCP server
-  holds `ntdrive-mcp.exe`. While it is open, run the checks with `uv run --no-sync`.
+  MCP tool-call timeout must be above the daemon cap (600 s by default). A reinstall
+  (`uv tool install -e . --reinstall` or `--force`) rewrites `ntdrive.exe`, `ntdrive-mcp.exe`
+  and `ntdrived.exe`, so it fails with "access is denied" while any of them is running: stop the
+  daemon first (`ntdrive daemon stop`) and close Claude Code, whose MCP server holds
+  `ntdrive-mcp.exe`. An editable install tracks the source, so a plain code edit needs no
+  reinstall, only a dependency change does. While Claude Code is open, run the checks with
+  `uv run --no-sync`. The installed command runs whichever checkout the editable install points
+  at, which need not be this one: `uv tool dir` then the `_editable_impl_ntdrive.pth` names it.
 - After editing daemon-side code run `uv run ntdrive daemon restart`, or the running daemon keeps
   serving the old code.
 - Before committing, run `uv run ruff format`, `uv run ruff check`, `uv run mypy` and
