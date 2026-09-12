@@ -206,7 +206,12 @@ def secret_prompt(label: str, confirm: bool) -> str:
 
     On a Windows console every character shows as * while typing. With confirm, an empty entry
     is refused and the password is asked twice. Without confirm, Enter returns "" (keep).
-    Anywhere else (tests, pipes) click's hidden prompt is used.
+
+    When stdin is not a terminal (an agent pipes the answers into `ntdrive setup`) one line is
+    read from stdin per prompt, so setup scripts without a console. getpass reads the Windows
+    console directly and would hang here, so it is never used. End of input raises a clean error
+    instead of blocking. The password is never taken from the command line (an argument would land
+    in shell history and the process list); it comes from the pipe.
     """
     if sys.platform == "win32" and sys.stdin.isatty():
         while True:
@@ -222,6 +227,21 @@ def secret_prompt(label: str, confirm: bool) -> str:
                 log.info("entered", mask(value))
                 return value
             log.warn("password", "the two entries differ, try again")
+    if not sys.stdin.isatty():
+        click.echo(f"{label}: ", nl=False)  # echo the prompt like click does, then read stdin
+        line = sys.stdin.readline()
+        click.echo("")
+        if line == "":
+            raise NtDriveError(
+                INVALID_ARGS,
+                f"{label}: reached end of input with nothing to read",
+                "pipe one line per prompt on stdin (the VM pick, names, then each password), or "
+                "run ntdrive setup in a terminal",
+            )
+        value = line.rstrip("\r\n")
+        if value:
+            log.info("entered", mask(value))
+        return value
     if confirm:
         value = str(click.prompt(label, hide_input=True, confirmation_prompt=True))
     else:
