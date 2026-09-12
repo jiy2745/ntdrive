@@ -8,6 +8,7 @@ does not: break-in needs the console it gets from CREATE_NO_WINDOW, see ntdrive.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 import sys
 from pathlib import Path
@@ -41,3 +42,18 @@ async def run_hidden(args: list[str], timeout: float) -> tuple[int, str]:
             TIMEOUT, f"{Path(args[0]).name} timed out after {timeout:.0f}s"
         ) from None
     return proc.returncode or 0, out.decode("utf-8", errors="replace")
+
+
+def force_utf8_stdio() -> None:
+    """Make stdout and stderr UTF-8 whatever the console code page says.
+
+    A redirected stream (a pipe, a file) inherits the locale encoding, cp949 on a Korean Windows,
+    and a kd output line or a symbol path with a character outside it raised UnicodeEncodeError
+    and killed the CLI. The Windows console itself is Unicode already, so this changes only the
+    redirected case, and it replaces rather than raises for anything still unencodable.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(OSError, ValueError):
+                reconfigure(encoding="utf-8", errors="replace")

@@ -183,7 +183,13 @@ async def reboot_flow(
             "use mode=kd (.reboot from the debugger) or kd_go first",
         )
     if mode == "kd" and (kd is None or kd.state != KdState.BROKEN):
-        raise NtDriveError(KD_NOT_BROKEN, "mode=kd needs a kd> prompt", "call kd_break first")
+        raise NtDriveError(
+            KD_NOT_BROKEN,
+            "mode=kd needs a kd> prompt",
+            "call kd_break first. If the guest crashed and kd shows [no_debuggee] (KDNET "
+            "dropped), use vm_reboot mode=hard confirm=true, and vm_stop mode=kill confirm=true "
+            "then vm_start when vmrun no longer answers",
+        )
     # Keep the SSH connection until the shutdown command went through it, then drop it.
     transport = service.term.transport_for(vm)
     dropped = service.term.mark_disconnected(vm.name)

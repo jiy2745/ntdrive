@@ -31,6 +31,7 @@ from ntdrive.errors import (
     TIMEOUT,
     NtDriveError,
 )
+from ntdrive.hostproc import force_utf8_stdio
 from ntdrive.paths import absolutize_local
 
 EXIT_CODES = {INVALID_ARGS: 2, CONFIRM_REQUIRED: 3, GUEST_FROZEN_BY_DEBUGGER: 4, TIMEOUT: 5}
@@ -305,6 +306,7 @@ def _daemon_group() -> click.Group:
 
 def main() -> None:
     """Entry point for `ntdrive`."""
+    force_utf8_stdio()
     registry = load_builtin_tools()
     cli = build_cli(registry)
     cli(prog_name="ntdrive")

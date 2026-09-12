@@ -1,3 +1,4 @@
+import io
 import sys
 from pathlib import Path
 
@@ -6,7 +7,9 @@ import pytest
 from ntdrive.config import Config
 from ntdrive.core.service import NtDriveService
 from ntdrive.core.state import PowerState
-from ntdrive.errors import BACKEND_ERROR, VM_NOT_RUNNING, NtDriveError
+from ntdrive.errors import BACKEND_ERROR, TIMEOUT, VM_NOT_RUNNING, NtDriveError
+from ntdrive.hostproc import force_utf8_stdio
+from ntdrive.hypervisor import vmware as vmware_mod
 from ntdrive.hypervisor.vmware import (
     VmwareAdapter,
     parse_current_snapshot,
@@ -15,7 +18,7 @@ from ntdrive.hypervisor.vmware import (
 )
 from ntdrive.hypervisor.vmx import apply_hardware, hardware_from_settings
 
-from .conftest import FakeVmrun
+from .conftest import FakeVmrun, never_reachable
 
 
 async def test_subprocess_runner_captures_output_and_exit_code() -> None:
@@ -148,3 +151,103 @@ async def test_vm_config_reads_and_writes_the_vmx_only_while_off(
     with pytest.raises(NtDriveError) as bad:
         await service.call("vm_config", {"vm": "win11-dev", "memory_mb": 1001})
     assert bad.value.code == "invalid_args"
+
+
+class _FakeProc:
+    def __init__(self, pid: int, on_kill) -> None:  # type: ignore[no-untyped-def]
+        self.pid = pid
+        self.on_kill = on_kill
+        self.waited: float | None = None
+
+    def kill(self) -> None:
+        self.on_kill()
+
+    def wait(self, timeout: float | None = None) -> None:
+        self.waited = timeout
+
+
+async def test_vm_stop_kill_ends_the_vmx_process_and_clears_locks(
+    service: NtDriveService, config: Config, fake_vmrun: FakeVmrun, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vm = config.vm("win11-dev")
+    folder = Path(vm.vmx).parent
+    (folder / "win11-dev.vmx.lck").mkdir()
+    (folder / "win11-dev.vmx.lck" / "M12345.lck").write_text("pid")
+    (folder / "disk.vmdk.lck").mkdir()
+    (folder / "keep.txt").write_text("stays")
+    await service.call("vm_start", {"vm": "win11-dev"})
+
+    def gone() -> None:
+        fake_vmrun.running = False
+
+    proc = _FakeProc(4242, gone)
+    monkeypatch.setattr(vmware_mod, "find_vmx_processes", lambda vmx: [proc])
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("vm_stop", {"vm": "win11-dev", "mode": "kill"})
+    assert exc.value.code == "confirm_required"  # a power cut, like hard
+    done = await service.call("vm_stop", {"vm": "win11-dev", "mode": "kill", "confirm": True})
+    assert done["killed"] == [4242] and proc.waited == 10
+    assert done["locks_removed"] == ["disk.vmdk.lck", "win11-dev.vmx.lck"]
+    assert done["power"] == "off" and "power_error" not in done
+    assert not (folder / "win11-dev.vmx.lck").exists() and (folder / "keep.txt").exists()
+
+
+async def test_vmrun_timeout_points_at_the_kill_path(config: Config) -> None:
+    async def hung(argv: list[str], timeout: float) -> tuple[int, str]:
+        raise NtDriveError(TIMEOUT, "vmrun.exe timed out after 180s")
+
+    adapter = VmwareAdapter(config.host.vmrun, runner=hung)
+    with pytest.raises(NtDriveError) as exc:
+        await adapter.stop(config.vm("win11-dev"), hard=True)
+    assert exc.value.code == TIMEOUT and exc.value.message.startswith("vmrun stop:")
+    assert "vm_stop mode=kill" in exc.value.hint
+
+
+def test_find_vmx_processes_matches_the_vmx_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Info:
+        def __init__(self, name: str, cmdline: list[str]) -> None:
+            self.info = {"pid": 1, "name": name, "cmdline": cmdline}
+
+    vmx = r"D:\VMs\win11\win11.vmx"
+    procs = [
+        Info(
+            "vmware-vmx.exe",
+            ["vmware-vmx.exe", "-s", "vmx.stdio.keep=TRUE", "d:/vms/win11/WIN11.vmx"],
+        ),
+        Info("vmrun.exe", ["vmrun.exe", "-T", "ws", "stop", vmx, "hard"]),
+        Info("vmware-vmx.exe", ["vmware-vmx.exe", r"D:\VMs\other\other.vmx"]),
+        Info("notepad.exe", [vmx]),
+    ]
+    monkeypatch.setattr(vmware_mod.psutil, "process_iter", lambda attrs: procs)
+    found = vmware_mod.find_vmx_processes(vmx)
+    assert [p.info["name"] for p in found] == ["vmware-vmx.exe", "vmrun.exe"]
+
+
+async def test_file_pull_on_a_dead_guest_points_at_the_debugger(
+    service: NtDriveService, config: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    service.ssh_probe = never_reachable  # type: ignore[assignment]
+    adapter = service.adapter_for(config.vm("win11-dev"))
+
+    async def dead(vm, remote, local):  # type: ignore[no-untyped-def]
+        raise NtDriveError(BACKEND_ERROR, "vmrun copyFileFromGuestToHost failed: tools not running")
+
+    monkeypatch.setattr(adapter, "copy_from_guest", dead)
+    with pytest.raises(NtDriveError) as exc:
+        await service.call(
+            "file_pull",
+            {"vm": "win11-dev", "remote": r"C:\Windows\MEMORY.DMP", "local": str(tmp_path / "d")},
+        )
+    assert exc.value.code == BACKEND_ERROR and "!analyze -v" in exc.value.hint
+
+
+def test_force_utf8_stdio_reconfigures_redirected_streams(monkeypatch: pytest.MonkeyPatch) -> None:
+    out = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(out, encoding="cp949"))
+    monkeypatch.setattr(sys, "stderr", io.TextIOWrapper(io.BytesIO(), encoding="cp949"))
+    force_utf8_stdio()
+    assert sys.stdout.encoding == "utf-8" and sys.stderr.encoding == "utf-8"
+    sys.stdout.write("\u2603 symbols")  # a character cp949 cannot encode
+    sys.stdout.flush()
+    assert out.getvalue() == "\u2603 symbols".encode()

@@ -38,6 +38,7 @@ from ntdrive.config import load_config
 from ntdrive.core.service import NtDriveService
 from ntdrive.daemon.lifecycle import DaemonInfo, new_token, remove_info, write_info
 from ntdrive.errors import SESSION_DISCONNECTED, UNAUTHORIZED, NtDriveError
+from ntdrive.hostproc import force_utf8_stdio
 
 log = logging.getLogger("ntdrived")
 # Grace period for open connections to close during shutdown, before the socket is forced down.
@@ -311,6 +312,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--bind", help="host:port (default from vms.yaml or 127.0.0.1:8765)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
+    force_utf8_stdio()  # the log file inherits the locale code page otherwise
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

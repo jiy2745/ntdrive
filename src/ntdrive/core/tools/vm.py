@@ -23,8 +23,13 @@ class StartParams(VmParams):
 class StopParams(VmParams, ConfirmMixin):
     """vm_stop."""
 
-    mode: Literal["soft", "hard"] = Field(
-        default="soft", description="soft asks the guest to shut down; hard cuts power"
+    mode: Literal["soft", "hard", "kill"] = Field(
+        default="soft",
+        description=(
+            "soft asks the guest to shut down (it flushes its disks). hard cuts power. kill "
+            "ends the VM's vmware-vmx process on the host and clears its lock files, for a VM "
+            "that vmrun no longer controls. hard and kill need confirm=true"
+        ),
     )
 
 
@@ -93,7 +98,8 @@ async def vm_start(service: NtDriveService, p: StartParams) -> dict[str, Any]:
 
 @tool(
     "vm_stop",
-    "Shut the guest down (soft) or cut power (hard, needs confirm=true).",
+    "Shut the guest down (soft), cut power (hard) or, when vmrun stopped answering for the "
+    "VM, end its vmware-vmx process and clear its locks (kill). hard and kill need confirm=true.",
     StopParams,
     destructive=True,
     effect="destructive",
@@ -102,10 +108,21 @@ async def vm_stop(service: NtDriveService, p: StopParams) -> dict[str, Any]:
     """Stop the VM. Detaches the debugger first so the target is not left frozen."""
     cfg = service.vm_cfg(p.vm)
     released = await service.release_guest(p.vm)
-    await service.adapter_for(cfg).stop(cfg, hard=(p.mode == "hard"))
-    power = await service.refresh_power(cfg)
+    result: dict[str, Any] = {"vm": p.vm, "terms_dropped": released["terms_dropped"]}
+    if p.mode == "kill":
+        result.update(await service.adapter_for(cfg).kill(cfg))
+        try:
+            power = await service.refresh_power(cfg)
+        except NtDriveError as exc:
+            # vmrun may still be recovering; the kill itself is done, so report and go on.
+            power = PowerState.UNKNOWN
+            result["power_error"] = exc.to_dict()["error"]
+    else:
+        await service.adapter_for(cfg).stop(cfg, hard=(p.mode == "hard"))
+        power = await service.refresh_power(cfg)
     service.state.record_event(p.vm, "stop", mode=p.mode)
-    return {"vm": p.vm, "power": str(power), "terms_dropped": released["terms_dropped"]}
+    result["power"] = str(power)
+    return result
 
 
 @tool(

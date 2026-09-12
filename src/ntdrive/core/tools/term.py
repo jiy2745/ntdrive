@@ -163,7 +163,7 @@ async def term_send(service: NtDriveService, p: SendParams) -> dict[str, Any]:
         raise NtDriveError(INVALID_ARGS, "nothing to send", "give text or keys")
     sent = session.send(data, source="agent")
     _touch(service, session)
-    return {"session_id": p.session_id, "bytes_sent": sent}
+    return {"session_id": p.session_id, "bytes_sent": sent, "state": session.state}
 
 
 @tool(
@@ -243,13 +243,23 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     output = "\n".join(lines).strip("\n")
     truncated = len(output) > p.max_bytes
     _touch(service, session)
-    return {
+    result = {
         "session_id": p.session_id,
         "output": output[: p.max_bytes],
         "exit_code": exit_code,
+        "state": session.state,
         "truncated": truncated,
         "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
     }
+    if exit_code is None:
+        # The marker came back without a number. PowerShell sets $LASTEXITCODE only after an
+        # external program ran, so a cmdlet-only command reports none. A dead session never
+        # gets here: send and the wait raise session_disconnected.
+        result["note"] = (
+            "no numeric exit code came back (PowerShell sets $LASTEXITCODE only after an external "
+            "program ran). state says whether the shell is still connected"
+        )
+    return result
 
 
 @tool(

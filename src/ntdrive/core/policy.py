@@ -15,7 +15,7 @@ class Policy:
     Rules, in order:
     1. A tool listed as `deny` never runs.
     2. A tool listed as `confirm`, or a destructive tool not listed at all, needs `confirm=true`.
-       Tools whose params expose `mode` only need confirmation when `mode == "hard"`.
+       Tools whose params expose `mode` only need confirmation when `mode` is `hard` or `kill`.
     3. Everything else runs.
     """
 
@@ -42,7 +42,7 @@ class Policy:
         if level != "confirm":
             return
         mode = getattr(params, "mode", None)
-        if mode is not None and mode != "hard":
+        if mode is not None and mode not in ("hard", "kill"):
             return
         if not hasattr(params, "confirm"):
             # A tool without a confirm flag cannot be confirmed, so "confirm" means deny here.

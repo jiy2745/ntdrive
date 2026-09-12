@@ -186,7 +186,22 @@ async def file_pull(service: NtDriveService, p: PullParams) -> dict[str, Any]:
             size = None
             note = f"sftp failed ({exc}), copied with guest tools"
     if size is None:
-        await service.adapter_for(cfg).copy_from_guest(cfg, p.remote, local)
+        try:
+            await service.adapter_for(cfg).copy_from_guest(cfg, p.remote, local)
+        except NtDriveError as exc:
+            if transport is not None:
+                raise
+            # Neither SSH nor VMware Tools answered: a crashed, frozen or booting guest. The
+            # debugger still works on a crashed one, and can write a dump on the host.
+            raise NtDriveError(
+                exc.code,
+                exc.message,
+                "the guest answers neither SSH nor VMware Tools (crashed, frozen or booting). "
+                "With the debugger attached, kd_wait_event and kd_exec '!analyze -v' work "
+                "without the guest and '.dump /f <host path>' saves a crash dump on the host. "
+                "Otherwise reboot the guest and pull the file afterwards",
+                **exc.extra,
+            ) from None
         size = os.path.getsize(local)
     result: dict[str, Any] = {
         "vm": p.vm,

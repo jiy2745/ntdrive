@@ -72,7 +72,7 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `vm_list` | read | List registered VMs with power, debugger and terminal state. |
 | `vm_state` | read | Power, debugger and terminal state of one VM. |
 | `vm_start` | additive | Power on (or resume) a VM without the GUI by default. |
-| `vm_stop` | destructive | Shut the guest down (soft) or cut power (hard, needs confirm=true). |
+| `vm_stop` | destructive | Shut the guest down (soft), cut power (hard) or, when vmrun stopped answering for the VM, end its vmware-vmx process and clear its locks (kill). hard and kill need confirm=true. |
 | `vm_reboot` | destructive | Reboot the guest (soft, hard or from the debugger) and bring kd and terminals back. |
 | `vm_suspend` | additive | Suspend the VM to disk. |
 | `vm_resume` | additive | Resume a suspended VM (same as vm_start). |

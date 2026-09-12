@@ -123,6 +123,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | VM-5 | The VMware backend uses **`vmrun` as the single path**. The Workstation REST API (vmrest) does not support snapshots. | P0 |
 | VM-6 | **Encrypted VM support.** A VMware Workstation encrypted VM needs a password to open the vmx. Store the per-VM password in `vms.yaml` as an environment variable name (`encryption_password_env`, preferred) or inline (`encryption_password`, acceptable because `vms.yaml` is git-ignored) and add `-vp <password>` to every vmrun command that opens the vmx. Like other secrets, the password never appears in tool arguments, results or logs. If the password is required but missing, surface the vmrun error as `backend_error`. The adapter classifies vmrun failures once and tags the error with a `reason` (`password_required`, `encrypted_live_snapshot`, `config_unreadable`, `snapshot_missing`), so no tool matches English error text. | P0 |
 | VM-7 | **Hardware settings.** `vm_config(vm, cpus?, memory_mb?, nic?)` reads the VM's virtual hardware from the vmx (`numvcpus`, `cpuid.coresPerSocket`, `memsize`, `ethernet0.virtualDev`) and, when arguments are given, writes them while the VM is powered off (Workstation rewrites the vmx on power off, the same rule as the serial pipe). `cpus` writes one socket with that many cores because Windows client editions ignore CPUs beyond their socket limit. `nic` is `e1000e`, `e1000` or `vmxnet3`, and `sys_health`'s NIC warning names this tool as the fix. The vmx is edited byte for byte apart from the touched lines. The same shape as `modify_vm_resources` in vSphere MCP servers and the network reconfiguration tools of Proxmox ones. | P1 |
+| VM-8 | **Kill a VM that vmrun no longer controls.** After a guest bugcheck under load, `vmrun stop hard` and `vmrun reset` can time out again and again while the VM's `vmware-vmx.exe` sits wedged and its `*.lck` files block the next start. `vm_stop mode=kill` (confirm required, like hard) ends the `vmware-vmx` and `vmrun` processes whose command line names the vmx, waits for them, deletes the `*.lck` entries next to the vmx and reports `{killed, locks_removed}`; `vm_start` then boots the VM again. Every vmrun timeout names this path in its hint, and `vm_reboot mode=kd` names `mode=hard` and kill when KDNET dropped during a crash. It is a power cut: whatever the guest had not flushed is lost, which `mode=soft` avoids while the guest still answers. | P1 |
 
 ### 5.2 FR-HV: hypervisor adapter
 
@@ -370,7 +371,7 @@ messages are written in English (ST-9).
 | `vm_list` | - | `[{name, backend, power, ip?, kd, term_sessions}]` |
 | `vm_state` | `vm` | detail of one item above |
 | `vm_start` | `vm, gui=false` | `{power}` |
-| `vm_stop` | `vm, mode=soft\|hard, confirm?` | `{power}` |
+| `vm_stop` | `vm, mode=soft\|hard\|kill, confirm?` | `{power, terms_dropped, killed?, locks_removed?, power_error?}` |
 | `vm_reboot` | `vm, mode=soft\|hard\|kd, reattach_kd=true, reopen_term=true, timeout=180` | `{steps:[...], kd, term}` |
 | `vm_suspend` / `vm_resume` | `vm` | `{power}` |
 | `vm_config` | `vm, cpus?, memory_mb?, nic=e1000e\|e1000\|vmxnet3?` | `{hardware:{cpus, cores_per_socket, memory_mb, nic}, before?, changed:[vmx keys]}` (a change needs the VM off) |
@@ -401,7 +402,7 @@ messages are written in English (ST-9).
 | `term_open` | `vm, shell=powershell\|cmd\|pwsh, transport=auto\|ssh\|psdirect, account=admin\|standard, cols=120, rows=40` | `{session_id, transport, account, coview_url}` |
 | `term_send` | `session_id, text | keys[], enter=true` | `{bytes_sent}` |
 | `term_read` | `session_id, mode=delta\|screen, until?, timeout=0, max_bytes=65536` | `{text, cursor, truncated, matched?, state}` |
-| `term_exec` | `session_id, cmd, timeout=60` | `{output, exit_code?, elapsed_ms}` |
+| `term_exec` | `session_id, cmd, timeout=60` | `{output, exit_code?, state, note?, elapsed_ms}` (`exit_code` is null with a `note` when the shell reported no number: PowerShell sets `$LASTEXITCODE` only after an external program ran. A dead session raises `session_disconnected` instead) |
 | `term_resize` | `session_id, cols, rows` | `{}` |
 | `term_close` | `session_id` | `{}` |
 | `term_list` | `vm?` | `[{session_id, vm, shell, transport, account, state, last_activity, successor?}]` |

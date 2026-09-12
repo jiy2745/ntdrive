@@ -126,6 +126,13 @@ class HypervisorAdapter(ABC):
             BACKEND_UNSUPPORTED, f"backend {self.backend} cannot configure a serial pipe"
         )
 
+    async def kill(self, vm: VmConfig) -> dict[str, Any]:
+        """End the VM's hypervisor process on the host and clear stale locks.
+
+        Returns {killed, locks_removed}.
+        """
+        raise NtDriveError(BACKEND_UNSUPPORTED, f"backend {self.backend} cannot kill a VM process")
+
     async def hardware(self, vm: VmConfig) -> dict[str, Any]:
         """The VM's cpus, cores_per_socket, memory_mb and nic as configured (None when unknown)."""
         raise NtDriveError(BACKEND_UNSUPPORTED, f"backend {self.backend} cannot read hardware")

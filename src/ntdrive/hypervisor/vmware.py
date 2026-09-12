@@ -8,11 +8,15 @@ vmrun fails intermittently when the Workstation UI process is busy.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
+import shutil
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 from ntdrive.config import VmConfig
 from ntdrive.core.state import PowerState
@@ -23,6 +27,7 @@ from ntdrive.errors import (
     REASON_ENCRYPTED_LIVE,
     REASON_PASSWORD_REQUIRED,
     REASON_SNAPSHOT_MISSING,
+    TIMEOUT,
     VM_NOT_RUNNING,
     NtDriveError,
 )
@@ -133,6 +138,48 @@ def parse_current_snapshot(vmsd_text: str) -> str | None:
     return None
 
 
+KILL_HINT = (
+    "vmrun is not answering for this VM. If the guest crashed or hung, vm_stop mode=kill "
+    "confirm=true ends its vmware-vmx process on the host and clears the lock files, then "
+    "vm_start boots it again"
+)
+# Host processes that belong to one VM: the VM itself and vmrun calls still working on it.
+VMX_PROCESS_NAMES = {"vmware-vmx.exe", "vmware-vmx-debug.exe", "vmware-vmx-stats.exe", "vmrun.exe"}
+
+
+def find_vmx_processes(vmx: str) -> list[Any]:
+    """Psutil processes (vmware-vmx and vmrun) whose command line names this vmx."""
+    target = _norm(vmx)
+    found: list[Any] = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        info = proc.info
+        if (info.get("name") or "").lower() not in VMX_PROCESS_NAMES:
+            continue
+        if any(_norm(arg) == target for arg in (info.get("cmdline") or []) if arg):
+            found.append(proc)
+    return found
+
+
+def remove_vmx_locks(vmx: str) -> list[str]:
+    """Delete the *.lck directories and files Workstation leaves next to a killed VM.
+
+    They make the next start fail with "appears to be in use". Only called once the VM's
+    processes are gone. Returns the names removed.
+    """
+    removed: list[str] = []
+    for entry in Path(vmx).parent.glob("*.lck"):
+        try:
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        except OSError as exc:
+            log.warning("could not remove %s: %s", entry, exc)
+            continue
+        removed.append(entry.name)
+    return sorted(removed)
+
+
 class VmwareAdapter(HypervisorAdapter):
     """HypervisorAdapter implementation for VMware Workstation."""
 
@@ -178,7 +225,15 @@ class VmwareAdapter(HypervisorAdapter):
         attempts = self.retries if retry else 1
         last = ""
         for attempt in range(attempts):
-            code, out = await self._runner(argv, timeout or self.default_timeout)
+            try:
+                code, out = await self._runner(argv, timeout or self.default_timeout)
+            except NtDriveError as exc:
+                if exc.code != TIMEOUT:
+                    raise
+                # vmrun hangs when the VM's vmware-vmx process is wedged (a bugcheck under load
+                # does it). The runner already killed this vmrun; say how to end the VM itself.
+                hint = KILL_HINT if vm is not None else "check that VMware Workstation answers"
+                raise NtDriveError(TIMEOUT, f"vmrun {command}: {exc.message}", hint) from None
             if code == 0:
                 log.debug("vmrun ok: %s", _mask_argv(argv))
                 return out
@@ -371,3 +426,23 @@ class VmwareAdapter(HypervisorAdapter):
         if changed:
             path.write_text(text, encoding="latin-1")
         return {"changed": changed, "hardware": await self.hardware(vm)}
+
+    async def kill(self, vm: VmConfig) -> dict[str, Any]:
+        """End the VM's vmware-vmx process on the host and clear its stale lock files.
+
+        For a VM that vmrun no longer controls: after a guest bugcheck under load `vmrun stop
+        hard` and `vmrun reset` time out again and again. Killing the process is a power cut,
+        so the caller confirms it. vmrun processes still working on this vmx are ended too.
+        """
+        procs = find_vmx_processes(vm.vmx)
+        killed: list[int] = []
+        for proc in procs:
+            with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                proc.kill()
+                killed.append(proc.pid)
+        for proc in procs:
+            with contextlib.suppress(psutil.NoSuchProcess, psutil.TimeoutExpired):
+                await asyncio.to_thread(proc.wait, 10)
+        removed = remove_vmx_locks(vm.vmx)
+        log.warning("killed %s for %s and removed locks %s", killed, vm.name, removed)
+        return {"killed": killed, "locks_removed": removed}

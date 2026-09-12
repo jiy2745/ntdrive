@@ -103,9 +103,19 @@ kd_go vm=win11-dev
 ```
 kd_wait_event vm=win11-dev timeout=600     -> event=bugcheck
 kd_exec vm=win11-dev cmd="!analyze -v"
+kd_exec vm=win11-dev cmd=".dump /f C:\\dumps\\crash.dmp"   # written on the host, no guest needed
 con_screenshot vm=win11-dev                -> png_path
 snap_revert vm=win11-dev name=base-kd      -> steps: detach, revert, start, attach, term
 ```
+
+A crashed guest answers neither SSH nor VMware Tools, so `file_pull` cannot fetch its logs until it
+is back: the debugger is the post-mortem tool, and `C:\\Windows\\MEMORY.DMP` can be pulled after the
+reboot. When KDNET dropped during the crash (`kd_state` shows no target, `kd_break` times out with
+[no_debuggee]) `vm_reboot mode=kd` cannot work: use `vm_reboot mode=hard confirm=true`. When vmrun
+itself stops answering for the VM (timeouts on stop, reset or list after a crash), `vm_stop
+mode=kill confirm=true` ends its vmware-vmx process on the host and clears the `.lck` files, then
+`vm_start` boots it again. `mode=hard` and `kill` discard whatever the guest had not flushed, so
+`mode=soft` is the clean way down while the guest still answers.
 
 ### Watch a streaming command
 

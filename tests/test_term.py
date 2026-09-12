@@ -98,8 +98,19 @@ async def test_term_tools_end_to_end(
 
     fake_transport.responder = responder
     executed = await service.call("term_exec", {"session_id": sid, "cmd": "echo hello"})
-    assert executed["exit_code"] == 0
-    assert executed["output"].strip() == "hello"
+    assert executed["exit_code"] == 0 and executed["state"] == "open"
+    assert executed["output"].strip() == "hello" and "note" not in executed
+
+    # A cmdlet-only command: PowerShell has no $LASTEXITCODE yet, so the marker comes back bare.
+    def bare(channel: FakeChannel, data: bytes) -> None:
+        if b"Write-Output" in data:
+            marker = data.split(b'"')[1].split(b" ")[0]
+            channel.emit(marker + b" \r\nPS C:\\Users\\dev> ")
+
+    fake_transport.responder = bare
+    quiet = await service.call("term_exec", {"session_id": sid, "cmd": "Get-Date"})
+    assert quiet["exit_code"] is None and quiet["state"] == "open"
+    assert "LASTEXITCODE" in quiet["note"]
     await service.call("term_close", {"session_id": sid})
     assert service.state.term(sid).state == "closed"
 
