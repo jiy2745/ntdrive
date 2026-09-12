@@ -78,6 +78,12 @@ With `kd_transport: serial` (a VMware named pipe, no firewall and no prompt) the
 except that `kd_setup_host` must run while the VM is off, because it adds the COM port to the vmx,
 `kd_setup_guest` writes the serial bcdedit setting, and `kd_attach` reports `running` at once.
 
+`vm_config` reads or changes the virtual hardware in the vmx. When `sys_health` says the guest
+NIC is not `e1000e`, `vm_config vm=win11-dev nic=e1000e` fixes it, and `cpus=1` or
+`memory_mb=4096` shape the VM for a debugging session (a single CPU makes some races easier to
+follow). Changes need the VM off: `vm_stop`, `vm_config`, `vm_start`. Without arguments it only
+reports the current values, at any power state.
+
 ### Driver deploy and debug loop
 
 ```

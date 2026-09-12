@@ -125,3 +125,11 @@ class HypervisorAdapter(ABC):
         raise NtDriveError(
             BACKEND_UNSUPPORTED, f"backend {self.backend} cannot configure a serial pipe"
         )
+
+    async def hardware(self, vm: VmConfig) -> dict[str, Any]:
+        """The VM's cpus, cores_per_socket, memory_mb and nic as configured (None when unknown)."""
+        raise NtDriveError(BACKEND_UNSUPPORTED, f"backend {self.backend} cannot read hardware")
+
+    async def set_hardware(self, vm: VmConfig, changes: dict[str, Any]) -> dict[str, Any]:
+        """Apply cpus, memory_mb and nic to a powered-off VM. Returns {changed, hardware}."""
+        raise NtDriveError(BACKEND_UNSUPPORTED, f"backend {self.backend} cannot set hardware")

@@ -116,7 +116,8 @@ def config_issues(cfg: VmConfig, backends: set[str]) -> list[str]:
         if nic and nic.lower() != "e1000e":
             issues.append(
                 f"guest NIC is {nic}, KDNET needs e1000e on every Windows 10/11 build "
-                "(vmxnet3 works only on Windows 11 23H2 and later)"
+                "(vmxnet3 works only on Windows 11 23H2 and later). vm_config nic=e1000e with "
+                "the VM off sets it"
             )
     elif vmx_ok and not _vmx_has_serial_pipe(settings, cfg.resolved_serial_pipe()):
         issues.append("serial pipe not in the vmx (run kd_setup_host with the VM off)")

@@ -149,3 +149,58 @@ async def vm_resume(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     power = await service.refresh_power(cfg)
     service.state.record_event(p.vm, "resume")
     return {"vm": p.vm, "power": str(power)}
+
+
+class ConfigParams(VmParams):
+    """vm_config."""
+
+    cpus: int | None = Field(
+        default=None,
+        ge=1,
+        le=64,
+        description=(
+            "Virtual CPUs. Written as one socket with this many cores, which Windows client "
+            "editions accept (they ignore CPUs beyond their socket limit)"
+        ),
+    )
+    memory_mb: int | None = Field(
+        default=None,
+        ge=512,
+        le=1048576,
+        multiple_of=4,
+        description="Guest RAM in MB, a multiple of 4",
+    )
+    nic: Literal["e1000e", "e1000", "vmxnet3"] | None = Field(
+        default=None,
+        description="Model of the first virtual NIC (ethernet0). KDNET needs e1000e",
+    )
+
+
+@tool(
+    "vm_config",
+    "Read or change the VM hardware in the vmx: cpus, memory_mb, nic. Without arguments it "
+    "reports the current values. A change needs the VM powered off.",
+    ConfigParams,
+    effect="additive",
+    idempotent=True,
+)
+async def vm_config(service: NtDriveService, p: ConfigParams) -> dict[str, Any]:
+    """Hardware settings live in the vmx, which Workstation rewrites on power off."""
+    cfg = service.vm_cfg(p.vm)
+    adapter = service.adapter_for(cfg)
+    changes = {
+        key: value
+        for key, value in (("cpus", p.cpus), ("memory_mb", p.memory_mb), ("nic", p.nic))
+        if value is not None
+    }
+    before = await adapter.hardware(cfg)
+    if not changes:
+        return {"vm": p.vm, "hardware": before, "changed": []}
+    result = await adapter.set_hardware(cfg, changes)
+    service.state.record_event(p.vm, "config", changed=result["changed"])
+    return {
+        "vm": p.vm,
+        "hardware": result["hardware"],
+        "before": before,
+        "changed": result["changed"],
+    }

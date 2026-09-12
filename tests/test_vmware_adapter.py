@@ -4,14 +4,16 @@ from pathlib import Path
 import pytest
 
 from ntdrive.config import Config
+from ntdrive.core.service import NtDriveService
 from ntdrive.core.state import PowerState
-from ntdrive.errors import BACKEND_ERROR, NtDriveError
+from ntdrive.errors import BACKEND_ERROR, VM_NOT_RUNNING, NtDriveError
 from ntdrive.hypervisor.vmware import (
     VmwareAdapter,
     parse_current_snapshot,
     parse_snapshot_tree,
     subprocess_runner,
 )
+from ntdrive.hypervisor.vmx import apply_hardware, hardware_from_settings
 
 from .conftest import FakeVmrun
 
@@ -94,3 +96,55 @@ async def test_encrypted_vm_passes_vp(config: Config, fake_vmrun: FakeVmrun, mon
     assert call[3:5] == ["-vp", "sup3r-secret"]
     assert "start" in call
     assert fake_vmrun.saw_vp and fake_vmrun.vp_value == "sup3r-secret"
+
+
+def test_apply_hardware_rewrites_only_the_touched_lines() -> None:
+    text = 'displayName = "x"\nNumVCPUs = "2"\nmemsize = "4096"\nethernet0.virtualDev = "vmxnet3"\n'
+    out, changed = apply_hardware(text, {"cpus": 4, "nic": "e1000e"})
+    assert changed == ["numvcpus", "ethernet0.virtualDev", "cpuid.coresPerSocket"]
+    # The existing key keeps its casing, memsize is untouched, coresPerSocket is appended.
+    assert 'NumVCPUs = "4"' in out and 'memsize = "4096"' in out
+    assert out.endswith('cpuid.coresPerSocket = "4"\n') and 'ethernet0.virtualDev = "e1000e"' in out
+    again, changed = apply_hardware(out, {"cpus": 4, "nic": "e1000e"})
+    assert again == out and changed == []
+    hw = hardware_from_settings({"numvcpus": "4", "cpuid.corespersocket": "4", "memsize": "x"})
+    assert hw == {"cpus": 4, "cores_per_socket": 4, "memory_mb": None, "nic": None}
+
+
+async def test_vm_config_reads_and_writes_the_vmx_only_while_off(
+    service: NtDriveService, config: Config, fake_vmrun: FakeVmrun
+) -> None:
+    vm = config.vm("win11-dev")
+    Path(vm.vmx).write_bytes(
+        b'.encoding = "windows-1252"\ndisplayName = "caf\xe9"\nnumvcpus = "2"\n'
+        b'memsize = "4096"\nethernet0.virtualDev = "vmxnet3"\n'
+    )
+    read = await service.call("vm_config", {"vm": "win11-dev"})
+    assert read["hardware"] == {
+        "cpus": 2,
+        "cores_per_socket": None,
+        "memory_mb": 4096,
+        "nic": "vmxnet3",
+    }
+    assert read["changed"] == [] and "before" not in read
+
+    done = await service.call("vm_config", {"vm": "win11-dev", "cpus": 4, "nic": "e1000e"})
+    assert done["before"]["cpus"] == 2 and done["hardware"]["cpus"] == 4
+    assert done["hardware"]["cores_per_socket"] == 4 and done["hardware"]["nic"] == "e1000e"
+    assert done["changed"] == ["numvcpus", "ethernet0.virtualDev", "cpuid.coresPerSocket"]
+    body = Path(vm.vmx).read_bytes()
+    assert b'displayName = "caf\xe9"' in body  # the windows-1252 byte survived the rewrite
+    assert b'memsize = "4096"' in body
+
+    same = await service.call("vm_config", {"vm": "win11-dev", "cpus": 4})
+    assert same["changed"] == []
+
+    await service.call("vm_start", {"vm": "win11-dev"})
+    still = await service.call("vm_config", {"vm": "win11-dev"})
+    assert still["hardware"]["cpus"] == 4  # reading works while running
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("vm_config", {"vm": "win11-dev", "memory_mb": 8192})
+    assert exc.value.code == VM_NOT_RUNNING and "powered off" in exc.value.message
+    with pytest.raises(NtDriveError) as bad:
+        await service.call("vm_config", {"vm": "win11-dev", "memory_mb": 1001})
+    assert bad.value.code == "invalid_args"

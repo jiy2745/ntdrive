@@ -10,6 +10,7 @@ EXPECTED = {
     "vm_reboot",
     "vm_suspend",
     "vm_resume",
+    "vm_config",
     "snap_list",
     "snap_take",
     "snap_revert",

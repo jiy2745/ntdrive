@@ -122,6 +122,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | VM-4 | Guest IP lookup (`vmrun getGuestIPAddress -wait` / `Get-VMNetworkAdapter`). Used internally by the terminal and file tools. | P0 |
 | VM-5 | The VMware backend uses **`vmrun` as the single path**. The Workstation REST API (vmrest) does not support snapshots. | P0 |
 | VM-6 | **Encrypted VM support.** A VMware Workstation encrypted VM needs a password to open the vmx. Store the per-VM password in `vms.yaml` as an environment variable name (`encryption_password_env`, preferred) or inline (`encryption_password`, acceptable because `vms.yaml` is git-ignored) and add `-vp <password>` to every vmrun command that opens the vmx. Like other secrets, the password never appears in tool arguments, results or logs. If the password is required but missing, surface the vmrun error as `backend_error`. The adapter classifies vmrun failures once and tags the error with a `reason` (`password_required`, `encrypted_live_snapshot`, `config_unreadable`, `snapshot_missing`), so no tool matches English error text. | P0 |
+| VM-7 | **Hardware settings.** `vm_config(vm, cpus?, memory_mb?, nic?)` reads the VM's virtual hardware from the vmx (`numvcpus`, `cpuid.coresPerSocket`, `memsize`, `ethernet0.virtualDev`) and, when arguments are given, writes them while the VM is powered off (Workstation rewrites the vmx on power off, the same rule as the serial pipe). `cpus` writes one socket with that many cores because Windows client editions ignore CPUs beyond their socket limit. `nic` is `e1000e`, `e1000` or `vmxnet3`, and `sys_health`'s NIC warning names this tool as the fix. The vmx is edited byte for byte apart from the touched lines. The same shape as `modify_vm_resources` in vSphere MCP servers and the network reconfiguration tools of Proxmox ones. | P1 |
 
 ### 5.2 FR-HV: hypervisor adapter
 
@@ -372,6 +373,7 @@ messages are written in English (ST-9).
 | `vm_stop` | `vm, mode=soft\|hard, confirm?` | `{power}` |
 | `vm_reboot` | `vm, mode=soft\|hard\|kd, reattach_kd=true, reopen_term=true, timeout=180` | `{steps:[...], kd, term}` |
 | `vm_suspend` / `vm_resume` | `vm` | `{power}` |
+| `vm_config` | `vm, cpus?, memory_mb?, nic=e1000e\|e1000\|vmxnet3?` | `{hardware:{cpus, cores_per_socket, memory_mb, nic}, before?, changed:[vmx keys]}` (a change needs the VM off) |
 | `snap_list` | `vm` | `{tree:[{name, children:[...]}], current}` |
 | `snap_take` | `vm, name, description?, allow_suspend=false` | `{name, taken_at, kd_state_at_snapshot, via, memory_included, terms_dropped?, kd?}` |
 | `snap_revert` | `vm, name, start=true, reattach_kd=true, reopen_term=true, timeout=180` | `{steps:[...], kd, term}` |
@@ -457,6 +459,7 @@ tool JSON. Exit codes: 0 ok, 2 bad arguments, 3 `confirm_required`, 4 `guest_fro
 | Tool | CLI | SDK |
 |---|---|---|
 | `vm_start` | `ntdrive vm start win11-dev` | `vt.vm.start("win11-dev")` |
+| `vm_config` | `ntdrive vm config win11-dev --cpus 2 --memory-mb 4096 --nic e1000e` | `vt.vm.config("win11-dev", cpus=2, nic="e1000e")` |
 | `snap_revert` | `ntdrive snap revert win11-dev base-kdnet --no-reopen-term` | `vt.snap.revert("win11-dev", "base-kdnet", reopen_term=False)` |
 | `kd_exec` | `ntdrive kd exec win11-dev "!process 0 0"` or `--file cmds.txt` | `vt.kd.exec("win11-dev", ["!process 0 0", "k"])` |
 | `kd_wait_event` | `ntdrive kd wait-event win11-dev --timeout 300` | `vt.kd.wait_event("win11-dev", timeout=300)` |

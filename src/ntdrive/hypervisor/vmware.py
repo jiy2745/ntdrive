@@ -28,6 +28,7 @@ from ntdrive.errors import (
 )
 from ntdrive.hostproc import run_hidden
 from ntdrive.hypervisor.base import HypervisorAdapter, SnapshotNode, SnapshotTree
+from ntdrive.hypervisor.vmx import apply_hardware, hardware_from_settings, vmx_settings
 
 Runner = Callable[[list[str], float], Awaitable[tuple[int, str]]]
 
@@ -315,13 +316,7 @@ class VmwareAdapter(HypervisorAdapter):
                 f"serial pipe name must be ASCII: {pipe}",
                 "set serial_pipe in vms.yaml",
             )
-        power = await self.power_state(vm)
-        if power != PowerState.OFF:
-            raise NtDriveError(
-                VM_NOT_RUNNING,
-                f"VM {vm.name} is {power}; the vmx can only be edited while powered off",
-                "call vm_stop (or vm_resume then vm_stop) and retry",
-            )
+        await self._require_off(vm)
         path = Path(vm.vmx)
         # vmx files are usually windows-1252. latin-1 maps every byte to one code point and back,
         # so the existing content survives unchanged and the ASCII lines added here are valid in
@@ -349,3 +344,30 @@ class VmwareAdapter(HypervisorAdapter):
         block = [f'{key} = "{value}"' for key, value in wanted.items()]
         path.write_text("\n".join(kept + block) + "\n", encoding="latin-1")
         return True
+
+    async def _require_off(self, vm: VmConfig) -> None:
+        """Workstation rewrites the vmx on power off, so an edit only sticks while the VM is off."""
+        power = await self.power_state(vm)
+        if power != PowerState.OFF:
+            raise NtDriveError(
+                VM_NOT_RUNNING,
+                f"VM {vm.name} is {power}; the vmx can only be edited while powered off",
+                "call vm_stop (or vm_resume then vm_stop) and retry",
+            )
+
+    async def hardware(self, vm: VmConfig) -> dict[str, Any]:
+        """cpus, cores_per_socket, memory_mb and nic from the vmx (readable at any power state)."""
+        return hardware_from_settings(vmx_settings(vm.vmx))
+
+    async def set_hardware(self, vm: VmConfig, changes: dict[str, Any]) -> dict[str, Any]:
+        """Write cpus, memory_mb and nic into the vmx of a powered-off VM.
+
+        The file is read and written as latin-1 so every other byte survives unchanged (see
+        ensure_serial_pipe). Idempotent: values already in place count as no change.
+        """
+        await self._require_off(vm)
+        path = Path(vm.vmx)
+        text, changed = apply_hardware(path.read_text(encoding="latin-1"), changes)
+        if changed:
+            path.write_text(text, encoding="latin-1")
+        return {"changed": changed, "hardware": await self.hardware(vm)}

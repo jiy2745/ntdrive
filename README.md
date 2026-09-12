@@ -76,6 +76,7 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `vm_reboot` | destructive | Reboot the guest (soft, hard or from the debugger) and bring kd and terminals back. |
 | `vm_suspend` | additive | Suspend the VM to disk. |
 | `vm_resume` | additive | Resume a suspended VM (same as vm_start). |
+| `vm_config` | additive | Read or change the VM hardware in the vmx: cpus, memory_mb, nic. Without arguments it reports the current values. A change needs the VM powered off. |
 | `snap_list` | read | Snapshot tree of a VM plus the current snapshot and stored metadata. |
 | `snap_take` | additive | Take a snapshot (memory included while running) and record description and kd state. |
 | `snap_revert` | destructive | Revert to a snapshot: detach kd, revert, start, reattach kd, reopen terminals. |
