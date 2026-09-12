@@ -40,6 +40,8 @@ from ntdrive.daemon.lifecycle import DaemonInfo, new_token, remove_info, write_i
 from ntdrive.errors import SESSION_DISCONNECTED, UNAUTHORIZED, NtDriveError
 
 log = logging.getLogger("ntdrived")
+# Grace period for open connections to close during shutdown, before the socket is forced down.
+SHUTDOWN_TIMEOUT = 1.0
 STATIC_DIR = Path(__file__).with_name("static")
 OPEN_PATHS = {"/health", "/coview", "/coview/"}
 # Routes the view token may open: the CoView session list and the terminal streams.
@@ -255,13 +257,17 @@ async def serve(config_path: str | None = None, bind: str | None = None) -> None
     app = create_app(service, token, view_token)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, host, port)
+    # shutdown_timeout caps how long runner.cleanup() waits for open connections to close. The
+    # default is 60 s, so a client holding an idle keep-alive connection (an MCP server, the CLI)
+    # made `ntdrive daemon restart` take about 16 s. service.shutdown() already releases the guest
+    # and closes SSH before cleanup, so idle HTTP and coview sockets can be dropped promptly.
+    site = web.TCPSite(runner, host, port, shutdown_timeout=SHUTDOWN_TIMEOUT)
     try:
         await site.start()
     except OSError:
         # Port taken: move to the next one and record it in daemon.json.
         port += 1
-        site = web.TCPSite(runner, host, port)
+        site = web.TCPSite(runner, host, port, shutdown_timeout=SHUTDOWN_TIMEOUT)
         await site.start()
         service.term.coview_base = f"http://{host}:{port}/coview?token={view_token}"
     info = DaemonInfo(
