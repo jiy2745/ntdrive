@@ -40,6 +40,7 @@ class StateParams(BaseModel):
     "VM power, debugger state, terminal sessions and last events in one answer.",
     StateParams,
     positional=(),
+    effect="read",
 )
 async def sys_state(service: NtDriveService, p: StateParams) -> dict[str, Any]:
     """Aggregate state."""
@@ -250,6 +251,7 @@ async def _vm_health(
     "port and the debugger transport on the host. Run this first.",
     NoParams,
     positional=(),
+    effect="read",
 )
 async def sys_health(service: NtDriveService, _: NoParams) -> dict[str, Any]:
     """Host health plus a live probe of each VM."""

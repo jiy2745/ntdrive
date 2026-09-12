@@ -24,6 +24,7 @@ class ScreenshotParams(VmParams):
     "Save a PNG of the VM console and return its path (base64 on request).",
     ScreenshotParams,
     touches_guest=True,
+    effect="read",
 )
 async def con_screenshot(service: NtDriveService, p: ScreenshotParams) -> dict[str, Any]:
     """Screenshot through the hypervisor tools."""

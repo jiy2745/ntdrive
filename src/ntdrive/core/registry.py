@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel
 
@@ -17,6 +17,12 @@ if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
 
 Handler = Callable[["NtDriveService", Any], Awaitable[dict[str, Any]]]
+# What a call can do to the world. It becomes the MCP annotations (readOnlyHint, destructiveHint)
+# and the Effect column of the README tool table: read changes nothing, additive adds or starts
+# something, destructive can discard state (a snapshot, a running guest, a file, a shell command).
+Effect = Literal["read", "additive", "destructive"]
+# Group order of the README tool table, the order of the PRD section 7 tables.
+TABLE_GROUP_ORDER = ("vm", "snap", "kd", "term", "con", "file", "sys")
 
 
 @dataclass
@@ -27,8 +33,10 @@ class ToolSpec:
     description: str
     params: type[BaseModel]
     handler: Handler
+    effect: Effect
     positional: tuple[str, ...] = ()
-    destructive: bool = False
+    destructive: bool = False  # needs confirm=true, a subset of effect == "destructive"
+    idempotent: bool = False  # the same call again changes nothing more (MCP idempotentHint)
     long_poll: bool = False
     touches_guest: bool = False
     tags: tuple[str, ...] = field(default_factory=tuple)
@@ -57,7 +65,9 @@ class ToolSpec:
             "verb": self.verb,
             "description": self.description,
             "positional": list(self.positional),
+            "effect": self.effect,
             "destructive": self.destructive,
+            "idempotent": self.idempotent,
             "long_poll": self.long_poll,
             "input_schema": self.input_schema(),
         }
@@ -93,6 +103,18 @@ class ToolRegistry:
         """Tool names in registration order."""
         return list(self._tools)
 
+    def markdown_table(self) -> str:
+        """The README tool table, one row per tool, groups in the order of PRD section 7."""
+        rows = ["| Tool | Effect | What it does |", "|---|---|---|"]
+        groups = self.groups()
+        order = [g for g in TABLE_GROUP_ORDER if g in groups]
+        order += [g for g in groups if g not in order]
+        for group in order:
+            for spec in groups[group]:
+                text = spec.description.replace("|", "/")
+                rows.append(f"| `{spec.name}` | {spec.effect} | {text} |")
+        return "\n".join(rows) + "\n"
+
     def groups(self) -> dict[str, list[ToolSpec]]:
         """Tools bucketed by group, in registration order."""
         out: dict[str, list[ToolSpec]] = {}
@@ -109,8 +131,10 @@ def tool(
     description: str,
     params: type[BaseModel],
     *,
+    effect: Effect,
     positional: tuple[str, ...] = ("vm",),
     destructive: bool = False,
+    idempotent: bool = False,
     long_poll: bool = False,
     touches_guest: bool = False,
     tags: tuple[str, ...] = (),
@@ -124,8 +148,10 @@ def tool(
                 description=description,
                 params=params,
                 handler=handler,
+                effect=effect,
                 positional=positional,
                 destructive=destructive,
+                idempotent=idempotent,
                 long_poll=long_poll,
                 touches_guest=touches_guest,
                 tags=tags,

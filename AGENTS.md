@@ -108,10 +108,14 @@ GitHub means one of those failed on a clean machine.
 
 ## When you change a tool
 
-1. Edit the parameter model and handler in `src/ntdrive/core/tools/<group>.py`.
+1. Edit the parameter model and handler in `src/ntdrive/core/tools/<group>.py`. Every parameter
+   gets a `description`, and the decorator states `effect` (read, additive or destructive) and
+   `idempotent`: they become the MCP annotations and the Effect column of the README table.
 2. Add or update a test that uses the fakes. `tests/test_registry.py` lists every tool name and
    `tests/test_faces.py` checks that MCP, HTTP, CLI and SDK all expose it.
-3. Update `PRD.md` section 7 (the tool tables) and `SKILL.md` if the procedure for agents changes.
+3. Update `PRD.md` section 7 (the tool tables), refresh the README table with
+   `uv run python scripts/tools_table.py --write README.md`, and `SKILL.md` if the procedure for
+   agents changes.
 4. Restart the daemon (`uv run ntdrive daemon restart`) before trying it live.
 
 ## Things that bit us in live testing

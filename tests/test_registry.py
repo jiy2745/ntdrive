@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from ntdrive.core.registry import load_builtin_tools
 
 EXPECTED = {
@@ -59,3 +61,38 @@ def test_destructive_tools_have_confirm() -> None:
     for spec in registry:
         if spec.destructive:
             assert "confirm" in spec.params.model_fields, spec.name
+
+
+READ_ONLY = {
+    "vm_list",
+    "vm_state",
+    "snap_list",
+    "kd_wait_event",
+    "kd_state",
+    "kd_log_tail",
+    "term_read",
+    "term_list",
+    "con_screenshot",
+    "sys_state",
+    "sys_health",
+}
+
+
+def test_every_tool_states_its_effect_and_describes_every_parameter() -> None:
+    registry = load_builtin_tools()
+    assert {s.name for s in registry if s.effect == "read"} == READ_ONLY
+    for spec in registry:
+        if spec.destructive:  # confirm-gated tools are destructive by definition
+            assert spec.effect == "destructive", spec.name
+        if spec.effect == "read":
+            assert "confirm" not in spec.params.model_fields, spec.name
+        for name, prop in spec.input_schema()["properties"].items():
+            assert prop.get("description"), f"{spec.name}.{name} has no description"
+
+
+def test_readme_tool_table_is_current() -> None:
+    # The table is generated from the registry (scripts/tools_table.py --write README.md).
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    start, end = "<!-- tools:start -->\n", "<!-- tools:end -->"
+    block = readme[readme.index(start) + len(start) : readme.index(end)]
+    assert block == load_builtin_tools().markdown_table()

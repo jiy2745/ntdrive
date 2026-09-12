@@ -85,6 +85,8 @@ def _require_absolute(local: str) -> None:
     PushParams,
     positional=("vm", "local", "remote"),
     touches_guest=True,
+    effect="destructive",
+    idempotent=True,
 )
 async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
     """Upload."""
@@ -159,6 +161,8 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
     PullParams,
     positional=("vm", "remote", "local"),
     touches_guest=True,
+    effect="additive",
+    idempotent=True,
 )
 async def file_pull(service: NtDriveService, p: PullParams) -> dict[str, Any]:
     """Download."""

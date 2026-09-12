@@ -86,6 +86,13 @@ async def test_mcp_server_lists_and_calls_tools(service: NtDriveService) -> None
     assert "kd_exec" in names and "term_read" in names
     kd_exec = next(t for t in listed.root.tools if t.name == "kd_exec")
     assert "cmds" in kd_exec.inputSchema["properties"]
+    # Annotations come from the registry's effect and idempotent flags.
+    by_name = {t.name: t for t in listed.root.tools}
+    assert by_name["vm_list"].annotations.readOnlyHint is True
+    assert by_name["vm_list"].annotations.destructiveHint is False
+    assert by_name["snap_delete"].annotations.destructiveHint is True
+    assert by_name["kd_setup_host"].annotations.idempotentHint is True
+    assert all(t.annotations.openWorldHint is False for t in listed.root.tools)
 
     call_handler = server.request_handlers[CallToolRequest]
     request = CallToolRequest(

@@ -62,6 +62,7 @@ async def _summary(service: NtDriveService, name: str) -> dict[str, Any]:
     "List registered VMs with power, debugger and terminal state.",
     NoParams,
     positional=(),
+    effect="read",
 )
 async def vm_list(service: NtDriveService, _: NoParams) -> dict[str, Any]:
     """Every VM in vms.yaml."""
@@ -69,13 +70,18 @@ async def vm_list(service: NtDriveService, _: NoParams) -> dict[str, Any]:
     return {"vms": vms}
 
 
-@tool("vm_state", "Power, debugger and terminal state of one VM.", VmParams)
+@tool("vm_state", "Power, debugger and terminal state of one VM.", VmParams, effect="read")
 async def vm_state(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     """Refresh and return one VM."""
     return await _summary(service, p.vm)
 
 
-@tool("vm_start", "Power on (or resume) a VM without the GUI by default.", StartParams)
+@tool(
+    "vm_start",
+    "Power on (or resume) a VM without the GUI by default.",
+    StartParams,
+    effect="additive",
+)
 async def vm_start(service: NtDriveService, p: StartParams) -> dict[str, Any]:
     """Start the VM."""
     cfg = service.vm_cfg(p.vm)
@@ -90,6 +96,7 @@ async def vm_start(service: NtDriveService, p: StartParams) -> dict[str, Any]:
     "Shut the guest down (soft) or cut power (hard, needs confirm=true).",
     StopParams,
     destructive=True,
+    effect="destructive",
 )
 async def vm_stop(service: NtDriveService, p: StopParams) -> dict[str, Any]:
     """Stop the VM. Detaches the debugger first so the target is not left frozen."""
@@ -107,6 +114,7 @@ async def vm_stop(service: NtDriveService, p: StopParams) -> dict[str, Any]:
     RebootParams,
     destructive=True,
     long_poll=True,
+    effect="destructive",
 )
 async def vm_reboot(service: NtDriveService, p: RebootParams) -> dict[str, Any]:
     """Orchestrated reboot."""
@@ -122,7 +130,7 @@ async def vm_reboot(service: NtDriveService, p: RebootParams) -> dict[str, Any]:
     )
 
 
-@tool("vm_suspend", "Suspend the VM to disk.", VmParams)
+@tool("vm_suspend", "Suspend the VM to disk.", VmParams, effect="additive")
 async def vm_suspend(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     """Suspend. Terminal sessions are dropped and the debugger is detached."""
     cfg = service.vm_cfg(p.vm)
@@ -133,7 +141,7 @@ async def vm_suspend(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     return {"vm": p.vm, "power": str(power), "terms_dropped": released["terms_dropped"]}
 
 
-@tool("vm_resume", "Resume a suspended VM (same as vm_start).", VmParams)
+@tool("vm_resume", "Resume a suspended VM (same as vm_start).", VmParams, effect="additive")
 async def vm_resume(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     """Resume."""
     cfg = service.vm_cfg(p.vm)

@@ -47,6 +47,13 @@ def build_server(registry: ToolRegistry, client: DaemonClient) -> Server:
                 name=spec.name,
                 description=spec.description,
                 inputSchema=spec.input_schema(),
+                annotations=types.ToolAnnotations(
+                    readOnlyHint=spec.effect == "read",
+                    destructiveHint=spec.effect == "destructive",
+                    idempotentHint=spec.idempotent,
+                    # Every tool acts on the VMs named in vms.yaml on this host, nothing beyond.
+                    openWorldHint=False,
+                ),
             )
             for spec in registry
         ]

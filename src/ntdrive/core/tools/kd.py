@@ -111,6 +111,8 @@ class SetupHostParams(VmParams):
     "(VM must be off), net checks the host firewall for kd.exe and repairs it through one UAC "
     "prompt.",
     SetupHostParams,
+    effect="additive",
+    idempotent=True,
 )
 async def kd_setup_host(service: NtDriveService, p: SetupHostParams) -> dict[str, Any]:
     """Host-side transport setup. Nothing here touches the guest."""
@@ -312,6 +314,8 @@ async def _configure_guest(
     "kd_transport) and store the KDNET port and key in vms.yaml. A guest that already debugs to "
     "this host (scripts/setup-guest.ps1 sets that up) is read back instead of rewritten.",
     SetupParams,
+    effect="additive",
+    idempotent=True,
 )
 async def kd_setup_guest(service: NtDriveService, p: SetupParams) -> dict[str, Any]:
     """Configure the target for kernel debugging over SSH.
@@ -330,6 +334,7 @@ async def kd_setup_guest(service: NtDriveService, p: SetupParams) -> dict[str, A
     "Start kd.exe for the VM and (by default) wait until the target connects.",
     AttachParams,
     long_poll=True,
+    effect="additive",
 )
 async def kd_attach(service: NtDriveService, p: AttachParams) -> dict[str, Any]:
     """Attach the debugger."""
@@ -356,7 +361,7 @@ async def kd_attach(service: NtDriveService, p: AttachParams) -> dict[str, Any]:
     return {"vm": p.vm, **status}
 
 
-@tool("kd_detach", "Resume the target if needed and stop kd.exe.", DetachParams)
+@tool("kd_detach", "Resume the target if needed and stop kd.exe.", DetachParams, effect="additive")
 async def kd_detach(service: NtDriveService, p: DetachParams) -> dict[str, Any]:
     """Detach."""
     cfg = service.vm_cfg(p.vm)
@@ -367,7 +372,12 @@ async def kd_detach(service: NtDriveService, p: DetachParams) -> dict[str, Any]:
     return {"vm": p.vm, **status}
 
 
-@tool("kd_break", "Break into the running target and wait for the kd> prompt.", BreakParams)
+@tool(
+    "kd_break",
+    "Break into the running target and wait for the kd> prompt.",
+    BreakParams,
+    effect="additive",
+)
 async def kd_break(service: NtDriveService, p: BreakParams) -> dict[str, Any]:
     """Break in. The guest is frozen from here until kd_go."""
     cfg = service.vm_cfg(p.vm)
@@ -378,7 +388,7 @@ async def kd_break(service: NtDriveService, p: BreakParams) -> dict[str, Any]:
     return {"vm": p.vm, **result}
 
 
-@tool("kd_go", "Resume the target (g).", VmParams)
+@tool("kd_go", "Resume the target (g).", VmParams, effect="additive")
 async def kd_go(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     """Resume."""
     cfg = service.vm_cfg(p.vm)
@@ -394,6 +404,7 @@ async def kd_go(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     "Run one or more debugger commands at the kd> prompt and return each command's output.",
     ExecParams,
     positional=("vm", "cmd"),
+    effect="destructive",
 )
 async def kd_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     """Execute commands; needs a broken-in target."""
@@ -413,6 +424,7 @@ async def kd_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     "Wait until the running target stops (bugcheck, breakpoint, ...) or the timeout expires.",
     WaitParams,
     long_poll=True,
+    effect="read",
 )
 async def kd_wait_event(service: NtDriveService, p: WaitParams) -> dict[str, Any]:
     """Long-poll for a break."""
@@ -425,7 +437,12 @@ async def kd_wait_event(service: NtDriveService, p: WaitParams) -> dict[str, Any
     return {"vm": p.vm, **event}
 
 
-@tool("kd_state", "Debugger state, transport, target info, last event and log path.", VmParams)
+@tool(
+    "kd_state",
+    "Debugger state, transport, target info, last event and log path.",
+    VmParams,
+    effect="read",
+)
 async def kd_state(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     """Status."""
     service.vm_cfg(p.vm)
@@ -446,7 +463,7 @@ async def kd_state(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     return {"vm": p.vm, **session.status()}
 
 
-@tool("kd_log_tail", "Last bytes of the kd.exe transcript.", LogTailParams)
+@tool("kd_log_tail", "Last bytes of the kd.exe transcript.", LogTailParams, effect="read")
 async def kd_log_tail(service: NtDriveService, p: LogTailParams) -> dict[str, Any]:
     """Transcript tail."""
     cfg = service.vm_cfg(p.vm)

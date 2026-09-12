@@ -31,8 +31,8 @@ class OpenParams(VmParams):
             "standard (guest.standard_user, a plain user without administrator rights)"
         ),
     )
-    cols: int = Field(default=120, ge=20, le=500)
-    rows: int = Field(default=40, ge=5, le=200)
+    cols: int = Field(default=120, ge=20, le=500, description="Terminal width in columns")
+    rows: int = Field(default=40, ge=5, le=200, description="Terminal height in rows")
 
 
 class SessionParams(BaseModel):
@@ -54,10 +54,15 @@ class SendParams(SessionParams):
 class ReadParams(SessionParams):
     """term_read."""
 
-    mode: Literal["delta", "screen"] = Field(default="delta")
+    mode: Literal["delta", "screen"] = Field(
+        default="delta",
+        description="delta: output since the cursor. screen: the rendered screen a person sees",
+    )
     until: str | None = Field(default=None, description="Regex to wait for (delta mode)")
     timeout: float = Field(default=0, ge=0, description="Seconds to wait when until is set")
-    max_bytes: int = Field(default=65536, ge=256, le=1 << 20)
+    max_bytes: int = Field(
+        default=65536, ge=256, le=1 << 20, description="Cap on the returned text (truncated says)"
+    )
     cursor: int | None = Field(default=None, description="Absolute cursor; omit to continue")
     clean: bool = Field(default=True, description="Strip terminal control sequences")
 
@@ -66,15 +71,17 @@ class ExecParams(SessionParams):
     """term_exec."""
 
     cmd: str = Field(description="Command to run in the shell")
-    timeout: float = Field(default=60, ge=1)
-    max_bytes: int = Field(default=65536, ge=256, le=1 << 20)
+    timeout: float = Field(default=60, ge=1, description="Seconds to wait for the command to end")
+    max_bytes: int = Field(
+        default=65536, ge=256, le=1 << 20, description="Cap on the returned text (truncated says)"
+    )
 
 
 class ResizeParams(SessionParams):
     """term_resize."""
 
-    cols: int = Field(ge=20, le=500)
-    rows: int = Field(ge=5, le=200)
+    cols: int = Field(ge=20, le=500, description="New width in columns")
+    rows: int = Field(ge=5, le=200, description="New height in rows")
 
 
 class ListParams(BaseModel):
@@ -103,6 +110,7 @@ def _touch(service: NtDriveService, session: TermSession) -> None:
     "user, and return its session_id.",
     OpenParams,
     touches_guest=True,
+    effect="additive",
 )
 async def term_open(service: NtDriveService, p: OpenParams) -> dict[str, Any]:
     """Open a session."""
@@ -141,6 +149,7 @@ async def term_open(service: NtDriveService, p: OpenParams) -> dict[str, Any]:
     SendParams,
     positional=("session_id", "text"),
     touches_guest=True,
+    effect="destructive",
 )
 async def term_send(service: NtDriveService, p: SendParams) -> dict[str, Any]:
     """Send input."""
@@ -163,6 +172,7 @@ async def term_send(service: NtDriveService, p: SendParams) -> dict[str, Any]:
     ReadParams,
     positional=("session_id",),
     long_poll=True,
+    effect="read",
 )
 async def term_read(service: NtDriveService, p: ReadParams) -> dict[str, Any]:
     """Read output."""
@@ -192,6 +202,7 @@ async def term_read(service: NtDriveService, p: ReadParams) -> dict[str, Any]:
     positional=("session_id", "cmd"),
     touches_guest=True,
     long_poll=True,
+    effect="destructive",
 )
 async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     """Marker-delimited one-shot command."""
@@ -241,7 +252,14 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     }
 
 
-@tool("term_resize", "Resize the PTY.", ResizeParams, positional=("session_id",))
+@tool(
+    "term_resize",
+    "Resize the PTY.",
+    ResizeParams,
+    positional=("session_id",),
+    effect="additive",
+    idempotent=True,
+)
 async def term_resize(service: NtDriveService, p: ResizeParams) -> dict[str, Any]:
     """Resize."""
     session = _session(service, p.session_id)
@@ -249,14 +267,18 @@ async def term_resize(service: NtDriveService, p: ResizeParams) -> dict[str, Any
     return {"session_id": p.session_id, "cols": p.cols, "rows": p.rows}
 
 
-@tool("term_close", "Close a session.", SessionParams, positional=("session_id",))
+@tool(
+    "term_close", "Close a session.", SessionParams, positional=("session_id",), effect="additive"
+)
 async def term_close(service: NtDriveService, p: SessionParams) -> dict[str, Any]:
     """Close."""
     await service.term.close(p.session_id)
     return {"session_id": p.session_id, "state": "closed"}
 
 
-@tool("term_list", "List terminal sessions and their state.", ListParams, positional=())
+@tool(
+    "term_list", "List terminal sessions and their state.", ListParams, positional=(), effect="read"
+)
 async def term_list(service: NtDriveService, p: ListParams) -> dict[str, Any]:
     """List."""
     return {"sessions": service.term.sessions(p.vm)}

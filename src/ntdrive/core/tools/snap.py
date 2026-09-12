@@ -151,7 +151,12 @@ class SnapDeleteParams(SnapNameParams, ConfirmMixin):
     )
 
 
-@tool("snap_list", "Snapshot tree of a VM plus the current snapshot and stored metadata.", VmParams)
+@tool(
+    "snap_list",
+    "Snapshot tree of a VM plus the current snapshot and stored metadata.",
+    VmParams,
+    effect="read",
+)
 async def snap_list(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     """List snapshots."""
     cfg = service.vm_cfg(p.vm)
@@ -167,6 +172,7 @@ async def snap_list(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     "Take a snapshot (memory included while running) and record description and kd state.",
     SnapTakeParams,
     positional=("vm", "name"),
+    effect="additive",
 )
 async def snap_take(service: NtDriveService, p: SnapTakeParams) -> dict[str, Any]:
     """Create a snapshot.
@@ -216,6 +222,7 @@ async def snap_take(service: NtDriveService, p: SnapTakeParams) -> dict[str, Any
     SnapRevertParams,
     positional=("vm", "name"),
     long_poll=True,
+    effect="destructive",
 )
 async def snap_revert(service: NtDriveService, p: SnapRevertParams) -> dict[str, Any]:
     """Orchestrated revert."""
@@ -244,6 +251,7 @@ async def snap_revert(service: NtDriveService, p: SnapRevertParams) -> dict[str,
     SnapDeleteParams,
     positional=("vm", "name"),
     destructive=True,
+    effect="destructive",
 )
 async def snap_delete(service: NtDriveService, p: SnapDeleteParams) -> dict[str, Any]:
     """Delete a snapshot."""

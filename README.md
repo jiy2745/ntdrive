@@ -60,6 +60,50 @@ from it, so they never drift apart.
 - **Unified state**: one `sys_state` call returns VM power, debugger state and terminal sessions,
   and compound actions like snapshot revert run as a single orchestrated step.
 
+The full list, generated from the tool registry (`scripts/tools_table.py --write README.md`
+refreshes it, a test keeps it current). Effect is what the MCP annotations say: a read tool
+changes nothing, an additive one adds or starts something, a destructive one can discard state,
+and the ones that need `confirm=true` say so in their arguments. Arguments are in `PRD.md` section
+7 and in `ntdrive <group> <verb> --help`.
+
+<!-- tools:start -->
+| Tool | Effect | What it does |
+|---|---|---|
+| `vm_list` | read | List registered VMs with power, debugger and terminal state. |
+| `vm_state` | read | Power, debugger and terminal state of one VM. |
+| `vm_start` | additive | Power on (or resume) a VM without the GUI by default. |
+| `vm_stop` | destructive | Shut the guest down (soft) or cut power (hard, needs confirm=true). |
+| `vm_reboot` | destructive | Reboot the guest (soft, hard or from the debugger) and bring kd and terminals back. |
+| `vm_suspend` | additive | Suspend the VM to disk. |
+| `vm_resume` | additive | Resume a suspended VM (same as vm_start). |
+| `snap_list` | read | Snapshot tree of a VM plus the current snapshot and stored metadata. |
+| `snap_take` | additive | Take a snapshot (memory included while running) and record description and kd state. |
+| `snap_revert` | destructive | Revert to a snapshot: detach kd, revert, start, reattach kd, reopen terminals. |
+| `snap_delete` | destructive | Delete a snapshot (and optionally its children). Needs confirm=true. |
+| `kd_setup_host` | additive | Prepare the host side of the kd transport: serial adds the named-pipe COM port to the vmx (VM must be off), net checks the host firewall for kd.exe and repairs it through one UAC prompt. |
+| `kd_setup_guest` | additive | Enable kernel debugging in the guest with bcdedit over SSH (serial or KDNET per kd_transport) and store the KDNET port and key in vms.yaml. A guest that already debugs to this host (scripts/setup-guest.ps1 sets that up) is read back instead of rewritten. |
+| `kd_attach` | additive | Start kd.exe for the VM and (by default) wait until the target connects. |
+| `kd_detach` | additive | Resume the target if needed and stop kd.exe. |
+| `kd_break` | additive | Break into the running target and wait for the kd> prompt. |
+| `kd_go` | additive | Resume the target (g). |
+| `kd_exec` | destructive | Run one or more debugger commands at the kd> prompt and return each command's output. |
+| `kd_wait_event` | read | Wait until the running target stops (bugcheck, breakpoint, ...) or the timeout expires. |
+| `kd_state` | read | Debugger state, transport, target info, last event and log path. |
+| `kd_log_tail` | read | Last bytes of the kd.exe transcript. |
+| `term_open` | additive | Open a real-time PTY session (SSH) on the guest, as the administrator or as a standard user, and return its session_id. |
+| `term_send` | destructive | Type text and/or a burst of keys into a session. Tokens: {enter} {tab} {esc} {ctrl+c} {up}. |
+| `term_read` | read | Read new output (delta), wait for a regex (until), or render the screen (mode=screen). |
+| `term_exec` | destructive | Run one command in the session and return only its output and exit code. |
+| `term_resize` | additive | Resize the PTY. |
+| `term_close` | additive | Close a session. |
+| `term_list` | read | List terminal sessions and their state. |
+| `con_screenshot` | read | Save a PNG of the VM console and return its path (base64 on request). |
+| `file_push` | destructive | Copy a file, directory or glob from the host into the guest and verify it. |
+| `file_pull` | additive | Copy a file from the guest to the host. |
+| `sys_state` | read | VM power, debugger state, terminal sessions and last events in one answer. |
+| `sys_health` | read | Check binaries, config and backend capabilities, then probe every VM: power, guest SSH port and the debugger transport on the host. Run this first. |
+<!-- tools:end -->
+
 ## Setup
 
 Host: Windows 11, VMware Workstation Pro 17.6 or newer, the Debugging Tools for Windows (`kd.exe`
@@ -121,12 +165,28 @@ no prompt, a little slower) is the alternative for a host where nobody can appro
 `ntdrive setup --transport serial`, `setup-guest.cmd -Serial` in the guest, then
 `ntdrive kd setup-host win11` with the VM off, then the same commands.
 
-**4. Claude Code.** A clone carries `.mcp.json`. Elsewhere register the installed command, and in
-either case allow its tools with the permission rule `mcp__ntdrive__*` and set the MCP tool-call
-timeout above 600 s, because the wait tools long-poll:
+**4. MCP clients.** The server is the installed `ntdrive-mcp` command: stdio, no arguments, no
+environment variables (the config lives in `%LOCALAPPDATA%\ntdrive`), and it starts the daemon
+itself. Set the client's MCP tool-call timeout above 600 s, because the wait tools long-poll.
+
+Claude Code: a clone carries `.mcp.json`, elsewhere `claude mcp add ntdrive -- ntdrive-mcp`. Allow
+the tools with the permission rule `mcp__ntdrive__*`.
 
 ```json
 { "mcpServers": { "ntdrive": { "command": "ntdrive-mcp" } } }
+```
+
+Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`) does not search PATH, so give the
+full path. `uv tool dir --bin` prints the directory, `%USERPROFILE%\.local\bin` by default:
+
+```json
+{ "mcpServers": { "ntdrive": { "command": "C:\\Users\\you\\.local\\bin\\ntdrive-mcp.exe" } } }
+```
+
+VS Code (`.vscode/mcp.json`), and Cursor takes the Claude Desktop shape in `.cursor/mcp.json`:
+
+```json
+{ "servers": { "ntdrive": { "type": "stdio", "command": "ntdrive-mcp" } } }
 ```
 
 ## Quick start (CLI)
@@ -227,7 +287,7 @@ and the forbidden moves (such as touching the terminal while the debugger is bro
 
 ```powershell
 uv sync
-uv run pytest                     # 47 unit tests, all fakes, no real VM needed
+uv run pytest                     # unit tests, all fakes, no real VM needed
 uv run pre-commit run --all-files # ruff format + lint, mypy, prettier, ASCII/style check
 ```
 
@@ -235,6 +295,10 @@ Conventions live in `AGENTS.md` and `pyproject.toml`. Ruff is the only Python fo
 mypy is strict for `ntdrive.core`, and Prettier runs on the CoView web assets only. A pre-commit hook
 rejects non-ASCII characters and semicolons in Markdown prose, which keeps every document English and
 plain. Tests that need a real VM are marked `@pytest.mark.vm` and skip when none is configured.
+
+The MCP face can be poked by hand with the inspector: `npx @modelcontextprotocol/inspector
+ntdrive-mcp` (from a clone, `npx @modelcontextprotocol/inspector uv run ntdrive-mcp`) opens a page
+that lists the tools with their annotations and calls them.
 
 Only the VMware backend is implemented. Hyper-V and VirtualBox sit behind the same
 `HypervisorAdapter` interface and are planned for a later version.
