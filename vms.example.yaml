@@ -6,7 +6,7 @@ host:
   vmrun: "C:/Program Files (x86)/VMware/VMware Workstation/vmrun.exe"
   kd: "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/kd.exe"
   kdnet: "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/kdnet.exe"
-  symbol_path: "srv*C:/symbols*https://msdl.microsoft.com/download/symbols"
+  symbol_path: 'srv*C:\symbols*https://msdl.microsoft.com/download/symbols' # backslash cache; kd rejects forward slashes
   daemon_bind: "127.0.0.1:8765" # ntdrived: HTTP API + WebSocket + CoView
   log_dir: "" # empty = %LOCALAPPDATA%/ntdrive/logs
   tool_timeout_max: 600 # seconds; long-poll tools are capped here

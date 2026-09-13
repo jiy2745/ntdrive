@@ -408,3 +408,32 @@ async def test_kd_state_is_authoritative_once_kd_dies(
     assert dead["target_info"] == "" and dead["last_event"] is None and dead["pid"] is None
     assert dead["previous_session"]["last_event"]["event"] == "user_break"
     assert "kd_attach" in dead["note"]
+
+
+def test_normalize_symbol_path_makes_dbghelp_happy() -> None:
+    from ntdrive.kd.session import normalize_symbol_path
+
+    # The forward-slash cache is what symsrv rejected; the url keeps its slashes.
+    assert (
+        normalize_symbol_path("srv*C:/symbols*https://msdl.microsoft.com/download/symbols")
+        == r"srv*C:\symbols*https://msdl.microsoft.com/download/symbols"
+    )
+    # A url with no store keyword gets srv*.
+    assert normalize_symbol_path("C:/sym*https://x/y") == r"srv*C:\sym*https://x/y"
+    # Already correct, and a plain local path, are left alone; empty stays empty.
+    assert normalize_symbol_path(r"srv*C:\symbols*https://x") == r"srv*C:\symbols*https://x"
+    assert normalize_symbol_path(r"C:\local\symbols") == r"C:\local\symbols"
+    assert normalize_symbol_path("") == ""
+
+
+async def test_kd_attach_passes_a_normalized_symbol_path(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    service.config.host.symbol_path = "srv*C:/symbols*https://msdl.microsoft.com/download/symbols"
+    service.kd_sessions.clear()
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    argv = kd_procs[-1].argv
+    assert "-y" in argv
+    assert (
+        argv[argv.index("-y") + 1] == r"srv*C:\symbols*https://msdl.microsoft.com/download/symbols"
+    )

@@ -147,7 +147,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | KD-5 | State query: `detached / waiting / running / broken`, current port and key, connected target info, last event. | P0 |
 | KD-6 | Keep the full session log in a file (`-loga`), and let a tool read the last N KB. | P0 |
 | KD-7 | Automate guest debug setup (`kd_setup_guest`): over the terminal, first read `bcdedit /dbgsettings`, and when the guest already debugs to this host's IP with a key (`scripts/setup-guest.ps1` configures KDNET by default, inferring the host IP from the NAT gateway) save that port and key without rewriting anything (`adopted`). Otherwise apply `bcdedit /debug on` and, for `kd_transport: net`, `bcdedit /dbgsettings net hostip:<host virtual adapter IP> port:<n> key:<k>` (the server generates the key and saves it in `vms.yaml`), or, for `kd_transport: serial`, `bcdedit /dbgsettings serial debugport:1 baudrate:115200` (no key), then reboot. hostip is the VMnet8 host adapter for VMware, or the external/internal virtual switch vEthernet adapter IP for Hyper-V. | P0 |
-| KD-8 | Symbol path: pass `_NT_SYMBOL_PATH` or the configured value with `-y`. Provide a default local cache directory. | P0 |
+| KD-8 | Symbol path: pass the configured value with `-y`, normalized so dbghelp accepts it. The local cache element of a `srv*<cache>*<url>` path must use backslashes (`C:\symbols`, not `C:/symbols`, which symsrv reports as "not a valid store" and which stopped `.reload`), and a path that names a URL without a store keyword gets an `srv*` prefix. Default `srv*C:\symbols*https://msdl.microsoft.com/download/symbols`; kd.exe runs on the host so it can reach the Microsoft symbol server. | P0 |
 | KD-9 | On detach, resume the target (`g`) and then stop the process. Force-kill option. | P0 |
 | KD-10 | Reconnect the debugger after snapshot revert or reboot, for both transports. The target looks for the debugger again early in boot, so restarting the host-side kd.exe reconnects. A live session is kept through a reboot and waited on. A session that does not announce the reconnection within the timeout is respawned, for KDNET as much as for serial, so the reported state is a known one: a KDNET session left waiting sat at [no_debuggee] after a hard reboot until someone detached and attached by hand. Retry policy (count, interval) on failure. | P0 |
 | KD-11 | **Serial transport (guest COM1 -> host named pipe), the alternative to KDNET for hosts where nobody can approve a UAC prompt.** `kd_setup_host` writes `serial0.*` (pipe server, `\\.\pipe\ntdrive-<vm>`) into the vmx while the VM is off and is idempotent. kd.exe connects as the pipe client, so there is no network, no host firewall rule and no administrator step, unlike KDNET. `sys_health` reports a missing pipe entry. Hyper-V would use `Set-VMComPort` (later). | P0 |
@@ -426,7 +426,7 @@ host:
   vmrun: "C:/Program Files (x86)/VMware/VMware Workstation/vmrun.exe"
   kd:    "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/kd.exe"
   kdnet: "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/kdnet.exe"
-  symbol_path: "srv*C:/symbols*https://msdl.microsoft.com/download/symbols"
+  symbol_path: 'srv*C:\symbols*https://msdl.microsoft.com/download/symbols'
   daemon_bind: "127.0.0.1:8765"    # ntdrived: HTTP API + WebSocket + CoView
 
 vms:

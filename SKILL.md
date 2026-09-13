@@ -161,6 +161,12 @@ same flag. A snapshot of a powered-off VM never needs it.
 - `term_read mode=screen` shows exactly what a person sees on the terminal (rows x cols). Use it
   for menus, progress bars and anything that redraws the screen.
 - `kd_exec` accepts a list in `cmds` so that several debugger commands cost one tool call.
+- Symbols resolve out of the box: `kd_attach` passes a normalized `srv*C:\symbols*<msdl>` path
+  and kd.exe downloads from the Microsoft server (it runs on the host). No `.sympath` fix needed.
+- `term_send` is fire-and-forget: it types the text and returns at once, so use it (not
+  `term_exec`, which waits for the command to finish) for something long-running or for a command
+  that will drop the SSH connection. Read the result later with `term_read`, or from a file the
+  command wrote.
 - Large outputs are cut at `max_bytes` (64 KB by default) and flagged `truncated: true`. The
   full text is in the session log named in `kd_state.log_path`.
 - Destructive tools need `confirm=true`: `snap_delete`, `vm_stop mode=hard`, `vm_reboot mode=hard`.

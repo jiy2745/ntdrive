@@ -156,6 +156,26 @@ def send_ctrl_break(proc: KdProcess) -> None:
         k32.SetConsoleCtrlHandler(None, False)
 
 
+def normalize_symbol_path(sympath: str) -> str:
+    r"""A symbol path dbghelp accepts: a store prefix, and backslashes in the local cache.
+
+    The forward-slash form `srv*C:/symbols*<url>` makes symsrv report `C:/symbols*<url> is not a
+    valid store` and stops symbol loading (seen live: `.reload` and `!process` failed with it).
+    dbghelp wants the cache directory in Windows form, so a drive-letter element is switched to
+    backslashes; the http(s) element keeps its forward slashes. A path that names a symbol
+    server URL with no store keyword (`srv`, `cache`, `symsrv`) also gets an `srv*` prefix.
+    """
+    if not sympath:
+        return sympath
+    if "http" in sympath.lower() and not sympath.lower().startswith(("srv*", "cache*", "symsrv*")):
+        sympath = "srv*" + sympath
+    parts = [
+        re.sub(r"/", r"\\", part) if re.match(r"^[A-Za-z]:[\\/]", part) else part
+        for part in sympath.split("*")
+    ]
+    return "*".join(parts)
+
+
 class KdSession:
     """One kd.exe session for one VM."""
 
@@ -208,8 +228,9 @@ class KdSession:
         else:
             conn = f"net:port={self.port},key={self.key}"
         args = [self.kd_path, "-k", conn]
-        if self.symbol_path:
-            args += ["-y", self.symbol_path]
+        sympath = normalize_symbol_path(self.symbol_path)
+        if sympath:
+            args += ["-y", sympath]
         return args
 
     async def attach(self, wait_for_target: bool = True, timeout: float = 120.0) -> dict[str, Any]:

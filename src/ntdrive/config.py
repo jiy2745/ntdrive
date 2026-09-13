@@ -26,7 +26,7 @@ if sys.platform == "win32":
 DEFAULT_VMRUN = "C:/Program Files (x86)/VMware/VMware Workstation/vmrun.exe"
 DEFAULT_KD = "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/kd.exe"
 DEFAULT_KDNET = "C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/kdnet.exe"
-DEFAULT_SYMBOL_PATH = "srv*C:/symbols*https://msdl.microsoft.com/download/symbols"
+DEFAULT_SYMBOL_PATH = r"srv*C:\symbols*https://msdl.microsoft.com/download/symbols"
 
 
 def state_dir() -> Path:
