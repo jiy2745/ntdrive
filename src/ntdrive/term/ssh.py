@@ -15,8 +15,10 @@ import contextlib
 import hashlib
 import json
 import os
+import stat as statmod
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -339,6 +341,60 @@ class SshPtyTransport(TermTransport):
 
         return await loop.run_in_executor(None, lambda: _guarded(f"sftp read {source}", "", _hash))
 
+    async def stat_file(self, remote: str) -> dict[str, Any] | None:
+        """SFTP stat; None when the path does not exist."""
+        sftp = await self._sftp()
+        loop = asyncio.get_running_loop()
+        source = _sftp_path(remote)
+
+        def _stat() -> dict[str, Any] | None:
+            try:
+                try:
+                    attr = sftp.stat(source)
+                except FileNotFoundError:
+                    return None
+                d = _attr_dict(remote.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1], attr)
+                d.pop("name")
+                return d
+            finally:
+                sftp.close()
+
+        return await loop.run_in_executor(None, lambda: _guarded(f"sftp stat {source}", "", _stat))
+
+    async def list_dir(self, remote: str) -> list[dict[str, Any]]:
+        """SFTP directory listing."""
+        sftp = await self._sftp()
+        loop = asyncio.get_running_loop()
+        source = _sftp_path(remote)
+
+        def _list() -> list[dict[str, Any]]:
+            try:
+                return [_attr_dict(a.filename, a) for a in sftp.listdir_attr(source)]
+            finally:
+                sftp.close()
+
+        return await loop.run_in_executor(
+            None, lambda: _guarded(f"sftp list {source}", "check the guest path", _list)
+        )
+
+    async def delete_file(self, remote: str, recurse: bool = False) -> None:
+        """Remove a remote file or directory; FileNotFoundError when absent."""
+        sftp = await self._sftp()
+        loop = asyncio.get_running_loop()
+        target = _sftp_path(remote)
+
+        def _delete() -> None:
+            try:
+                attr = sftp.stat(target)  # raises FileNotFoundError when absent
+                if attr.st_mode and statmod.S_ISDIR(attr.st_mode):
+                    _sftp_rmtree(sftp, target) if recurse else sftp.rmdir(target)
+                else:
+                    sftp.remove(target)
+            finally:
+                sftp.close()
+
+        await loop.run_in_executor(None, lambda: _guarded(f"sftp delete {target}", "", _delete))
+
     async def exec_once(self, command: str, timeout: float = 60.0) -> tuple[int, str]:
         """Run a non-interactive command (used by kd_setup_guest and the soft reboot)."""
         client = await self._ensure()
@@ -354,6 +410,31 @@ class SshPtyTransport(TermTransport):
         return await loop.run_in_executor(
             None, lambda: _guarded(f"ssh exec of {command[:40]!r}", "", _run)
         )
+
+
+def _iso(mtime: float) -> str:
+    """A remote mtime as an ISO-8601 UTC string."""
+    return datetime.fromtimestamp(mtime, tz=UTC).isoformat()
+
+
+def _attr_dict(name: str, attr: Any) -> dict[str, Any]:
+    return {
+        "name": name,
+        "size": attr.st_size,
+        "modified": _iso(attr.st_mtime) if attr.st_mtime else None,
+        "is_dir": statmod.S_ISDIR(attr.st_mode) if attr.st_mode else False,
+    }
+
+
+def _sftp_rmtree(sftp: paramiko.SFTPClient, path: str) -> None:
+    """Delete a directory and everything under it over SFTP (no recursive remove exists)."""
+    for entry in sftp.listdir_attr(path):
+        child = path.rstrip("/") + "/" + entry.filename
+        if entry.st_mode and statmod.S_ISDIR(entry.st_mode):
+            _sftp_rmtree(sftp, child)
+        else:
+            sftp.remove(child)
+    sftp.rmdir(path)
 
 
 def _sftp_path(path: str) -> str:

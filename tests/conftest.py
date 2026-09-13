@@ -123,6 +123,25 @@ class FakeVmrun:
             return 0, ""
         if cmd == "runProgramInGuest":
             script = rest[-1]
+            if "Remove-Item" in script and "Test-Path" in script:
+                import re as _re2
+
+                target = None
+                mm = _re2.search(r"Remove-Item -LiteralPath '((?:[^']|'')*)'", script)
+                if mm:
+                    target = mm.group(1).replace("''", "'")
+                report = _re2.search(
+                    r"Set-Content -Encoding UTF8 -LiteralPath '((?:[^']|'')*)'", script
+                )
+                rp = report.group(1).replace("''", "'") if report else None
+                existed = target in self.guest_files
+                if existed:
+                    self.guest_files.pop(target, None)
+                if rp:
+                    self.guest_files[rp] = (
+                        b"ntdrive:deleted" if existed else b"ntdrive:absent"
+                    ) + b"\r\n"
+                return 0, ""
             if "Get-FileHash" in script:
                 # The adapter's hash batch: quote-delimited paths, the last one is the report.
                 import hashlib
@@ -236,6 +255,39 @@ class FakeTransport(TermTransport):
         data = self.files[remote]
         Path(local).write_bytes(data)
         return len(data)
+
+    async def stat_file(self, remote: str):  # type: ignore[no-untyped-def]
+        self._maybe_fail("sftp stat")
+        if remote not in self.files:
+            return None
+        return {
+            "size": len(self.files[remote]),
+            "modified": "2026-01-01T00:00:00+00:00",
+            "is_dir": False,
+        }
+
+    async def list_dir(self, remote: str):  # type: ignore[no-untyped-def]
+        self._maybe_fail("sftp list")
+        prefix = remote.replace("\\", "/").rstrip("/") + "/"
+        entries = []
+        for path, data in self.files.items():
+            norm = path.replace("\\", "/")
+            if norm.startswith(prefix) and "/" not in norm[len(prefix) :]:
+                entries.append(
+                    {
+                        "name": norm[len(prefix) :],
+                        "size": len(data),
+                        "modified": "2026-01-01T00:00:00+00:00",
+                        "is_dir": False,
+                    }
+                )
+        return entries
+
+    async def delete_file(self, remote: str, recurse: bool = False) -> None:
+        self._maybe_fail("sftp delete")
+        if remote not in self.files:
+            raise FileNotFoundError(remote)
+        del self.files[remote]
 
     async def remote_sha256(self, remote: str) -> str | None:
         import hashlib

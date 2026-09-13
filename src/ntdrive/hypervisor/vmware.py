@@ -186,6 +186,39 @@ def remove_vmx_locks(vmx: str) -> list[str]:
 POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 
+def parse_guest_stat(line: str) -> dict[str, Any] | None:
+    """One `size|mtime|is_dir` line from guest_stat into a dict, or None when empty."""
+    if not line:
+        return None
+    size, _, rest = line.partition("|")
+    mtime, _, is_dir = rest.partition("|")
+    try:
+        return {
+            "size": int(size),
+            "modified": mtime or None,
+            "is_dir": is_dir.strip().lower() == "true",
+        }
+    except ValueError:
+        return None
+
+
+def parse_guest_entry(line: str) -> dict[str, Any] | None:
+    """One `name|size|mtime|is_dir` line from guest_list into a dict."""
+    parts = line.split("|")
+    if len(parts) != 4:
+        return None
+    name, size, mtime, is_dir = parts
+    try:
+        return {
+            "name": name,
+            "size": int(size),
+            "modified": mtime or None,
+            "is_dir": is_dir.strip().lower() == "true",
+        }
+    except ValueError:
+        return None
+
+
 def _norm_guest(path: str) -> str:
     """A Windows guest path in one spelling, for matching Get-FileHash output to what we sent."""
     return path.replace("/", "\\").rstrip("\\").lower()
@@ -458,22 +491,16 @@ class VmwareAdapter(HypervisorAdapter):
         log.warning("killed %s for %s and removed locks %s", killed, vm.name, removed)
         return {"killed": killed, "locks_removed": removed}
 
-    async def guest_sha256(self, vm: VmConfig, remotes: list[str]) -> dict[str, str]:
-        """Get-FileHash in the guest through VMware Tools, one run for all files, one copy back.
+    async def guest_capture(self, vm: VmConfig, produce: str, timeout: float = 120.0) -> str:
+        """Run a PowerShell pipeline in the guest and return its text output.
 
-        Verifies guest-tools copies the way SFTP copies are verified. The report is written to
-        the guest's temp directory, copied to the host and deleted again. Files PowerShell could
-        not hash are simply absent from the result.
+        `produce` is a pipeline whose output lines are captured. The lines are written to a temp
+        file in the guest, copied to the host and deleted, so this works with only VMware Tools
+        (no SSH). Used for the guest-tools fallback of the file query and delete tools and for
+        hashing guest-tools copies.
         """
-        if not remotes:
-            return {}
-        report = rf"C:\Windows\Temp\ntdrive-hash-{secrets.token_hex(6)}.txt"
-        quoted = ",".join("'" + remote.replace("'", "''") + "'" for remote in remotes)
-        script = (
-            f"Get-FileHash -LiteralPath {quoted} -Algorithm SHA256 -ErrorAction SilentlyContinue | "
-            "ForEach-Object { $_.Hash + ' ' + $_.Path } | "
-            f"Set-Content -Encoding ASCII -LiteralPath '{report}'"
-        )
+        report = rf"C:\Windows\Temp\ntdrive-{secrets.token_hex(6)}.txt"
+        script = f"{produce} | Set-Content -Encoding UTF8 -LiteralPath '{report}'"
         await self._exec(
             "runProgramInGuest",
             vm,
@@ -483,19 +510,85 @@ class VmwareAdapter(HypervisorAdapter):
             "-Command",
             script,
             guest_auth=True,
-            timeout=300,
+            timeout=timeout,
         )
         with tempfile.TemporaryDirectory() as tmp:
-            local = os.path.join(tmp, "hashes.txt")
+            local = os.path.join(tmp, "out.txt")
             await self._exec(
                 "copyFileFromGuestToHost", vm, report, local, guest_auth=True, timeout=120
             )
-            text = Path(local).read_text(encoding="utf-8", errors="replace")
+            text = Path(local).read_text(encoding="utf-8", errors="replace").lstrip("\ufeff")
         with contextlib.suppress(NtDriveError):
             await self._exec("deleteFileInGuest", vm, report, guest_auth=True, timeout=60)
+        return text
+
+    async def guest_sha256(self, vm: VmConfig, remotes: list[str]) -> dict[str, str]:
+        """Get-FileHash in the guest through VMware Tools, one run for all files.
+
+        Verifies guest-tools copies the way SFTP copies are verified. Files PowerShell could not
+        hash are simply absent from the result.
+        """
+        if not remotes:
+            return {}
+        quoted = ",".join("'" + remote.replace("'", "''") + "'" for remote in remotes)
+        produce = (
+            f"Get-FileHash -LiteralPath {quoted} -Algorithm SHA256 -ErrorAction SilentlyContinue"
+            " | ForEach-Object { $_.Hash + ' ' + $_.Path }"
+        )
+        text = await self.guest_capture(vm, produce, timeout=300)
         by_path: dict[str, str] = {}
         for line in text.splitlines():
             digest, _, path = line.strip().partition(" ")
             if digest and path:
                 by_path[_norm_guest(path)] = digest.lower()
         return {r: by_path[_norm_guest(r)] for r in remotes if _norm_guest(r) in by_path}
+
+    async def guest_stat(self, vm: VmConfig, remote: str) -> dict[str, Any] | None:
+        """size, modified and is_dir from Get-Item in the guest, or None when absent."""
+        lit = remote.replace("'", "''")
+        # `|` is illegal in a Windows path, so it is a safe field delimiter.
+        produce = (
+            f"$i = Get-Item -LiteralPath '{lit}' -Force -ErrorAction SilentlyContinue; "
+            "if ($i) { '{0}|{1}|{2}' -f [long]$i.Length, "
+            "$i.LastWriteTimeUtc.ToString('o'), [bool]$i.PSIsContainer }"
+        )
+        line = (await self.guest_capture(vm, produce)).strip()
+        return parse_guest_stat(line)
+
+    async def guest_list(self, vm: VmConfig, remote: str) -> list[dict[str, Any]] | None:
+        """Directory entries from Get-ChildItem in the guest, or None when the path is absent."""
+        lit = remote.replace("'", "''")
+        produce = (
+            f"if (Test-Path -LiteralPath '{lit}') {{ Get-ChildItem -LiteralPath '{lit}' -Force"
+            " -ErrorAction SilentlyContinue | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Name, "
+            "[long]$_.Length, $_.LastWriteTimeUtc.ToString('o'), [bool]$_.PSIsContainer } }"
+            " else { 'ntdrive:absent' }"
+        )
+        text = await self.guest_capture(vm, produce)
+        if text.strip() == "ntdrive:absent":
+            return None
+        entries: list[dict[str, Any]] = []
+        for line in text.splitlines():
+            parsed = parse_guest_entry(line)
+            if parsed is not None:
+                entries.append(parsed)
+        return entries
+
+    async def guest_delete(self, vm: VmConfig, remote: str, recurse: bool = False) -> bool:
+        """Remove-Item in the guest. False when the path was already absent."""
+        lit = remote.replace("'", "''")
+        rec = " -Recurse" if recurse else ""
+        check_failed = f"if (Test-Path -LiteralPath '{lit}') {{ 'ntdrive:failed' }}"
+        produce = (
+            f"if (Test-Path -LiteralPath '{lit}') {{ "
+            f"Remove-Item -LiteralPath '{lit}' -Force{rec} -ErrorAction SilentlyContinue; "
+            f"{check_failed} else {{ 'ntdrive:deleted' }} }} else {{ 'ntdrive:absent' }}"
+        )
+        result = (await self.guest_capture(vm, produce)).strip()
+        if result == "ntdrive:failed":
+            raise NtDriveError(
+                BACKEND_ERROR,
+                f"could not delete {remote} in the guest",
+                "it may be in use or need a recurse for a non-empty directory",
+            )
+        return result == "ntdrive:deleted"

@@ -189,6 +189,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | FILE-1 | Copy files host->guest and guest->host. Primary is SFTP (reusing the SSH connection), secondary is the backend fallback (`vmrun copyFile*` / PowerShell Direct `Copy-Item`). A fallback push is verified too: one `Get-FileHash` run in the guest through the guest tools hashes every file of the call, the report is copied back and compared, so `verified` is filled either way. | P0 |
 | FILE-2 | Driver deploy convenience: copy `.sys` and `.pdb` to a guest path and refresh the symbol path. | P1 |
 | FILE-3 | Recursive directory copy and globs (`build/*.sys`). Create the destination directory if missing. For large files, compare SHA-256 on both sides after transfer and record it as `verified` in the result. If the debugger is `broken`, fail at once with `guest_frozen_by_debugger` like TERM-10. | P0 |
+| FILE-4 | **Query and delete guest files without a shell.** `file_stat(vm, remote)` returns `{exists, size, modified, is_dir}`, `file_ls(vm, remote)` lists a directory, and `file_delete(vm, remote, recurse=false)` removes a path. SFTP first, VMware Tools (a PowerShell one-liner captured through a temp file) as the fallback, so freshness can be checked (size and mtime) and stale files cleared even when the terminal is unavailable. `file_pull`/`file_stat` always read the live guest filesystem: there is no host-side content cache. | P1 |
 
 ### 5.7 FR-STATE: unified state and orchestration
 
@@ -416,6 +417,9 @@ messages are written in English (ST-9).
 | `con_send_keys` | `vm, keys[]` | `{sent}` (P1) |
 | `file_push` | `vm, local, remote, verify=true` (`local` is an absolute host path, the CLI and SDK absolutize) | `{files, bytes, verified, via: sftp\|guest_tools, copied:[{local, remote, bytes, verified, verify_error?}], note?}`. `verified` is true or false for SFTP and guest-tools copies alike; null with `verify_error` when the hash could not be read |
 | `file_pull` | `vm, remote, local` (a trailing separator on `local` means directory) | `{bytes, via, note?}` |
+| `file_stat` | `vm, remote` | `{exists, size?, modified?, is_dir?, via}` |
+| `file_ls` | `vm, remote` | `{exists, entries:[{name, size, modified, is_dir}], via}` |
+| `file_delete` | `vm, remote, recurse=false` | `{deleted, via}` |
 | `sys_state` | `vm?` | unified VM, KD, TERM state |
 | `sys_health` | - | binary paths and versions, backend capabilities, hypervisor service, a `kdnet_firewall` read when any VM uses net, and per VM: config `issues` (missing vmx, Secure Boot on, wrong NIC for KDNET, encrypted VM without a password, empty password environment variables, missing serial pipe or KDNET key, each naming the fix), `power`, `kd_state`, `guest {ip, user, standard_user, ssh_port, ssh_open, skipped}`, and `serial_pipe {path, open}` or `kdnet_port {port, free, held_by_ntdrive, firewall_ok}`. The guest probe is bounded to a few seconds and skipped while the VM is off or frozen by the debugger |
 

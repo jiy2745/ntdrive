@@ -144,6 +144,13 @@ same flag. A snapshot of a powered-off VM never needs it.
 - `local` must be an absolute host path. The daemon runs in another process and does not share
   your working directory. A trailing separator on `file_pull local` means "put it in this
   directory".
+- `file_stat`, `file_ls` and `file_delete` inspect and clear guest files without the terminal.
+  `file_pull` and `file_stat` always read the live guest filesystem (no host-side cache), so use
+  `file_stat` to tell a fresh artifact from a stale one by its `size` and `modified`, and
+  `file_delete` to clear a leftover before a new run. `vm_reboot` (soft or hard) keeps the disk:
+  it is not a snapshot revert, so a file written before the reboot is still there afterwards. To
+  start from a known disk use `snap_revert`. A pushed executable that vanishes after a reboot is
+  usually Windows Defender removing it, not the disk resetting.
 
 ## Tips
 

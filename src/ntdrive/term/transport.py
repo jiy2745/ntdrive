@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from typing import Any
 
 DataCallback = Callable[[bytes], None]
 CloseCallback = Callable[[], None]
@@ -66,3 +67,15 @@ class TermTransport(ABC):
     async def remote_sha256(self, remote: str) -> str | None:
         """Hash of a remote file when the transport can compute it, else None."""
         return None
+
+    async def stat_file(self, remote: str) -> dict[str, Any] | None:
+        """{size, modified, is_dir} for a remote path, or None when it does not exist."""
+        raise NotImplementedError
+
+    async def list_dir(self, remote: str) -> list[dict[str, Any]]:
+        """Entries of a remote directory, each {name, size, modified, is_dir}."""
+        raise NotImplementedError
+
+    async def delete_file(self, remote: str, recurse: bool = False) -> None:
+        """Delete a remote file or directory. Raises FileNotFoundError when it is absent."""
+        raise NotImplementedError

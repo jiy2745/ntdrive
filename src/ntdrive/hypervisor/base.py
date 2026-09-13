@@ -126,6 +126,20 @@ class HypervisorAdapter(ABC):
             BACKEND_UNSUPPORTED, f"backend {self.backend} cannot configure a serial pipe"
         )
 
+    async def guest_stat(self, vm: VmConfig, remote: str) -> dict[str, Any] | None:
+        """{size, modified, is_dir} through the backend's guest tools, or None when absent."""
+        raise NtDriveError(BACKEND_UNSUPPORTED, f"backend {self.backend} cannot stat a guest file")
+
+    async def guest_list(self, vm: VmConfig, remote: str) -> list[dict[str, Any]] | None:
+        """Directory entries through the guest tools, or None when the directory is absent."""
+        raise NtDriveError(BACKEND_UNSUPPORTED, f"backend {self.backend} cannot list a guest dir")
+
+    async def guest_delete(self, vm: VmConfig, remote: str, recurse: bool = False) -> bool:
+        """Delete a guest path through the guest tools. False when it was already absent."""
+        raise NtDriveError(
+            BACKEND_UNSUPPORTED, f"backend {self.backend} cannot delete a guest file"
+        )
+
     async def guest_sha256(self, vm: VmConfig, remotes: list[str]) -> dict[str, str]:
         """SHA-256 of guest files through the backend's guest tools, {remote: hex} for those hashed.
 

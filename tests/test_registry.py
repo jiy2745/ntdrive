@@ -36,6 +36,9 @@ EXPECTED = {
     "con_screenshot",
     "file_push",
     "file_pull",
+    "file_stat",
+    "file_ls",
+    "file_delete",
     "sys_state",
     "sys_health",
 }
@@ -75,6 +78,8 @@ READ_ONLY = {
     "term_read",
     "term_list",
     "con_screenshot",
+    "file_stat",
+    "file_ls",
     "sys_state",
     "sys_health",
 }

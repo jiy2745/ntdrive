@@ -21,6 +21,27 @@ from ntdrive.paths import is_absolute_local
 _SFTP_FAILURES = (NotImplementedError, NtDriveError, OSError)
 
 
+class StatParams(VmParams):
+    """file_stat."""
+
+    remote: str = Field(description="Guest path to inspect")
+
+
+class LsParams(VmParams):
+    """file_ls."""
+
+    remote: str = Field(description="Guest directory to list")
+
+
+class DeleteParams(VmParams):
+    """file_delete."""
+
+    remote: str = Field(description="Guest file or directory to delete")
+    recurse: bool = Field(
+        default=False, description="Delete a non-empty directory and its contents"
+    )
+
+
 class PushParams(VmParams):
     """file_push."""
 
@@ -237,3 +258,104 @@ async def file_pull(service: NtDriveService, p: PullParams) -> dict[str, Any]:
     if note:
         result["note"] = note
     return result
+
+
+@tool(
+    "file_stat",
+    "Size, last-modified time and is_dir of a guest path, so freshness can be checked without a "
+    "shell. exists=false when the path is not there.",
+    StatParams,
+    positional=("vm", "remote"),
+    touches_guest=True,
+    effect="read",
+)
+async def file_stat(service: NtDriveService, p: StatParams) -> dict[str, Any]:
+    """Stat a guest path over SFTP, falling back to VMware Tools."""
+    cfg = service.vm_cfg(p.vm)
+    service.ensure_not_frozen(p.vm)
+    await service.ensure_running(cfg)
+    transport = await service.file_transport(cfg)
+    info: dict[str, Any] | None = None
+    via = "guest_tools"
+    if transport is not None:
+        try:
+            info = await transport.stat_file(p.remote)
+            via = transport.name
+        except _SFTP_FAILURES:
+            transport = None
+    if transport is None:
+        info = await service.adapter_for(cfg).guest_stat(cfg, p.remote)
+    result: dict[str, Any] = {
+        "vm": p.vm,
+        "remote": p.remote,
+        "exists": info is not None,
+        "via": via,
+    }
+    if info is not None:
+        result.update(info)
+    return result
+
+
+@tool(
+    "file_ls",
+    "List a guest directory (each entry name, size, modified, is_dir), without a shell.",
+    LsParams,
+    positional=("vm", "remote"),
+    touches_guest=True,
+    effect="read",
+)
+async def file_ls(service: NtDriveService, p: LsParams) -> dict[str, Any]:
+    """List a guest directory over SFTP, falling back to VMware Tools."""
+    cfg = service.vm_cfg(p.vm)
+    service.ensure_not_frozen(p.vm)
+    await service.ensure_running(cfg)
+    transport = await service.file_transport(cfg)
+    entries: list[dict[str, Any]] | None = None
+    via = "guest_tools"
+    if transport is not None:
+        try:
+            entries = await transport.list_dir(p.remote)
+            via = transport.name
+        except _SFTP_FAILURES:
+            transport = None
+    if transport is None:
+        entries = await service.adapter_for(cfg).guest_list(cfg, p.remote)
+    return {
+        "vm": p.vm,
+        "remote": p.remote,
+        "exists": entries is not None,
+        "entries": entries or [],
+        "via": via,
+    }
+
+
+@tool(
+    "file_delete",
+    "Delete a guest file or directory (recurse for a non-empty directory). deleted=false when it "
+    "was already absent.",
+    DeleteParams,
+    positional=("vm", "remote"),
+    touches_guest=True,
+    effect="destructive",
+)
+async def file_delete(service: NtDriveService, p: DeleteParams) -> dict[str, Any]:
+    """Delete a guest path over SFTP, falling back to VMware Tools."""
+    cfg = service.vm_cfg(p.vm)
+    service.ensure_not_frozen(p.vm)
+    await service.ensure_running(cfg)
+    transport = await service.file_transport(cfg)
+    deleted: bool
+    via = "guest_tools"
+    if transport is not None:
+        try:
+            await transport.delete_file(p.remote, p.recurse)
+            deleted, via = True, transport.name
+        except FileNotFoundError:
+            deleted, via = False, transport.name
+        except _SFTP_FAILURES:
+            transport = None
+    if transport is None:
+        deleted = await service.adapter_for(cfg).guest_delete(cfg, p.remote, p.recurse)
+    if deleted:
+        service.state.record_event(p.vm, "file_delete", remote=p.remote)
+    return {"vm": p.vm, "remote": p.remote, "deleted": deleted, "via": via}

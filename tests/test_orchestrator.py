@@ -412,3 +412,57 @@ async def test_screenshot_and_audit(service: NtDriveService) -> None:
     audit = (service.log_dir / "audit.jsonl").read_text().splitlines()
     assert any('"tool": "con_screenshot"' in line for line in audit)
     assert all("secret" not in line for line in audit)
+
+
+async def test_file_stat_ls_delete_over_sftp(
+    service: NtDriveService, fake_transport: FakeTransport, tmp_path: Path
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    src = tmp_path / "log.txt"
+    src.write_bytes(b"nine bytes")
+    await service.call(
+        "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\d\\log.txt"}
+    )
+
+    stat = await service.call("file_stat", {"vm": "win11-dev", "remote": "C:\\d\\log.txt"})
+    assert stat["exists"] is True and stat["size"] == 10 and stat["is_dir"] is False
+    assert stat["via"] == "ssh" and stat["modified"]
+    missing = await service.call("file_stat", {"vm": "win11-dev", "remote": "C:\\d\\nope"})
+    assert missing["exists"] is False and "size" not in missing
+
+    listed = await service.call("file_ls", {"vm": "win11-dev", "remote": "C:\\d"})
+    assert listed["exists"] is True and [e["name"] for e in listed["entries"]] == ["log.txt"]
+
+    gone = await service.call("file_delete", {"vm": "win11-dev", "remote": "C:\\d\\log.txt"})
+    assert gone["deleted"] is True and gone["via"] == "ssh"
+    again = await service.call("file_delete", {"vm": "win11-dev", "remote": "C:\\d\\log.txt"})
+    assert again["deleted"] is False  # already gone, reported not raised
+    assert (await service.call("file_stat", {"vm": "win11-dev", "remote": "C:\\d\\log.txt"}))[
+        "exists"
+    ] is False
+
+
+async def test_file_delete_falls_back_to_guest_tools_without_ssh(
+    service: NtDriveService, fake_transport: FakeTransport, fake_vmrun: FakeVmrun, tmp_path: Path
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_vmrun.guest_files["C:\\Users\\Public\\stale.txt"] = b"old"
+    service.ssh_probe = never_reachable  # type: ignore[assignment]
+    gone = await service.call(
+        "file_delete", {"vm": "win11-dev", "remote": "C:\\Users\\Public\\stale.txt"}
+    )
+    assert gone["deleted"] is True and gone["via"] == "guest_tools"
+    assert "C:\\Users\\Public\\stale.txt" not in fake_vmrun.guest_files
+
+
+def test_guest_output_parsers() -> None:
+    from ntdrive.hypervisor.vmware import parse_guest_entry, parse_guest_stat
+
+    assert parse_guest_stat("9985|2026-09-14T01:02:03.0000000Z|False") == {
+        "size": 9985,
+        "modified": "2026-09-14T01:02:03.0000000Z",
+        "is_dir": False,
+    }
+    assert parse_guest_stat("") is None
+    assert parse_guest_entry("run.exe|512|2026-09-14T01:02:03Z|False")["name"] == "run.exe"
+    assert parse_guest_entry("bad line") is None

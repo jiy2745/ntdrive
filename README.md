@@ -102,6 +102,9 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `con_screenshot` | read | Save a PNG of the VM console and return its path (base64 on request). |
 | `file_push` | destructive | Copy a file, directory or glob from the host into the guest and verify it by SHA-256 (over SFTP, or through VMware Tools when SSH is down). |
 | `file_pull` | additive | Copy a file from the guest to the host. |
+| `file_stat` | read | Size, last-modified time and is_dir of a guest path, so freshness can be checked without a shell. exists=false when the path is not there. |
+| `file_ls` | read | List a guest directory (each entry name, size, modified, is_dir), without a shell. |
+| `file_delete` | destructive | Delete a guest file or directory (recurse for a non-empty directory). deleted=false when it was already absent. |
 | `sys_state` | read | VM power, debugger state, terminal sessions and last events in one answer. |
 | `sys_health` | read | Check binaries, config and backend capabilities, then probe every VM: power, guest SSH port and the debugger transport on the host. Run this first. |
 <!-- tools:end -->
