@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 import pytest
 
@@ -64,6 +65,13 @@ async def test_session_read_screen_and_wait() -> None:
     assert exc.value.code == SESSION_DISCONNECTED
 
 
+def _marker(data: bytes) -> bytes:
+    """The marker the shell will print, from the typed line that deliberately splits it."""
+    m = re.search(rb'"__NT" \+ "(DRIVE_[0-9a-f]+__)', data)
+    assert m, data
+    return b"__NT" + m.group(1)
+
+
 async def test_term_tools_end_to_end(
     service: NtDriveService, fake_transport: FakeTransport
 ) -> None:
@@ -93,8 +101,7 @@ async def test_term_tools_end_to_end(
 
     def responder(channel: FakeChannel, data: bytes) -> None:
         if b"Write-Output" in data:
-            marker = data.split(b'"')[1].split(b" ")[0]
-            channel.emit(b"hello\r\n" + marker + b" 0\r\nPS C:\\Users\\dev> ")
+            channel.emit(b"hello\r\n" + _marker(data) + b" 0\r\nPS C:\\Users\\dev> ")
 
     fake_transport.responder = responder
     executed = await service.call("term_exec", {"session_id": sid, "cmd": "echo hello"})
@@ -104,8 +111,7 @@ async def test_term_tools_end_to_end(
     # A cmdlet-only command: PowerShell has no $LASTEXITCODE yet, so the marker comes back bare.
     def bare(channel: FakeChannel, data: bytes) -> None:
         if b"Write-Output" in data:
-            marker = data.split(b'"')[1].split(b" ")[0]
-            channel.emit(marker + b" \r\nPS C:\\Users\\dev> ")
+            channel.emit(_marker(data) + b" \r\nPS C:\\Users\\dev> ")
 
     fake_transport.responder = bare
     quiet = await service.call("term_exec", {"session_id": sid, "cmd": "Get-Date"})
@@ -191,3 +197,36 @@ async def test_term_list_names_the_open_sessions_and_prune_drops_the_rest(
     with pytest.raises(NtDriveError) as exc:
         await service.call("term_read", {"session_id": second})
     assert exc.value.code == "session_not_found"
+
+
+async def test_term_exec_ignores_an_echo_chunk_that_ends_at_the_marker(
+    service: NtDriveService, fake_transport: FakeTransport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seen live in a PowerShell session right after a reboot: output empty, exit_code null,
+    elapsed 16 ms. The PTY echo of the typed line arrived in a chunk that ended right after the
+    marker, and the end-of-command regex matched it. The typed line no longer contains the
+    marker in one piece, so an echo can never end the command."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    sid = (await service.call("term_open", {"vm": "win11-dev"}))["session_id"]
+    chan = fake_transport.channels[-1]
+    loop = asyncio.get_running_loop()
+
+    def split_write(data: bytes) -> None:
+        chan.written.append(data)
+        echo = data.replace(b"\r", b"\r\n")
+        cut = echo.find(b"__ ") + 3  # the echo pauses right after the marker text and its space
+        # A fresh cmd session prints its banner first; nothing before the echo is output either.
+        chan.emit(b"Microsoft Windows [Version 10.0]\r\n(c) Microsoft Corporation.\r\n\r\n")
+        chan.emit(echo[:cut])
+        loop.call_later(0.05, chan.emit, echo[cut:])
+        loop.call_later(
+            0.1, chan.emit, b"MARKER_4\r\n" + _marker(data) + b" 0\r\nPS C:\\Users\\dev> "
+        )
+
+    monkeypatch.setattr(chan, "write", split_write)
+    done = await service.call(
+        "term_exec", {"session_id": sid, "cmd": '"MARKER_"+(2+2)', "timeout": 5}
+    )
+    assert done["output"] == "MARKER_4" and done["exit_code"] == 0
+    typed = chan.written[-1]
+    assert b"__NTDRIVE_" not in typed and b'("__NT" + "DRIVE_' in typed

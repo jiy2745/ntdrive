@@ -216,15 +216,23 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     """Marker-delimited one-shot command."""
     session = _session(service, p.session_id)
     marker = f"__NTDRIVE_{secrets.token_hex(4)}__"
+    # The PTY echoes what we type, so the typed line must not contain the marker: the shell
+    # assembles it at run time (PowerShell concatenates, cmd drops the ^ escape). Seen live: a
+    # PowerShell echo chunk that ended right after the marker matched the end-of-command regex
+    # in 16 ms, and term_exec returned empty output with exit_code null for a shell that worked.
     if session.shell == "cmd":
-        line = f"{p.cmd} & echo {marker} %ERRORLEVEL%\r"
+        typed = f"__NT^{marker[4:]}"
+        line = f"{p.cmd} & echo {typed} %ERRORLEVEL%\r"
     else:
-        line = f'{p.cmd}; Write-Output "{marker} $LASTEXITCODE"\r'
+        typed = f'"__NT" + "{marker[4:]}'
+        line = f'{p.cmd}; Write-Output ({typed} $LASTEXITCODE")\r'
     start_cursor = session.ring.end
     started = time.monotonic()
     session.send(line.encode("utf-8"), source="agent")
+    # The marker line ends the command: marker, a space, the exit code if the shell has one, end
+    # of line. PowerShell prints no number before the first external program ran.
     result = await session.wait_until(
-        rf"{marker} (-?\d*)\s*$", p.timeout, cursor=start_cursor, clean=True
+        rf"{re.escape(marker)} (-?\d*)[ \t]*\r?(?:\n|$)", p.timeout, cursor=start_cursor, clean=True
     )
     text: str = result.get("text", "")
     if result.get("matched") is None:
@@ -234,8 +242,7 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
             "read the session with term_read or send {ctrl+c}",
             output=text[-p.max_bytes :],
         )
-    # The PTY echoes the command we typed, so `{marker} $LASTEXITCODE` appears literally before
-    # the real `{marker} <code>` line. Match the marker followed by digits and take the last one.
+    # Only the shell's own marker line carries the marker in one piece.
     matches = list(re.finditer(rf"{re.escape(marker)} (-?\d+)", text))
     exit_code: int | None = None
     if matches:
@@ -244,10 +251,15 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     else:
         anchor = re.search(rf"{re.escape(marker)}\b", text)
         body = text[: anchor.start()] if anchor else text
-    # Drop the echoed command line (the PTY echoes what we typed).
+    # Everything up to and including the echo of our typed line is not the command's output:
+    # the echo itself, and before it a fresh cmd session's banner or leftovers from an earlier
+    # interactive command. The typed marker fragment identifies that line beyond doubt.
     lines = body.split("\n")
-    if lines and p.cmd.strip() and p.cmd.strip()[:20] in lines[0]:
-        lines = lines[1:]
+    echoed = [i for i, ln in enumerate(lines) if typed in ln]
+    if echoed:
+        lines = lines[echoed[-1] + 1 :]
+    elif lines and p.cmd.strip() and p.cmd.strip()[:20] in lines[0]:
+        lines = lines[1:]  # the echo wrapped across lines: at least drop its first line
     output = "\n".join(lines).strip("\n")
     truncated = len(output) > p.max_bytes
     _touch(service, session)

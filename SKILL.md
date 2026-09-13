@@ -24,6 +24,7 @@ Rules that follow from the state model:
 
 1. While `kd_state == broken` the whole guest is frozen. `term_*`, `file_*` and `con_screenshot`
    fail at once with `guest_frozen_by_debugger`. Call `kd_go` before touching the guest.
+   `vm_reboot` (soft or hard) resumes a broken-in target itself and reports it as a `kd_go` step.
 2. `snap_revert`, `vm_reboot`, `vm_suspend`, `vm_stop` and the `allow_suspend` path of
    `snap_take` and `snap_delete` detach the debugger and drop every terminal session. Revert,
    reboot and the suspend path reattach the debugger for you (`reattach_kd`, default true), and

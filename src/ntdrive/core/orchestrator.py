@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from ntdrive.config import VmConfig
 from ntdrive.core.state import KdState, PowerState
-from ntdrive.errors import GUEST_FROZEN_BY_DEBUGGER, KD_NOT_BROKEN, NtDriveError
+from ntdrive.errors import KD_NOT_BROKEN, NtDriveError
 
 if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
@@ -148,11 +148,12 @@ async def _kd_after_reboot(
         reached = await kd._wait_state(  # noqa: SLF001
             {KdState.RUNNING, KdState.BROKEN}, timeout, allow_timeout=True
         )
-        if reached or vm.kd_transport != "serial":
-            steps.add("kd_reconnect", reached, state=str(kd.state))
+        if reached:
+            steps.add("kd_reconnect", True, state=str(kd.state))
             return kd.status()
-        # A serial pipe can resync without a "Connected to" line. Respawn kd.exe to get to a
-        # known state instead of reporting a stale one.
+        # No reconnection within the timeout. A serial pipe can resync without a "Connected to"
+        # line, and a KDNET session left like this sits at [no_debuggee] until someone detaches
+        # and attaches by hand (seen live after a hard reboot). Respawn kd.exe for a known state.
         steps.add("kd_reconnect", False, state=str(kd.state), retry="respawn")
         await steps.run("kd_detach", kd.detach(force=True))
         return await _reattach_kd(service, vm, steps, timeout)
@@ -177,11 +178,9 @@ async def reboot_flow(
     kd = service.kd_sessions.get(vm.name)
     kd_alive = kd is not None and kd.attached
     if mode in ("soft", "hard") and kd is not None and kd.state == KdState.BROKEN:
-        raise NtDriveError(
-            GUEST_FROZEN_BY_DEBUGGER,
-            "the target is broken in; a soft or hard reboot would leave the debugger confused",
-            "use mode=kd (.reboot from the debugger) or kd_go first",
-        )
+        # A frozen guest cannot run shutdown, and a reset under a broken-in debugger leaves kd
+        # confused. The reboot is the orchestrated step, so it resumes the target itself.
+        await steps.run("kd_go", kd.go(), reason="the target was broken in")
     if mode == "kd" and (kd is None or kd.state != KdState.BROKEN):
         raise NtDriveError(
             KD_NOT_BROKEN,

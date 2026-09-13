@@ -231,7 +231,7 @@ async def test_revert_and_reboot_reattach_serial_kd_without_key(
     assert attach["ok"] and "skipped" not in attach and result["kd"]["state"] == "running"
 
 
-async def test_reboot_refuses_while_broken_and_hard_needs_confirm(
+async def test_reboot_resumes_a_broken_target_and_hard_needs_confirm(
     service: NtDriveService, kd_procs: list[FakeKdProcess]
 ) -> None:
     await service.call("vm_start", {"vm": "win11-dev"})
@@ -240,15 +240,45 @@ async def test_reboot_refuses_while_broken_and_hard_needs_confirm(
     assert exc.value.code == CONFIRM_REQUIRED
     await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
     await service.call("kd_break", {"vm": "win11-dev"})
-    with pytest.raises(NtDriveError) as exc:
-        await service.call("vm_reboot", {"vm": "win11-dev", "mode": "soft"})
-    assert exc.value.code == GUEST_FROZEN_BY_DEBUGGER
+    proc = kd_procs[-1]
+    # A soft reboot while broken in used to refuse with guest_frozen_by_debugger and send the
+    # caller to kd_go. The orchestrated step resumes the target itself and says so.
+    result = await service.call(
+        "vm_reboot", {"vm": "win11-dev", "mode": "soft", "reopen_term": False, "timeout": 1}
+    )
+    names = [s["step"] for s in result["steps"]]
+    assert names[0] == "kd_go" and "g" in proc.commands
+    assert (await service.call("kd_state", {"vm": "win11-dev"}))["state"] == "running"
+
+    await service.call("kd_break", {"vm": "win11-dev"})
     proc = kd_procs[-1]
     result = await service.call(
         "vm_reboot", {"vm": "win11-dev", "mode": "kd", "reopen_term": False, "timeout": 1}
     )
     assert ".reboot" in proc.commands
     assert [s["step"] for s in result["steps"]][:2] == ["term_drop", "kd_reboot"]
+
+
+async def test_net_reboot_respawns_kd_when_the_target_does_not_reconnect(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    """Seen live: after a hard reboot the kept KDNET session sat at [no_debuggee] and kd_break
+    failed until the agent detached and attached by hand. Now a session that does not reconnect
+    within the timeout is respawned, as the serial one already was."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    proc = kd_procs[-1]
+    assert proc.argv[2].startswith("net:")
+    result = await service.call(
+        "vm_reboot",
+        {"vm": "win11-dev", "mode": "hard", "confirm": True, "timeout": 1, "reopen_term": False},
+    )
+    names = [s["step"] for s in result["steps"]]
+    assert names[-4:] == ["kd_reconnect", "kd_detach", "kd_attach", "term_reopen"]
+    reconnect = next(s for s in result["steps"] if s["step"] == "kd_reconnect")
+    assert reconnect["ok"] is False and reconnect["retry"] == "respawn"
+    assert kd_procs[-1] is not proc and proc.poll() is not None
+    assert result["kd"]["state"] == "running" and result["kd"]["attached"] is True
 
 
 async def test_soft_reboot_uses_existing_ssh_connection(
