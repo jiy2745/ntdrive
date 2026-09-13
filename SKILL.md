@@ -105,7 +105,7 @@ kd_go vm=win11-dev
 kd_wait_event vm=win11-dev timeout=600     -> event=bugcheck
 kd_exec vm=win11-dev cmd="!analyze -v"
 kd_exec vm=win11-dev cmd=".dump /f C:\\dumps\\crash.dmp"   # written on the host, no guest needed
-con_screenshot vm=win11-dev                -> png_path
+con_screenshot vm=win11-dev                -> png_path (vmrun captureScreen needs a working guest login; a broken/logged-out guest cannot be shot this way)
 snap_revert vm=win11-dev name=base-kd      -> steps: detach, revert, start, attach, term
 ```
 

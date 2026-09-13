@@ -179,7 +179,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 
 | ID | Requirement | Priority |
 |---|---|---|
-| CON-1 | Save a console screenshot as a PNG file and return the path. base64 optional. For login screen, BSOD, boot hang. | P0 |
+| CON-1 | Save a console screenshot as a PNG file and return the path. base64 optional. For BSOD, boot hang, login screen. `vmrun captureScreen` on Workstation is a VIX guest operation (verified on 17.6: no credentials returns "Anonymous guest operations are not allowed"), so it needs a working guest login and cannot shoot a broken or logged-out guest; the failure hint points at fixing the login or reading a crashed guest through the debugger. A login-free framebuffer capture would use Workstation's built-in VNC (`RemoteDisplay.vnc`), planned. | P0 |
 | CON-2 | Console key input (`con_send_keys`). Hyper-V uses WMI `Msvm_Keyboard`, VMware uses its built-in VNC (`RemoteDisplay.vnc.enabled`). For when SSH is unavailable (before login, dead network). | P1 |
 
 ### 5.6 FR-FILE: file transfer

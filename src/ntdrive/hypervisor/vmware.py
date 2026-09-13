@@ -383,9 +383,31 @@ class VmwareAdapter(HypervisorAdapter):
         return ip
 
     async def screenshot(self, vm: VmConfig, out_path: str) -> str:
-        """`captureScreen` needs VMware Tools and guest credentials."""
+        """Capture the console frame with `vmrun captureScreen`.
+
+        On VMware Workstation captureScreen is a VIX guest operation (verified on 17.6: without
+        credentials it returns "Anonymous guest operations are not allowed... call
+        VixVM_LoginInGuest first"), so it needs a working guest login as well as the encryption
+        password, and it cannot capture a guest whose login is broken or absent. A login-free
+        framebuffer capture would go through Workstation's built-in VNC (RemoteDisplay.vnc),
+        which is not wired up yet.
+        """
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-        await self._exec("captureScreen", vm, out_path, guest_auth=True, timeout=60)
+        try:
+            await self._exec("captureScreen", vm, out_path, guest_auth=True, timeout=60)
+        except NtDriveError as exc:
+            low = exc.message.lower()
+            if "guest" in low and ("password" in low or "anonymous" in low or "login" in low):
+                raise NtDriveError(
+                    BACKEND_ERROR,
+                    exc.message,
+                    "vmrun captureScreen needs a working guest login on Workstation, so it cannot "
+                    "shoot a login screen or a broken guest. Fix guest.user/password with ntdrive "
+                    "setup, or read a crashed guest through the debugger (kd_wait_event, kd_exec "
+                    "'!analyze -v', '.dump /f <host path>')",
+                    **exc.extra,
+                ) from None
+            raise
         return out_path
 
     async def copy_to_guest(self, vm: VmConfig, local: str, remote: str) -> None:

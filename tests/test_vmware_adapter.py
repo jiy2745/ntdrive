@@ -82,10 +82,23 @@ async def test_guest_auth_is_inserted_for_tools_commands(
 ) -> None:
     adapter = VmwareAdapter(config.host.vmrun, runner=fake_vmrun)
     vm = config.vm("win11-dev")
+    # captureScreen is a VIX guest operation on Workstation, so it carries -gu/-gp.
     await adapter.screenshot(vm, str(tmp_path / "shot.png"))
     call = fake_vmrun.calls[-1]
     assert call[3:7] == ["-gu", "dev", "-gp", "secret"]
     assert call[7] == "captureScreen"
+
+
+async def test_screenshot_explains_a_guest_login_failure(config: Config, tmp_path: Path) -> None:
+    # When the guest login is broken, vmrun captureScreen fails; the hint says why and where to
+    # look instead, rather than a bare backend error.
+    async def bad_login(argv: list[str], timeout: float) -> tuple[int, str]:
+        return 255, "Error: Invalid user name or password for the guest OS"
+
+    adapter = VmwareAdapter(config.host.vmrun, runner=bad_login)
+    with pytest.raises(NtDriveError) as exc:
+        await adapter.screenshot(config.vm("win11-dev"), str(tmp_path / "shot.png"))
+    assert "needs a working guest login" in exc.value.hint and "!analyze -v" in exc.value.hint
 
 
 async def test_encrypted_vm_passes_vp(config: Config, fake_vmrun: FakeVmrun, monkeypatch) -> None:  # type: ignore[no-untyped-def]
