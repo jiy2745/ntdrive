@@ -58,7 +58,13 @@ class AttachParams(VmParams):
     port: int | None = Field(default=None, ge=1, le=65535, description="Override the port")
     key: str | None = Field(default=None, pattern=KDNET_KEY, description="Override the key")
     symbol_path: str | None = Field(default=None, description="Override host.symbol_path")
-    wait_for_target: bool = Field(default=True, description="Block until the target connects")
+    wait_for_target: bool = Field(
+        default=True,
+        description=(
+            "Block until the target connects, up to timeout. false returns at once with state "
+            "waiting; a target that booted before kd listened needs a reboot to connect"
+        ),
+    )
     timeout: float = Field(default=120, ge=1, description="Seconds to wait for the target")
 
 
@@ -331,7 +337,9 @@ async def kd_setup_guest(service: NtDriveService, p: SetupParams) -> dict[str, A
 
 @tool(
     "kd_attach",
-    "Start kd.exe for the VM and (by default) wait until the target connects.",
+    "Start kd.exe for the VM and wait until the target connects (up to timeout). "
+    "wait_for_target=false returns at once and kd_state shows waiting until the guest reaches "
+    "its kernel debugger.",
     AttachParams,
     long_poll=True,
     effect="additive",
@@ -439,7 +447,10 @@ async def kd_wait_event(service: NtDriveService, p: WaitParams) -> dict[str, Any
 
 @tool(
     "kd_state",
-    "Debugger state, transport, target info, last event and log path.",
+    "Debugger state: attached (is kd.exe alive), state (detached, waiting, running, broken), "
+    "transport, target info, last event and log path. attached and state come from the live "
+    "process. A finished session's events are reported under previous_session, never as the "
+    "present.",
     VmParams,
     effect="read",
 )
@@ -451,6 +462,7 @@ async def kd_state(service: NtDriveService, p: VmParams) -> dict[str, Any]:
         runtime = service.runtime(p.vm)
         return {
             "vm": p.vm,
+            "attached": False,
             "state": "detached",
             "transport": runtime.kd_transport,
             "port": runtime.kd_port,
@@ -459,8 +471,25 @@ async def kd_state(service: NtDriveService, p: VmParams) -> dict[str, Any]:
             "last_event": None,
             "log_path": "",
             "pid": None,
+            "note": "no debugger session for this VM yet: call kd_attach",
         }
-    return {"vm": p.vm, **session.status()}
+    status = session.status()
+    if status["attached"]:
+        return {"vm": p.vm, **status}
+    # kd.exe is gone. What the previous session saw (its target banner, its last break) must
+    # not read as the present, so it moves under previous_session and the live fields go blank.
+    previous = {"target_info": status["target_info"], "last_event": status["last_event"]}
+    status.update(target_info="", last_event=None, pid=None)
+    return {
+        "vm": p.vm,
+        **status,
+        "previous_session": previous,
+        "note": (
+            "not attached: kd.exe is not running, so target_info and last_event are empty. "
+            "previous_session holds what the last session saw and kd_log_tail has its "
+            "transcript. Call kd_attach to attach again"
+        ),
+    }
 
 
 @tool("kd_log_tail", "Last bytes of the kd.exe transcript.", LogTailParams, effect="read")

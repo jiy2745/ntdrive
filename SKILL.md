@@ -137,8 +137,9 @@ same flag. A snapshot of a powered-off VM never needs it.
 ## Files
 
 - `file_push` and `file_pull` use SFTP when the guest has OpenSSH and fall back to VMware Tools
-  (`via: guest_tools`). Guest-tools copies are not hashed, so `verified` is `null` for them and
-  `note` says why. A `verify_error` on a copied entry means the hash could not be read.
+  (`via: guest_tools`). A guest-tools push is hashed too (`Get-FileHash` in the guest through the
+  tools), so `verified` is true or false either way. A `null` with a `verify_error` means the hash
+  could not be read.
 - `local` must be an absolute host path. The daemon runs in another process and does not share
   your working directory. A trailing separator on `file_pull local` means "put it in this
   directory".
@@ -147,6 +148,10 @@ same flag. A snapshot of a powered-off VM never needs it.
 
 - `term_exec` is for short commands with a clear end. For interactive or streaming programs use
   `term_send` plus `term_read`.
+- `kd_state.attached` is the truth about kd.exe. A `detached` answer with `previous_session` means
+  the last session's banner and break, not the present: call `kd_attach` before `kd_exec`.
+- `term_list` returns `open`, the ids that are usable. After reboots and reverts the stale ids stay
+  listed (each names its successor), and `term_prune` forgets them once you no longer need them.
 - `term_open account=standard` opens the shell as the guest's plain account (`guest.standard_user`
   in vms.yaml, created by `setup-guest.cmd -Standard`) instead of the administrator. Use it when
   the question is what a normal user sees: UAC, access denied, per-user settings. `file_push`,

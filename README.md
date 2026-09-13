@@ -83,13 +83,13 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `snap_delete` | destructive | Delete a snapshot (and optionally its children). Needs confirm=true. |
 | `kd_setup_host` | additive | Prepare the host side of the kd transport: serial adds the named-pipe COM port to the vmx (VM must be off), net checks the host firewall for kd.exe and repairs it through one UAC prompt. |
 | `kd_setup_guest` | additive | Enable kernel debugging in the guest with bcdedit over SSH (serial or KDNET per kd_transport) and store the KDNET port and key in vms.yaml. A guest that already debugs to this host (scripts/setup-guest.ps1 sets that up) is read back instead of rewritten. |
-| `kd_attach` | additive | Start kd.exe for the VM and (by default) wait until the target connects. |
+| `kd_attach` | additive | Start kd.exe for the VM and wait until the target connects (up to timeout). wait_for_target=false returns at once and kd_state shows waiting until the guest reaches its kernel debugger. |
 | `kd_detach` | additive | Resume the target if needed and stop kd.exe. |
 | `kd_break` | additive | Break into the running target and wait for the kd> prompt. |
 | `kd_go` | additive | Resume the target (g). |
 | `kd_exec` | destructive | Run one or more debugger commands at the kd> prompt and return each command's output. |
 | `kd_wait_event` | read | Wait until the running target stops (bugcheck, breakpoint, ...) or the timeout expires. |
-| `kd_state` | read | Debugger state, transport, target info, last event and log path. |
+| `kd_state` | read | Debugger state: attached (is kd.exe alive), state (detached, waiting, running, broken), transport, target info, last event and log path. attached and state come from the live process. A finished session's events are reported under previous_session, never as the present. |
 | `kd_log_tail` | read | Last bytes of the kd.exe transcript. |
 | `term_open` | additive | Open a real-time PTY session (SSH) on the guest, as the administrator or as a standard user, and return its session_id. |
 | `term_send` | destructive | Type text and/or a burst of keys into a session. Tokens: {enter} {tab} {esc} {ctrl+c} {up}. |
@@ -97,9 +97,10 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `term_exec` | destructive | Run one command in the session and return only its output and exit code. |
 | `term_resize` | additive | Resize the PTY. |
 | `term_close` | additive | Close a session. |
-| `term_list` | read | List terminal sessions and their state. |
+| `term_list` | read | List terminal sessions and their state, plus the ids that are open and usable. |
+| `term_prune` | additive | Forget closed and disconnected terminal sessions (their open successors stay), so the list shows only what is usable. |
 | `con_screenshot` | read | Save a PNG of the VM console and return its path (base64 on request). |
-| `file_push` | destructive | Copy a file, directory or glob from the host into the guest and verify it. |
+| `file_push` | destructive | Copy a file, directory or glob from the host into the guest and verify it by SHA-256 (over SFTP, or through VMware Tools when SSH is down). |
 | `file_pull` | additive | Copy a file from the guest to the host. |
 | `sys_state` | read | VM power, debugger state, terminal sessions and last events in one answer. |
 | `sys_health` | read | Check binaries, config and backend capabilities, then probe every VM: power, guest SSH port and the debugger transport on the host. Run this first. |

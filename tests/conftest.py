@@ -37,6 +37,7 @@ class FakeVmrun:
         # Number of calls right after a suspend that fail with the transient vmx error.
         self.config_unreadable_after_suspend = 0
         self.fail_start = False  # when True, `start` fails (resume after suspend cannot happen)
+        self.guest_files: dict[str, bytes] = {}  # what guest-tools copies put into the guest
 
     async def __call__(self, args: list[str], timeout: float) -> tuple[int, str]:
         self.calls.append(list(args))
@@ -110,13 +111,31 @@ class FakeVmrun:
             Path(rest[1]).write_bytes(b"\x89PNG fake")
             return 0, ""
         if cmd == "copyFileFromHostToGuest":
+            self.guest_files[rest[2]] = Path(rest[1]).read_bytes()
             return 0, ""
         if cmd == "copyFileFromGuestToHost":
             # vmrun writes the host-side file; the fake mirrors that so getsize() works.
             Path(rest[2]).parent.mkdir(parents=True, exist_ok=True)
-            Path(rest[2]).write_bytes(b"pulled-by-guest-tools")
+            Path(rest[2]).write_bytes(self.guest_files.get(rest[1], b"pulled-by-guest-tools"))
+            return 0, ""
+        if cmd == "deleteFileInGuest":
+            self.guest_files.pop(rest[1], None)
             return 0, ""
         if cmd == "runProgramInGuest":
+            script = rest[-1]
+            if "Get-FileHash" in script:
+                # The adapter's hash batch: quote-delimited paths, the last one is the report.
+                import hashlib
+                import re as _re
+
+                paths = [p.replace("''", "'") for p in _re.findall(r"'((?:[^']|'')*)'", script)]
+                targets, report = paths[:-1], paths[-1]
+                lines = [
+                    hashlib.sha256(self.guest_files[t]).hexdigest().upper() + " " + t
+                    for t in targets
+                    if t in self.guest_files
+                ]
+                self.guest_files[report] = ("\n".join(lines) + "\n").encode()
             return 0, ""
         return 255, f"Error: Unknown command {cmd}"
 

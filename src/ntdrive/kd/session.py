@@ -529,8 +529,12 @@ class KdSession:
 
     def status(self) -> dict[str, Any]:
         """Wire form of the session state."""
+        # The process is the truth. Between kd.exe dying and the reader thread reporting it,
+        # self.state can still say broken, which once sent an agent to kd_exec and kd_not_attached.
+        attached = self.attached
         return {
-            "state": str(self.state),
+            "attached": attached,
+            "state": str(self.state) if attached else str(KdState.DETACHED),
             "transport": self.transport,
             "port": self.port if self.transport == "net" else None,
             "serial_pipe": self.serial_pipe if self.transport == "serial" else None,

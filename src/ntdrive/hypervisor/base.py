@@ -126,6 +126,14 @@ class HypervisorAdapter(ABC):
             BACKEND_UNSUPPORTED, f"backend {self.backend} cannot configure a serial pipe"
         )
 
+    async def guest_sha256(self, vm: VmConfig, remotes: list[str]) -> dict[str, str]:
+        """SHA-256 of guest files through the backend's guest tools, {remote: hex} for those hashed.
+
+        {} when the backend cannot run a program in the guest: the caller then leaves the copy
+        unverified rather than failing it.
+        """
+        return {}
+
     async def kill(self, vm: VmConfig) -> dict[str, Any]:
         """End the VM's hypervisor process on the host and clear stale locks.
 

@@ -10,8 +10,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import re
+import secrets
 import shutil
+import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -178,6 +181,14 @@ def remove_vmx_locks(vmx: str) -> list[str]:
             continue
         removed.append(entry.name)
     return sorted(removed)
+
+
+POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def _norm_guest(path: str) -> str:
+    """A Windows guest path in one spelling, for matching Get-FileHash output to what we sent."""
+    return path.replace("/", "\\").rstrip("\\").lower()
 
 
 class VmwareAdapter(HypervisorAdapter):
@@ -446,3 +457,45 @@ class VmwareAdapter(HypervisorAdapter):
         removed = remove_vmx_locks(vm.vmx)
         log.warning("killed %s for %s and removed locks %s", killed, vm.name, removed)
         return {"killed": killed, "locks_removed": removed}
+
+    async def guest_sha256(self, vm: VmConfig, remotes: list[str]) -> dict[str, str]:
+        """Get-FileHash in the guest through VMware Tools, one run for all files, one copy back.
+
+        Verifies guest-tools copies the way SFTP copies are verified. The report is written to
+        the guest's temp directory, copied to the host and deleted again. Files PowerShell could
+        not hash are simply absent from the result.
+        """
+        if not remotes:
+            return {}
+        report = rf"C:\Windows\Temp\ntdrive-hash-{secrets.token_hex(6)}.txt"
+        quoted = ",".join("'" + remote.replace("'", "''") + "'" for remote in remotes)
+        script = (
+            f"Get-FileHash -LiteralPath {quoted} -Algorithm SHA256 -ErrorAction SilentlyContinue | "
+            "ForEach-Object { $_.Hash + ' ' + $_.Path } | "
+            f"Set-Content -Encoding ASCII -LiteralPath '{report}'"
+        )
+        await self._exec(
+            "runProgramInGuest",
+            vm,
+            POWERSHELL,
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+            guest_auth=True,
+            timeout=300,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            local = os.path.join(tmp, "hashes.txt")
+            await self._exec(
+                "copyFileFromGuestToHost", vm, report, local, guest_auth=True, timeout=120
+            )
+            text = Path(local).read_text(encoding="utf-8", errors="replace")
+        with contextlib.suppress(NtDriveError):
+            await self._exec("deleteFileInGuest", vm, report, guest_auth=True, timeout=60)
+        by_path: dict[str, str] = {}
+        for line in text.splitlines():
+            digest, _, path = line.strip().partition(" ")
+            if digest and path:
+                by_path[_norm_guest(path)] = digest.lower()
+        return {r: by_path[_norm_guest(r)] for r in remotes if _norm_guest(r) in by_path}

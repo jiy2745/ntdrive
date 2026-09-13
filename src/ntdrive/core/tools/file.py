@@ -81,7 +81,8 @@ def _require_absolute(local: str) -> None:
 
 @tool(
     "file_push",
-    "Copy a file, directory or glob from the host into the guest and verify it.",
+    "Copy a file, directory or glob from the host into the guest and verify it by SHA-256 "
+    "(over SFTP, or through VMware Tools when SSH is down).",
     PushParams,
     positional=("vm", "local", "remote"),
     touches_guest=True,
@@ -109,6 +110,8 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
     if transport is None:
         notes.append("sftp unavailable (no ssh), copied with guest tools")
     copied: list[dict[str, Any]] = []
+    # Guest-tools copies are hashed afterwards in one batch (Get-FileHash in the guest).
+    tools_copied: list[tuple[dict[str, Any], str, str]] = []
     for local, rel in files:
         remote = _join_remote(p.remote, rel) if remote_is_dir else p.remote
         size: int | None = None
@@ -120,10 +123,14 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
                 transport = None
                 via = "guest_tools"
                 notes.append(f"sftp failed ({exc}), remaining files copied with guest tools")
+        by_tools = False
         if size is None:
             await adapter.copy_to_guest(cfg, local, remote)
             size = os.path.getsize(local)
+            by_tools = True
         entry: dict[str, Any] = {"local": local, "remote": remote, "bytes": size}
+        if by_tools and p.verify:
+            tools_copied.append((entry, local, remote))
         ok: bool | None = None
         if p.verify and transport is not None:
             try:
@@ -138,6 +145,23 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
         entry["verified"] = ok
         total += size
         copied.append(entry)
+    if tools_copied:
+        try:
+            hashes = await adapter.guest_sha256(cfg, [remote for _, _, remote in tools_copied])
+        except NtDriveError as exc:
+            hashes = {}
+            for entry, _, _ in tools_copied:
+                entry["verify_error"] = f"guest tools could not hash it: {exc.message}"
+            hash_failures += len(tools_copied)
+        else:
+            for entry, local, remote in tools_copied:
+                digest = hashes.get(remote)
+                if digest is None:
+                    entry["verify_error"] = "guest tools could not hash it"
+                    hash_failures += 1
+                    continue
+                entry["verified"] = digest == await _sha256_async(local)
+                verified += 1 if entry["verified"] else 0
     if hash_failures:
         notes.append(
             f"sha256 verification failed for {hash_failures} file(s), see copied[].verify_error"

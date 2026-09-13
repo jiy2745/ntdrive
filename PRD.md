@@ -164,7 +164,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | TERM-5 | **Conditional wait**: `term_read(until=<regex>, timeout)` long-polls until the regex appears in output or the timeout. Max timeout 600 s. | P0 |
 | TERM-6 | **Write**: `term_send(session, text | keys[], enter=true)`. Special keys are written as tokens like `{ctrl+c}`, `{enter}`, `{tab}`, `{up}`, `{esc}` and the server converts them to VT sequences. Bursts of keys sent at once are supported. | P0 |
 | TERM-7 | Convenience run: `term_exec(session, cmd, timeout)` sends the command plus a unique marker echo and returns only the output up to the marker. | P0 |
-| TERM-8 | Resize, close, session list (each session's state, last activity time, shell). | P0 |
+| TERM-8 | Resize, close, session list (each session's state, last activity time, shell, and the ids that are open), and prune: forget closed and disconnected sessions, which pile up after reboots and reverts because a stale id must keep pointing at its successor until someone drops it. | P0 |
 | TERM-9 | On reboot/revert/network drop the session is marked `disconnected` and reads report it at once. The server polls the SSH port and, once reachable, creates a **new session**, and reading with the old id points to the successor id. | P0 |
 | TERM-10 | While the debugger is `broken`, the guest is frozen, so `term_*` calls do not wait and return `guest_frozen_by_debugger` at once. | P0 |
 | TERM-11 | Record all session input and output with a `T+mm:ss.mmm` relative timestamp (asciicast v2 compatible). Tag human input separately from agent input. | P1 |
@@ -186,7 +186,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FILE-1 | Copy files host->guest and guest->host. Primary is SFTP (reusing the SSH connection), secondary is the backend fallback (`vmrun copyFile*` / PowerShell Direct `Copy-Item`). | P0 |
+| FILE-1 | Copy files host->guest and guest->host. Primary is SFTP (reusing the SSH connection), secondary is the backend fallback (`vmrun copyFile*` / PowerShell Direct `Copy-Item`). A fallback push is verified too: one `Get-FileHash` run in the guest through the guest tools hashes every file of the call, the report is copied back and compared, so `verified` is filled either way. | P0 |
 | FILE-2 | Driver deploy convenience: copy `.sys` and `.pdb` to a guest path and refresh the symbol path. | P1 |
 | FILE-3 | Recursive directory copy and globs (`build/*.sys`). Create the destination directory if missing. For large files, compare SHA-256 on both sides after transfer and record it as `verified` in the result. If the debugger is `broken`, fail at once with `guest_frozen_by_debugger` like TERM-10. | P0 |
 
@@ -392,7 +392,7 @@ messages are written in English (ST-9).
 | `kd_go` | `vm` | `{state}` |
 | `kd_exec` | `vm, cmd | cmds[], timeout=60, max_bytes=65536` | `{outputs:[{cmd, output, truncated, elapsed_ms}]}` |
 | `kd_wait_event` | `vm, timeout=300` | `{event: bugcheck\|breakpoint\|module_load\|user_break\|timeout, output, state}` |
-| `kd_state` | `vm` | `{state, transport, port?, serial_pipe?, target_info, last_event, log_path}` |
+| `kd_state` | `vm` | `{attached, state, transport, port, serial_pipe, target_info, last_event, log_path, pid, previous_session?, note?}`. `attached` and `state` come from the live kd.exe process: when it is gone the state is `detached` and what the previous session saw sits under `previous_session`, never mixed into the present |
 | `kd_log_tail` | `vm, bytes=16384` | `{text}` |
 
 ### 7.3 Terminal
@@ -405,7 +405,8 @@ messages are written in English (ST-9).
 | `term_exec` | `session_id, cmd, timeout=60` | `{output, exit_code?, state, note?, elapsed_ms}` (`exit_code` is null with a `note` when the shell reported no number: PowerShell sets `$LASTEXITCODE` only after an external program ran. A dead session raises `session_disconnected` instead) |
 | `term_resize` | `session_id, cols, rows` | `{}` |
 | `term_close` | `session_id` | `{}` |
-| `term_list` | `vm?` | `[{session_id, vm, shell, transport, account, state, last_activity, successor?}]` |
+| `term_list` | `vm?` | `{sessions:[{session_id, vm, shell, transport, account, state, last_activity, successor?}], open:[session ids that are usable]}` |
+| `term_prune` | `vm?` | `{pruned:[ids], remaining}`. Forgets closed and disconnected sessions; open successors stay |
 
 ### 7.4 Console / file / system
 
@@ -413,7 +414,7 @@ messages are written in English (ST-9).
 |---|---|---|
 | `con_screenshot` | `vm, base64=false` | `{png_path, png_base64?}` |
 | `con_send_keys` | `vm, keys[]` | `{sent}` (P1) |
-| `file_push` | `vm, local, remote, verify=true` (`local` is an absolute host path, the CLI and SDK absolutize) | `{files, bytes, verified, via: sftp\|guest_tools, copied:[...], note?}` |
+| `file_push` | `vm, local, remote, verify=true` (`local` is an absolute host path, the CLI and SDK absolutize) | `{files, bytes, verified, via: sftp\|guest_tools, copied:[{local, remote, bytes, verified, verify_error?}], note?}`. `verified` is true or false for SFTP and guest-tools copies alike; null with `verify_error` when the hash could not be read |
 | `file_pull` | `vm, remote, local` (a trailing separator on `local` means directory) | `{bytes, via, note?}` |
 | `sys_state` | `vm?` | unified VM, KD, TERM state |
 | `sys_health` | - | binary paths and versions, backend capabilities, hypervisor service, a `kdnet_firewall` read when any VM uses net, and per VM: config `issues` (missing vmx, Secure Boot on, wrong NIC for KDNET, encrypted VM without a password, empty password environment variables, missing serial pipe or KDNET key, each naming the fix), `power`, `kd_state`, `guest {ip, user, standard_user, ssh_port, ssh_open, skipped}`, and `serial_pipe {path, open}` or `kdnet_port {port, free, held_by_ntdrive, firewall_ok}`. The guest probe is bounded to a few seconds and skipped while the VM is off or frozen by the debugger |

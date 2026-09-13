@@ -177,6 +177,27 @@ class TermManager:
         if info is not None and info.state != TermState.CLOSED:
             info.state = state
 
+    def prune(self, vm: str | None = None) -> list[str]:
+        """Forget closed and disconnected sessions, all VMs or one. Returns the ids dropped.
+
+        Disconnected sessions are kept after a reboot or revert so a stale id can point at its
+        successor; they pile up over a long session, and this is the explicit cleanup. The
+        successors themselves are open and stay.
+        """
+        removed: list[str] = []
+        for runtime in self.state.all():
+            if vm and runtime.name != vm:
+                continue
+            for sid, info in list(runtime.terms.items()):
+                if info.state == TermState.OPEN:
+                    continue
+                session = self._sessions.pop(sid, None)
+                if session is not None:
+                    session.close()
+                del runtime.terms[sid]
+                removed.append(sid)
+        return removed
+
     async def close(self, session_id: str) -> None:
         """Close one session."""
         session = self.get(session_id)

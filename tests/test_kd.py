@@ -386,3 +386,25 @@ async def test_kd_break_timeout_points_at_reconnecting_the_guest(
         await service.call("kd_break", {"vm": "win11-dev", "timeout": 1})
     assert exc.value.code == TIMEOUT
     assert "no_debuggee" in exc.value.hint and "vm_reboot" in exc.value.hint
+
+
+async def test_kd_state_is_authoritative_once_kd_dies(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    from ntdrive.core.state import KdState
+
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    live = await service.call("kd_state", {"vm": "win11-dev"})
+    assert live["attached"] is True and live["state"] == "broken"
+    # kd.exe dies (a KDNET drop, a crash) and the reader thread has not reported it yet: the
+    # tracked state still says broken. That once made an agent call kd_exec and get
+    # kd_not_attached. The process is the truth, and the old events move out of the present.
+    kd_procs[-1].stop(0)
+    session = service.kd_sessions["win11-dev"]
+    session.state = KdState.BROKEN
+    dead = await service.call("kd_state", {"vm": "win11-dev"})
+    assert dead["attached"] is False and dead["state"] == "detached"
+    assert dead["target_info"] == "" and dead["last_event"] is None and dead["pid"] is None
+    assert dead["previous_session"]["last_event"]["event"] == "user_break"
+    assert "kd_attach" in dead["note"]

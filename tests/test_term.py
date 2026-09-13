@@ -169,3 +169,25 @@ async def test_term_open_as_the_standard_account(
         for old, new in zip(dropped, successors, strict=True)
     ]
     assert len(pairs) == 2 and all(old == new for old, new in pairs)
+
+
+async def test_term_list_names_the_open_sessions_and_prune_drops_the_rest(
+    service: NtDriveService,
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    first = (await service.call("term_open", {"vm": "win11-dev"}))["session_id"]
+    second = (await service.call("term_open", {"vm": "win11-dev"}))["session_id"]
+    await service.call("term_close", {"session_id": first})
+    listed = await service.call("term_list", {"vm": "win11-dev"})
+    assert {s["session_id"] for s in listed["sessions"]} == {first, second}
+    assert listed["open"] == [second]
+    pruned = await service.call("term_prune", {"vm": "win11-dev"})
+    assert pruned == {"pruned": [first], "remaining": 1}
+    # A dropped session (reboot, revert) is stale bookkeeping too once nobody needs its successor.
+    service.term.mark_disconnected("win11-dev")
+    assert (await service.call("term_list", {}))["open"] == []
+    assert (await service.call("term_prune", {}))["pruned"] == [second]
+    assert (await service.call("term_list", {}))["sessions"] == []
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("term_read", {"session_id": second})
+    assert exc.value.code == "session_not_found"

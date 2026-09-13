@@ -329,10 +329,13 @@ async def test_file_push_falls_back_to_guest_tools_without_ssh(
         "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\ntdrive\\probe.ps1"}
     )
     assert pushed["via"] == "guest_tools"
-    assert pushed["files"] == 1 and pushed["verified"] == 0
-    assert pushed["copied"][0]["verified"] is None
+    # The fallback copy is hashed too: Get-FileHash ran in the guest and matched the host file.
+    assert pushed["files"] == 1 and pushed["verified"] == 1
+    assert pushed["copied"][0]["verified"] is True
     assert "guest tools" in pushed["note"]
-    assert any("copyFileFromHostToGuest" in c for c in fake_vmrun.calls[-1])
+    assert any("copyFileFromHostToGuest" in c for c in fake_vmrun.calls)
+    assert any("Get-FileHash" in " ".join(c) for c in fake_vmrun.calls)
+    assert any("deleteFileInGuest" in c for c in fake_vmrun.calls)  # the report is cleaned up
     assert not fake_transport.files  # SFTP was never attempted
 
     # SFTP that dies mid-transfer must also fall back instead of raising on verification.
@@ -341,7 +344,7 @@ async def test_file_push_falls_back_to_guest_tools_without_ssh(
     pushed = await service.call(
         "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\ntdrive\\probe2.ps1"}
     )
-    assert pushed["via"] == "guest_tools" and pushed["copied"][0]["verified"] is None
+    assert pushed["via"] == "guest_tools" and pushed["copied"][0]["verified"] is True
     assert "sftp failed" in pushed["note"]
 
     pulled = await service.call(

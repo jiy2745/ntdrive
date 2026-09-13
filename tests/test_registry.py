@@ -32,6 +32,7 @@ EXPECTED = {
     "term_resize",
     "term_close",
     "term_list",
+    "term_prune",
     "con_screenshot",
     "file_push",
     "file_pull",

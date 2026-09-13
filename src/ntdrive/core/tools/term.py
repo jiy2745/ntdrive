@@ -92,6 +92,14 @@ class ListParams(BaseModel):
     vm: str | None = Field(default=None, description="Only sessions of this VM")
 
 
+class PruneParams(BaseModel):
+    """term_prune."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vm: str | None = Field(default=None, description="Only sessions of this VM")
+
+
 def _session(service: NtDriveService, session_id: str) -> TermSession:
     session = service.term.get(session_id)
     service.ensure_not_frozen(session.vm)
@@ -287,8 +295,31 @@ async def term_close(service: NtDriveService, p: SessionParams) -> dict[str, Any
 
 
 @tool(
-    "term_list", "List terminal sessions and their state.", ListParams, positional=(), effect="read"
+    "term_list",
+    "List terminal sessions and their state, plus the ids that are open and usable.",
+    ListParams,
+    positional=("vm",),
+    effect="read",
 )
 async def term_list(service: NtDriveService, p: ListParams) -> dict[str, Any]:
     """List."""
-    return {"sessions": service.term.sessions(p.vm)}
+    sessions = service.term.sessions(p.vm)
+    return {
+        "sessions": sessions,
+        "open": [s["session_id"] for s in sessions if s.get("state") == "open"],
+    }
+
+
+@tool(
+    "term_prune",
+    "Forget closed and disconnected terminal sessions (their open successors stay), so the "
+    "list shows only what is usable.",
+    PruneParams,
+    positional=("vm",),
+    effect="additive",
+    idempotent=True,
+)
+async def term_prune(service: NtDriveService, p: PruneParams) -> dict[str, Any]:
+    """Drop stale bookkeeping."""
+    pruned = service.term.prune(p.vm)
+    return {"pruned": pruned, "remaining": len(service.term.sessions(p.vm))}

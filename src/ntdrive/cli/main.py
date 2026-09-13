@@ -120,9 +120,25 @@ def _click_type(annotation: Any) -> tuple[Any, bool]:
     return click.STRING, False
 
 
+def _greedy_positional(spec: ToolSpec) -> str | None:
+    """The last positional when it is free text after another positional, else None.
+
+    `ntdrive kd exec win11 !process 0 0 p.exe` then means one command, not extra arguments.
+    Single-positional tools (`vm state win11`) keep strict parsing so a typo still fails.
+    """
+    fields: dict[str, FieldInfo] = spec.params.model_fields
+    ordered = [name for name in fields if name in spec.positional]
+    if len(ordered) < 2:
+        return None
+    last = ordered[-1]
+    annotation, _ = _unwrap_optional(fields[last].annotation)
+    return last if annotation is str else None
+
+
 def _params_for(spec: ToolSpec) -> list[click.Parameter]:
     params: list[click.Parameter] = []
     fields: dict[str, FieldInfo] = spec.params.model_fields
+    greedy = _greedy_positional(spec)
     for name, field in fields.items():
         annotation, optional = _unwrap_optional(field.annotation)
         ctype, multiple = _click_type(annotation)
@@ -134,7 +150,7 @@ def _params_for(spec: ToolSpec) -> list[click.Parameter]:
                     [name],
                     required=required,
                     default=None if not required else None,
-                    nargs=1,
+                    nargs=-1 if name == greedy else 1,
                 )
             )
             continue
@@ -172,6 +188,8 @@ def _make_command(spec: ToolSpec) -> click.Command:
         )
         extra.append(click.Option(["--stdin"], is_flag=True, help="Read commands from stdin"))
 
+    greedy = _greedy_positional(spec)
+
     @click.pass_context
     def callback(ctx: click.Context, /, **kwargs: Any) -> None:
         args: dict[str, Any] = {}
@@ -180,7 +198,9 @@ def _make_command(spec: ToolSpec) -> click.Command:
                 continue
             if value is None or value == ():
                 continue
-            if isinstance(value, tuple):
+            if key == greedy and isinstance(value, tuple):
+                value = " ".join(value)  # the words of one command, typed without quotes
+            elif isinstance(value, tuple):
                 value = list(value)
             if key == "local" and isinstance(value, str):
                 # The daemon runs elsewhere, so host paths must be absolute before they leave.
