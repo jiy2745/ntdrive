@@ -12,12 +12,13 @@ import contextlib
 import json
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pyte
 
-from ntdrive.errors import SESSION_DISCONNECTED, TIMEOUT, NtDriveError
+from ntdrive.errors import GUEST_FROZEN_BY_DEBUGGER, SESSION_DISCONNECTED, TIMEOUT, NtDriveError
 from ntdrive.term.transport import TermChannel
 
 ANSI_RE = re.compile(
@@ -26,6 +27,10 @@ ANSI_RE = re.compile(
     rb"|\x1b[@-Z\\-_]"  # two-byte escapes
     rb"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"  # other control bytes except \t \n \r
 )
+
+
+# A regex wait scans at most this many bytes per wake (see TermSession._scan_from).
+LOOKBACK = 65536
 
 
 class RingBuffer:
@@ -219,31 +224,69 @@ class TermSession:
         return "\n".join(lines)
 
     async def wait_until(
-        self, pattern: str, timeout: float, cursor: int | None = None, clean: bool = True
+        self,
+        pattern: str,
+        timeout: float,
+        cursor: int | None = None,
+        clean: bool = True,
+        max_bytes: int | None = None,
+        abort: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        """Block until `pattern` matches output after `cursor` or the timeout expires."""
+        """Block until `pattern` matches output after `cursor` or the timeout expires.
+
+        `max_bytes` caps the returned text (None returns everything up to the match). `abort`
+        is polled on every wake: once it returns true the wait ends at once with
+        guest_frozen_by_debugger and the output so far, instead of running to the timeout
+        while the guest cannot answer.
+        """
         regex = re.compile(pattern, re.MULTILINE)
         start = self.cursor if cursor is None else cursor
         deadline = self._loop.time() + timeout
         while True:
-            raw = self.ring.slice_from(start)
+            raw = self.ring.slice_from(self._scan_from(start))
             haystack = clean_text(raw) if clean else raw.decode("utf-8", errors="replace")
             match = regex.search(haystack)
             if match:
-                result = self.read_delta(cursor, max_bytes=len(raw) + 1, clean=clean)
+                cap = self.ring.end - start + 1 if max_bytes is None else max_bytes
+                result = self.read_delta(cursor, max_bytes=cap, clean=clean)
                 result["matched"] = match.group(0)
                 return result
             if not self.connected:
                 self._require_connected()
+            if abort is not None and abort():
+                partial = self.read_delta(cursor, max_bytes=max_bytes or 65536, clean=clean)
+                raise NtDriveError(
+                    GUEST_FROZEN_BY_DEBUGGER,
+                    "the target stopped at a kd> prompt while the wait ran",
+                    "kd_wait_event or kd_exec now, then kd_go and term_read for the rest of "
+                    "the output",
+                    output=partial["text"],
+                )
             remaining = deadline - self._loop.time()
             if remaining <= 0:
-                result = self.read_delta(cursor, clean=clean)
+                result = self.read_delta(cursor, max_bytes=max_bytes or 65536, clean=clean)
                 result["matched"] = None
                 result["error"] = {"code": TIMEOUT, "message": "pattern did not appear"}
                 return result
             async with self._changed:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self._changed.wait(), timeout=min(remaining, 1.0))
+
+    def _scan_from(self, start: int) -> int:
+        """Where a regex wait scans from: the last LOOKBACK bytes, cut after a newline.
+
+        Cleaning and scanning everything since the cursor on every wake made a wait over a
+        chatty command quadratic (1000 chunks of 1 KB cost 7 s of CPU on the event loop). A
+        match never starts further behind the newest byte than the window, so the cost per
+        wake is bounded, and the cut lands after a newline so line anchors keep their meaning.
+        """
+        if self.ring.end - start <= LOOKBACK:
+            return start
+        lo = self.ring.end - LOOKBACK
+        head_start = max(start, lo - 4096)
+        head = self.ring.slice_from(head_start)[: lo - head_start]
+        nl = head.rfind(bytes([10]))
+        return head_start + nl + 1 if nl >= 0 else lo
 
     # -- writing ------------------------------------------------------------------------
 

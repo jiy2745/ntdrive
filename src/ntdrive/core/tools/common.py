@@ -16,7 +16,7 @@ class VmParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    vm: str = Field(description="VM name as registered in vms.yaml")
+    vm: str = Field(description="VM name from vms.yaml")
 
 
 class ConfirmMixin(BaseModel):

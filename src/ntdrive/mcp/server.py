@@ -13,7 +13,7 @@ import logging
 import sys
 from typing import Any
 
-import mcp.types as types
+from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
@@ -27,12 +27,13 @@ log = logging.getLogger("ntdrive-mcp")
 # Sent to the client at initialize. The short form of SKILL.md: what to call first and the one
 # rule that bites (a broken-in debugger freezes the guest).
 INSTRUCTIONS = (
-    "ntdrive drives VMware Workstation guests on this Windows host. Call sys_health first: it "
-    "names the fix for every setup problem. Tools take vm, the name from vms.yaml. While "
-    "kd_state is broken the guest is frozen, so call kd_go before term_*, file_* or "
-    "con_screenshot. snap_revert and vm_reboot drop terminal sessions and reattach the "
-    "debugger for you. Destructive tools need confirm=true. Passwords and KDNET keys never go "
-    "into tool arguments."
+    "ntdrive drives VMware Workstation guests on this Windows host. Call sys_health first: "
+    "every issue it lists names the fix. vm_list names the VMs. While kd_state is broken the "
+    "guest is frozen, so call kd_go before term_*, file_* or con_screenshot. snap_revert and "
+    "vm_reboot drop terminal sessions and reattach the debugger for you, and reopened "
+    "terminals get new session ids (term_list). Only snap_delete, vm_stop mode=hard or kill "
+    "and vm_reboot mode=hard take confirm=true, no other tool has a confirm argument. "
+    "Passwords and KDNET keys never go into tool arguments."
 )
 
 
@@ -73,8 +74,11 @@ async def serve(client: DaemonClient) -> None:
     """Run over stdio until the client disconnects."""
     registry = load_builtin_tools()
     server = build_server(registry, client)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+    finally:
+        await client.aclose()
 
 
 def main() -> None:

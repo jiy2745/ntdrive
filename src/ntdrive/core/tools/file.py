@@ -7,15 +7,17 @@ import glob
 import hashlib
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
 from ntdrive.core.registry import tool
-from ntdrive.core.service import NtDriveService
 from ntdrive.core.tools.common import VmParams
 from ntdrive.errors import INVALID_ARGS, NtDriveError
 from ntdrive.paths import is_absolute_local
+
+if TYPE_CHECKING:
+    from ntdrive.core.service import NtDriveService
 
 # Exceptions that mean "SFTP did not work for this file, use guest tools instead".
 _SFTP_FAILURES = (NotImplementedError, NtDriveError, OSError)

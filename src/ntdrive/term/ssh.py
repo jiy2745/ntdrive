@@ -95,7 +95,7 @@ def _guarded[T](what: str, hint: str, fn: Callable[[], T]) -> T:
         return fn()
     except NtDriveError:
         raise
-    except Exception as exc:  # noqa: BLE001 - paramiko raises many unrelated types
+    except Exception as exc:
         raise NtDriveError(BACKEND_ERROR, f"{what} failed: {exc}", hint) from exc
 
 
@@ -134,7 +134,7 @@ class SshChannel(TermChannel):
             raise NtDriveError(BACKEND_ERROR, "ssh channel is closed")
         try:
             self._chan.sendall(data)
-        except Exception as exc:  # noqa: BLE001 - socket or paramiko error
+        except Exception as exc:
             self._open = False
             raise NtDriveError(BACKEND_ERROR, f"ssh channel write failed: {exc}") from exc
 
@@ -219,7 +219,8 @@ class SshPtyTransport(TermTransport):
                 None,
                 lambda: _guarded(
                     f"ssh connect to {self.host}:{self.port}",
-                    "check that OpenSSH Server runs in the guest and the credentials are right",
+                    "the guest may still be booting (retry term_open in 30 s), or OpenSSH Server "
+                    "is not running in the guest, or the credentials are wrong",
                     _connect,
                 ),
             )

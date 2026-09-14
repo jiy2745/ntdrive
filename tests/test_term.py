@@ -11,7 +11,7 @@ from ntdrive.errors import (
     NtDriveError,
 )
 from ntdrive.term.keys import encode_key_list, encode_keys
-from ntdrive.term.session import RingBuffer, TermSession, clean_text
+from ntdrive.term.session import LOOKBACK, RingBuffer, TermSession, clean_text
 
 from .conftest import FakeChannel, FakeTransport, settle
 
@@ -230,3 +230,39 @@ async def test_term_exec_ignores_an_echo_chunk_that_ends_at_the_marker(
     assert done["output"] == "MARKER_4" and done["exit_code"] == 0
     typed = chan.written[-1]
     assert b"__NTDRIVE_" not in typed and b'("__NT" + "DRIVE_' in typed
+
+
+async def test_wait_until_aborts_when_the_guest_freezes() -> None:
+    loop = asyncio.get_running_loop()
+    session = TermSession("t-2", "vm", "powershell", "ssh", 40, 5, None, loop)
+    chan = FakeChannel(session.on_data_threadsafe, session.on_close_threadsafe, FakeTransport())
+    session.attach(chan)
+    chan.emit(b"sc start mydrv\r\nstarting")
+    await settle()
+    # The predicate stands in for kd holding the target at a prompt: the wait must end at once
+    # with the output so far, not run to its timeout while the guest cannot answer.
+    with pytest.raises(NtDriveError) as exc:
+        await session.wait_until("never", timeout=5, abort=lambda: True)
+    assert exc.value.code == GUEST_FROZEN_BY_DEBUGGER
+    assert "starting" in exc.value.extra["output"]
+    chan.close()
+
+
+async def test_wait_until_honors_max_bytes_and_a_long_backlog() -> None:
+    loop = asyncio.get_running_loop()
+    session = TermSession("t-3", "vm", "powershell", "ssh", 40, 5, None, loop)
+    chan = FakeChannel(session.on_data_threadsafe, session.on_close_threadsafe, FakeTransport())
+    session.attach(chan)
+    chan.emit(b"x" * 4096 + b"\r\ndone 1\r\n")
+    await settle()
+    result = await session.wait_until(r"done \d+", timeout=1, max_bytes=512)
+    assert result["matched"] == "done 1"
+    assert result["truncated"] and len(result["text"]) <= 512
+    # More output since the cursor than the scan window: the bounded scan still finds a match
+    # that sits at the end, and the window cut keeps the line anchor meaningful.
+    start = session.ring.end
+    chan.emit(b"y" * (LOOKBACK + 10000) + b"\r\ndone 2\r\n")
+    await settle()
+    result = await session.wait_until(r"^done \d+", timeout=1, cursor=start)
+    assert result["matched"] == "done 2"
+    chan.close()

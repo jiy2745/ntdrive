@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel
+from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue
 
 if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
@@ -23,6 +24,23 @@ Handler = Callable[["NtDriveService", Any], Awaitable[dict[str, Any]]]
 Effect = Literal["read", "additive", "destructive"]
 # Group order of the README tool table, the order of the PRD section 7 tables.
 TABLE_GROUP_ORDER = ("vm", "snap", "kd", "term", "con", "file", "sys")
+
+
+class _CompactSchema(GenerateJsonSchema):
+    """The schema LLM clients get: no property titles, and `x | None` as one node."""
+
+    def field_title_should_be_set(self, schema: Any) -> bool:
+        return False
+
+    def nullable_schema(self, schema: Any) -> JsonSchemaValue:
+        inner = self.generate_inner(schema["schema"])
+        kind = inner.get("type")
+        if not isinstance(kind, str):
+            return super().nullable_schema(schema)
+        out: JsonSchemaValue = {**inner, "type": [kind, "null"]}
+        if "enum" in inner:
+            out["enum"] = [*inner["enum"], None]
+        return out
 
 
 @dataclass
@@ -52,9 +70,17 @@ class ToolSpec:
         return self.name.split("_", 1)[1] if "_" in self.name else self.name
 
     def input_schema(self) -> dict[str, Any]:
-        """JSON schema of the parameter model, as MCP expects it."""
-        schema = self.params.model_json_schema()
+        """JSON schema of the parameter model, as MCP expects it, without pydantic noise.
+
+        Property titles, the model docstring and `default: null` add nothing for an LLM and
+        cost about a thousand tokens per tools/list across the registry.
+        """
+        schema = self.params.model_json_schema(schema_generator=_CompactSchema)
         schema.pop("title", None)
+        schema.pop("description", None)  # the model docstring: the tool text is spec.description
+        for prop in schema.get("properties", {}).values():
+            if "default" in prop and prop["default"] is None:
+                del prop["default"]
         return schema
 
     def summary(self) -> dict[str, Any]:

@@ -6,14 +6,13 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
 from ntdrive.config import VmConfig
 from ntdrive.core.orchestrator import revert_flow
 from ntdrive.core.registry import tool
-from ntdrive.core.service import NtDriveService
 from ntdrive.core.state import PowerState
 from ntdrive.core.tools.common import ConfirmMixin, VmParams
 from ntdrive.errors import (
@@ -24,6 +23,9 @@ from ntdrive.errors import (
     SNAPSHOT_NOT_FOUND,
     NtDriveError,
 )
+
+if TYPE_CHECKING:
+    from ntdrive.core.service import NtDriveService
 
 log = logging.getLogger("ntdrive.snap")
 
@@ -121,9 +123,8 @@ class SnapTakeParams(SnapNameParams):
     allow_suspend: bool = Field(
         default=False,
         description=(
-            "If a live snapshot of a running encrypted VM is refused by vmrun, suspend the VM, "
-            "snapshot the saved state (includes memory), then resume. Briefly pauses the guest, "
-            "drops terminal sessions and reattaches the debugger afterwards."
+            "When vmrun refuses a live snapshot of a running encrypted VM: suspend, snapshot "
+            "the saved state (memory included), resume. Drops terminals, reattaches kd."
         ),
     )
 
@@ -144,9 +145,8 @@ class SnapDeleteParams(SnapNameParams, ConfirmMixin):
     allow_suspend: bool = Field(
         default=False,
         description=(
-            "If deleting a memory snapshot of a running encrypted VM is refused by vmrun, suspend "
-            "the VM, delete, then resume. Briefly pauses the guest, drops terminal sessions and "
-            "reattaches the debugger afterwards."
+            "When vmrun refuses to delete a memory snapshot of a running encrypted VM: suspend, "
+            "delete, resume. Drops terminals, reattaches kd."
         ),
     )
 

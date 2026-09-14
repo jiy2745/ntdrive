@@ -112,11 +112,19 @@ class NtDriveService:
                 issues = "; ".join(
                     f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
                 )
+                hint = ""
+                if any(e["loc"] == ("confirm",) for e in exc.errors()):
+                    names = ", ".join(s.name for s in self.registry if s.destructive)
+                    hint = (
+                        f"this tool has no confirm flag, only {names} take confirm=true "
+                        "(vm_stop and vm_reboot only for mode=hard or kill)"
+                    )
                 raise NtDriveError(
-                    INVALID_ARGS, f"invalid arguments for {name}: {issues}"
+                    INVALID_ARGS, f"invalid arguments for {name}: {issues}", hint
                 ) from None
             self.policy.check(spec, params)
-            if spec.long_poll and hasattr(params, "timeout"):
+            # Every timeout field is clipped to the daemon cap, so no call outlives its client.
+            if hasattr(params, "timeout"):
                 cap = float(self.config.host.tool_timeout_max)
                 if float(params.timeout) > cap:
                     params.timeout = cap
@@ -146,7 +154,7 @@ class NtDriveService:
                 name, args, caller=caller, ok=False, elapsed_ms=0, error=err.to_dict()["error"]
             )
             raise err from exc
-        except Exception as exc:  # noqa: BLE001 - convert anything else into a wire error
+        except Exception as exc:
             err = NtDriveError(INTERNAL, f"{name} failed: {type(exc).__name__}: {exc}")
             self.audit.record(
                 name, args, caller=caller, ok=False, elapsed_ms=0, error=err.to_dict()["error"]
@@ -196,6 +204,34 @@ class NtDriveService:
         power = await self.adapter_for(vm).power_state(vm)
         self.state.vm(vm.name).power = power
         return power
+
+    async def refresh_powers(self, names: list[str]) -> dict[str, PowerState | NtDriveError]:
+        """Power of several VMs with one hypervisor query per backend.
+
+        A VM whose config or backend fails gets its error instead of a state and its cached
+        power becomes unknown, so one broken entry does not hide the others.
+        """
+        out: dict[str, PowerState | NtDriveError] = {}
+        groups: dict[str, list[VmConfig]] = {}
+        for name in names:
+            try:
+                cfg = self.vm_cfg(name)
+            except NtDriveError as exc:
+                out[name] = exc
+                continue
+            groups.setdefault(cfg.backend, []).append(cfg)
+        for backend, group in groups.items():
+            try:
+                states = await self.adapters[backend].power_states(group)
+            except NtDriveError as exc:
+                for cfg in group:
+                    self.state.vm(cfg.name).power = PowerState.UNKNOWN
+                    out[cfg.name] = exc
+                continue
+            for name, power in states.items():
+                self.state.vm(name).power = power
+                out[name] = power
+        return out
 
     async def ensure_running(self, vm: VmConfig) -> None:
         """Raise vm_not_running unless the VM is powered on."""

@@ -68,6 +68,10 @@ class HypervisorAdapter(ABC):
     async def power_state(self, vm: VmConfig) -> PowerState:
         """Current power state."""
 
+    async def power_states(self, vms: list[VmConfig]) -> dict[str, PowerState]:
+        """One answer per VM. A backend that lists every running VM at once overrides this."""
+        return {vm.name: await self.power_state(vm) for vm in vms}
+
     @abstractmethod
     async def start(self, vm: VmConfig, gui: bool = False) -> None:
         """Power on or resume."""

@@ -7,8 +7,6 @@ import json
 import sys
 import threading
 
-import aiohttp
-
 from ntdrive.daemon.client import DaemonClient
 from ntdrive.errors import BACKEND_ERROR, NtDriveError
 
@@ -54,6 +52,8 @@ def _read_keys(queue: asyncio.Queue[bytes | None], loop: asyncio.AbstractEventLo
 
 
 async def _run(client: DaemonClient, session_id: str) -> None:
+    import aiohttp  # only this command needs it, and it costs 0.2 s to import
+
     url = client.ws_url(session_id, source="human")
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -95,6 +95,8 @@ async def _run(client: DaemonClient, session_id: str) -> None:
 
 def attach_session(client: DaemonClient, session_id: str) -> None:
     """Blocking entry point used by the CLI."""
+    import aiohttp
+
     try:
         asyncio.run(_run(client, session_id))
     except aiohttp.ClientError as exc:

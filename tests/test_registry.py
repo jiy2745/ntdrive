@@ -55,6 +55,11 @@ def test_specs_are_well_formed() -> None:
     for spec in registry:
         schema = spec.input_schema()
         assert schema["type"] == "object"
+        # What an LLM client reads: no model docstring, no property titles, no anyOf-null unions.
+        assert "description" not in schema
+        for prop in schema["properties"].values():
+            assert "title" not in prop and "anyOf" not in prop, spec.name
+            assert prop.get("default", 0) is not None, spec.name
         fields = spec.params.model_fields
         for name in spec.positional:
             assert name in fields, f"{spec.name}: positional {name} is not a parameter"

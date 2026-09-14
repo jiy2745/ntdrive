@@ -9,18 +9,20 @@ import socket
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ntdrive.config import VmConfig
 from ntdrive.core.registry import tool
-from ntdrive.core.service import NtDriveService
 from ntdrive.core.state import PowerState
 from ntdrive.core.tools.common import NoParams
 from ntdrive.errors import NtDriveError
 from ntdrive.hypervisor.vmx import vmx_settings
 from ntdrive.kd.firewall import FirewallStatus
+
+if TYPE_CHECKING:
+    from ntdrive.core.service import NtDriveService
 
 # The guest probe must stay quick. `vmrun getGuestIPAddress -wait` blocks for as long as VMware
 # Tools report nothing, so it gets a short timeout here instead of the 60 s the terminal uses.
@@ -45,12 +47,10 @@ class StateParams(BaseModel):
 async def sys_state(service: NtDriveService, p: StateParams) -> dict[str, Any]:
     """Aggregate state."""
     names = [p.vm] if p.vm else list(service.config.vms)
-    vms: list[dict[str, Any]] = []
     for name in names:
-        cfg = service.vm_cfg(name)
-        with contextlib.suppress(NtDriveError):
-            await service.refresh_power(cfg)
-        vms.append(service.runtime(name).to_dict())
+        service.vm_cfg(name)  # an unknown or unsupported VM is an error, a power failure is not
+    await service.refresh_powers(names)  # one vmrun list for every VM of the call
+    vms = [service.runtime(name).to_dict() for name in names]
     return {
         "daemon": {
             "version": service.version,
@@ -130,11 +130,11 @@ def config_issues(cfg: VmConfig, backends: set[str]) -> list[str]:
         empty_envs.append(cfg.guest.standard_password_env)
     if cfg.encryption_password_env and not cfg.resolve_encryption_password():
         empty_envs.append(cfg.encryption_password_env)
-    for env in dict.fromkeys(empty_envs):
-        issues.append(
-            f"environment variable {env} is empty (set it at User scope: ntdrive reads it from "
-            "the registry at once, no new terminal needed)"
-        )
+    issues.extend(
+        f"environment variable {env} is empty (set it at User scope: ntdrive reads it from "
+        "the registry at once, no new terminal needed)"
+        for env in dict.fromkeys(empty_envs)
+    )
     if (
         "encryption.keysafe" in settings
         and not cfg.encryption_password_env
@@ -156,6 +156,7 @@ async def _probe_vm(
     cfg: VmConfig,
     issues: list[str],
     firewall: asyncio.Task[FirewallStatus] | None,
+    power_or_error: PowerState | NtDriveError,
 ) -> dict[str, Any]:
     """Live checks for one VM, each bounded to a few seconds.
 
@@ -165,10 +166,10 @@ async def _probe_vm(
     """
     runtime = service.runtime(cfg.name)
     power = PowerState.UNKNOWN
-    try:
-        power = await service.refresh_power(cfg)
-    except NtDriveError as exc:
-        issues.append(f"power state unknown: {exc.message}")
+    if isinstance(power_or_error, NtDriveError):
+        issues.append(f"power state unknown: {power_or_error.message}")
+    else:
+        power = power_or_error
     running = power == PowerState.RUNNING
     kd = service.kd_sessions.get(cfg.name)
     attached = kd is not None and kd.attached
@@ -234,9 +235,10 @@ async def _vm_health(
     name: str,
     cfg: VmConfig,
     firewall: asyncio.Task[FirewallStatus] | None,
+    power: PowerState | NtDriveError,
 ) -> dict[str, Any]:
     issues = _config_issues(service, cfg)
-    live = await _probe_vm(service, cfg, issues, firewall)
+    live = await _probe_vm(service, cfg, issues, firewall, power)
     return {
         "name": name,
         "backend": cfg.backend,
@@ -249,7 +251,8 @@ async def _vm_health(
 @tool(
     "sys_health",
     "Check binaries, config and backend capabilities, then probe every VM: power, guest SSH "
-    "port and the debugger transport on the host. Run this first.",
+    "port and the debugger transport on the host. Run this first: ok is false when the host "
+    "or any VM has an issue, and every issue names its fix.",
     NoParams,
     positional=(),
     effect="read",
@@ -286,10 +289,11 @@ async def sys_health(service: NtDriveService, _: NoParams) -> dict[str, Any]:
         # One read of the host firewall, shared by every VM on the net transport.
         firewall = asyncio.create_task(service.kdnet_firewall())
     try:
+        powers = await service.refresh_powers(list(service.config.vms))
         vms = list(
             await asyncio.gather(
                 *(
-                    _vm_health(service, name, cfg, firewall)
+                    _vm_health(service, name, cfg, firewall, powers[name])
                     for name, cfg in service.config.vms.items()
                 )
             )
@@ -302,9 +306,11 @@ async def sys_health(service: NtDriveService, _: NoParams) -> dict[str, Any]:
                 await firewall
         raise
     kdnet_firewall = (await firewall).as_dict() if firewall is not None else None
+    vm_issues = sum(len(vm["issues"]) for vm in vms)
     return {
-        "ok": not problems,
+        "ok": not problems and vm_issues == 0,
         "problems": problems,
+        "vm_issues": vm_issues,
         "version": service.version,
         "python": sys.version.split()[0],
         "platform": platform.platform(),

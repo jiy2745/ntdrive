@@ -66,7 +66,6 @@ class TermInfo:
             "opened_at": self.opened_at,
             "last_activity": self.last_activity,
             "successor": self.successor,
-            "coview_url": self.coview_url,
         }
 
 
@@ -92,10 +91,6 @@ class VmRuntime:
         """True while the debugger holds the target at a prompt."""
         return self.kd_state == KdState.BROKEN
 
-    def open_terms(self) -> list[TermInfo]:
-        """Sessions that are still connected."""
-        return [t for t in self.terms.values() if t.state == TermState.OPEN]
-
     def to_dict(self) -> dict[str, Any]:
         """Wire form used by sys_state and vm_state."""
         return {
@@ -111,7 +106,12 @@ class VmRuntime:
                 "log_path": self.kd_log_path,
             },
             "current_snapshot": self.current_snapshot,
-            "term_sessions": [t.to_dict() for t in self.terms.values()],
+            "term_open": [t.session_id for t in self.terms.values() if t.state == TermState.OPEN],
+            "term_disconnected": [
+                {"session_id": t.session_id, "successor": t.successor}
+                for t in self.terms.values()
+                if t.state == TermState.DISCONNECTED
+            ],
             "guest_frozen": self.guest_frozen,
             "last_event": self.last_event,
         }

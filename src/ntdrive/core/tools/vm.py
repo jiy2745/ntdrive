@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 
 from ntdrive.core.orchestrator import reboot_flow
 from ntdrive.core.registry import tool
-from ntdrive.core.service import NtDriveService
 from ntdrive.core.state import PowerState
 from ntdrive.core.tools.common import ConfirmMixin, NoParams, VmParams
 from ntdrive.errors import NtDriveError
+
+if TYPE_CHECKING:
+    from ntdrive.core.service import NtDriveService
 
 
 class StartParams(VmParams):
@@ -38,27 +40,23 @@ class RebootParams(VmParams, ConfirmMixin):
 
     mode: Literal["soft", "hard", "kd"] = Field(
         default="soft",
-        description="soft: shutdown /r in the guest; hard: hypervisor reset; kd: .reboot at kd>",
+        description=(
+            "soft: shutdown /r in the guest. hard: hypervisor reset, needs confirm=true. "
+            "kd: .reboot at kd>"
+        ),
     )
     reattach_kd: bool = Field(default=True, description="Bring the debugger back after boot")
     reopen_term: bool = Field(default=True, description="Reopen dropped terminal sessions")
     timeout: float = Field(default=180, ge=1, description="Seconds to wait for the guest")
 
 
-async def _summary(service: NtDriveService, name: str) -> dict[str, Any]:
-    cfg = service.vm_cfg(name)
-    try:
-        await service.refresh_power(cfg)
-    except NtDriveError as exc:
-        service.state.vm(name).power = PowerState.UNKNOWN
-        runtime = service.runtime(name)
-        data = runtime.to_dict()
-        data["backend"] = cfg.backend
-        data["power_error"] = exc.to_dict()["error"]
-        return data
-    runtime = service.runtime(name)
-    data = runtime.to_dict()
-    data["backend"] = cfg.backend
+def _summary(
+    service: NtDriveService, name: str, power: PowerState | NtDriveError
+) -> dict[str, Any]:
+    data = service.runtime(name).to_dict()
+    data["backend"] = service.config.vms[name].backend
+    if isinstance(power, NtDriveError):
+        data["power_error"] = power.to_dict()["error"]
     return data
 
 
@@ -71,14 +69,18 @@ async def _summary(service: NtDriveService, name: str) -> dict[str, Any]:
 )
 async def vm_list(service: NtDriveService, _: NoParams) -> dict[str, Any]:
     """Every VM in vms.yaml."""
-    vms = [await _summary(service, name) for name in service.config.vms]
+    # One vmrun list for the whole call, not one per VM.
+    powers = await service.refresh_powers(list(service.config.vms))
+    vms = [_summary(service, name, powers[name]) for name in service.config.vms]
     return {"vms": vms}
 
 
 @tool("vm_state", "Power, debugger and terminal state of one VM.", VmParams, effect="read")
 async def vm_state(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     """Refresh and return one VM."""
-    return await _summary(service, p.vm)
+    service.vm_cfg(p.vm)  # an unknown or unsupported VM is an error here, not a power_error
+    power = (await service.refresh_powers([p.vm]))[p.vm]
+    return _summary(service, p.vm, power)
 
 
 @tool(
@@ -98,8 +100,7 @@ async def vm_start(service: NtDriveService, p: StartParams) -> dict[str, Any]:
 
 @tool(
     "vm_stop",
-    "Shut the guest down (soft), cut power (hard) or, when vmrun stopped answering for the "
-    "VM, end its vmware-vmx process and clear its locks (kill). hard and kill need confirm=true.",
+    "Stop the VM: mode soft, hard or kill. hard and kill need confirm=true.",
     StopParams,
     destructive=True,
     effect="destructive",
@@ -127,7 +128,8 @@ async def vm_stop(service: NtDriveService, p: StopParams) -> dict[str, Any]:
 
 @tool(
     "vm_reboot",
-    "Reboot the guest (soft, hard or from the debugger) and bring kd and terminals back.",
+    "Reboot the guest (soft, hard or from the debugger) and bring kd and terminals back, the "
+    "terminals under new session ids. hard needs confirm=true.",
     RebootParams,
     destructive=True,
     long_poll=True,

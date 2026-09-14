@@ -10,15 +10,17 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ntdrive.config import load_config
 from ntdrive.core.registry import ToolRegistry, ToolSpec, load_builtin_tools
-from ntdrive.core.service import NtDriveService
 from ntdrive.daemon.client import DaemonClient, connect
 from ntdrive.daemon.lifecycle import read_info
 from ntdrive.errors import INVALID_ARGS, TOOL_NOT_FOUND, NtDriveError
 from ntdrive.paths import absolutize_local
+
+if TYPE_CHECKING:
+    from ntdrive.core.service import NtDriveService
 
 
 class _LoopThread:
@@ -79,7 +81,12 @@ class NtDrive:
         self._loop: _LoopThread | None = None
         self.caller = caller
         if inprocess or service is not None:
-            self._service = service or NtDriveService(load_config(config_path))
+            if service is None:
+                # Only the in-process mode needs the daemon's own machinery.
+                from ntdrive.core.service import NtDriveService
+
+                service = NtDriveService(load_config(config_path))
+            self._service = service
             self._loop = _LoopThread()
         else:
             self._client = connect(config_path, autostart=autostart, caller=caller)

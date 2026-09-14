@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 SECRET_KEY = re.compile(r"(password|passwd|secret|token|key)$", re.IGNORECASE)
+# A token inside a value, such as the view token in a CoView URL, hides from the key check.
+TOKEN_IN_TEXT = re.compile(r"""token=[^&'" ]+""")
 
 
 def mask_secrets(value: Any) -> Any:
@@ -58,6 +60,7 @@ class AuditLog:
             entry["error"] = error
         elif result is not None:
             text = json.dumps(mask_secrets(result), ensure_ascii=True, default=str)
+            text = TOKEN_IN_TEXT.sub("token=***", text)
             entry["result"] = text if len(text) <= 2000 else text[:2000] + "...(truncated)"
         line = json.dumps(entry, ensure_ascii=True, default=str)
         with self._lock, self.path.open("a", encoding="utf-8") as fh:

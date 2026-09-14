@@ -264,3 +264,24 @@ def test_force_utf8_stdio_reconfigures_redirected_streams(monkeypatch: pytest.Mo
     sys.stdout.write("\u2603 symbols")  # a character cp949 cannot encode
     sys.stdout.flush()
     assert out.getvalue() == "\u2603 symbols".encode()
+
+
+async def test_guest_ip_timeout_means_still_booting(config: Config) -> None:
+    async def no_tools_yet(argv: list[str], timeout: float) -> tuple[int, str]:
+        raise NtDriveError(TIMEOUT, "vmrun.exe timed out after 60s")
+
+    adapter = VmwareAdapter(config.host.vmrun, runner=no_tools_yet)
+    with pytest.raises(NtDriveError) as exc:
+        await adapter.guest_ip(config.vm("win11-dev"), timeout=60)
+    assert exc.value.code == TIMEOUT
+    assert "still booting" in exc.value.hint
+    assert not exc.value.hint.startswith("vmrun is not answering")
+
+
+async def test_vm_list_runs_one_vmrun_list_for_every_vm(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    fake_vmrun.calls.clear()
+    result = await service.call("vm_list", {})
+    assert len(result["vms"]) == len(service.config.vms)
+    assert sum(1 for argv in fake_vmrun.calls if "list" in argv) == 1

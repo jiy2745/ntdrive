@@ -5,17 +5,19 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
 from ntdrive.config import VmConfig, save_kdnet_settings
 from ntdrive.core.registry import tool
-from ntdrive.core.service import NtDriveService
 from ntdrive.core.tools.common import VmParams
 from ntdrive.errors import BACKEND_ERROR, INVALID_ARGS, NtDriveError
 from ntdrive.kd.firewall import MANUAL_FIREWALL_HINT
 from ntdrive.kd.session import generate_kdnet_key
+
+if TYPE_CHECKING:
+    from ntdrive.core.service import NtDriveService
 
 # A KDNET key is four base36 words joined by dots. Anything else must never reach the bcdedit
 # command line that runs inside the guest shell.
@@ -61,8 +63,8 @@ class AttachParams(VmParams):
     wait_for_target: bool = Field(
         default=True,
         description=(
-            "Block until the target connects, up to timeout. false returns at once with state "
-            "waiting; a target that booted before kd listened needs a reboot to connect"
+            "Block until the target connects (up to timeout). false returns at once with state "
+            "waiting. A target that booted before kd listened needs vm_reboot to connect"
         ),
     )
     timeout: float = Field(default=120, ge=1, description="Seconds to wait for the target")
@@ -86,7 +88,9 @@ class ExecParams(VmParams):
     cmd: str | None = Field(default=None, description="One debugger command")
     cmds: list[str] | None = Field(default=None, description="Several commands, run in order")
     timeout: float = Field(default=60, ge=1, description="Seconds per command")
-    max_bytes: int = Field(default=65536, ge=256, description="Cap on each command's output")
+    max_bytes: int = Field(
+        default=65536, ge=256, le=1 << 20, description="Cap on each command's output"
+    )
 
 
 class WaitParams(VmParams):
@@ -98,7 +102,7 @@ class WaitParams(VmParams):
 class LogTailParams(VmParams):
     """kd_log_tail."""
 
-    bytes: int = Field(default=16384, ge=1, description="How many bytes from the end")
+    bytes: int = Field(default=16384, ge=1, le=1 << 20, description="How many bytes from the end")
 
 
 class SetupHostParams(VmParams):
@@ -317,8 +321,8 @@ async def _configure_guest(
 @tool(
     "kd_setup_guest",
     "Enable kernel debugging in the guest with bcdedit over SSH (serial or KDNET per "
-    "kd_transport) and store the KDNET port and key in vms.yaml. A guest that already debugs to "
-    "this host (scripts/setup-guest.ps1 sets that up) is read back instead of rewritten.",
+    "kd_transport) and save the KDNET port and key to vms.yaml. Settings that already point "
+    "at this host are read back, not rewritten.",
     SetupParams,
     effect="additive",
     idempotent=True,
@@ -337,9 +341,7 @@ async def kd_setup_guest(service: NtDriveService, p: SetupParams) -> dict[str, A
 
 @tool(
     "kd_attach",
-    "Start kd.exe for the VM and wait until the target connects (up to timeout). "
-    "wait_for_target=false returns at once and kd_state shows waiting until the guest reaches "
-    "its kernel debugger.",
+    "Start kd.exe for the VM and wait until the target connects.",
     AttachParams,
     long_poll=True,
     effect="additive",
@@ -356,7 +358,7 @@ async def kd_attach(service: NtDriveService, p: AttachParams) -> dict[str, Any]:
             raise NtDriveError(
                 BACKEND_ERROR,
                 f"KDNET was just configured in the guest {p.vm} and needs a reboot",
-                "vm_reboot mode=soft confirm=true, then kd_attach again",
+                "vm_reboot mode=soft, then kd_attach again",
                 setup=configured,
             )
         key = cfg.kdnet.key
@@ -447,10 +449,8 @@ async def kd_wait_event(service: NtDriveService, p: WaitParams) -> dict[str, Any
 
 @tool(
     "kd_state",
-    "Debugger state: attached (is kd.exe alive), state (detached, waiting, running, broken), "
-    "transport, target info, last event and log path. attached and state come from the live "
-    "process. A finished session's events are reported under previous_session, never as the "
-    "present.",
+    "Debugger state: attached (kd.exe alive), state (detached, waiting, running, broken), "
+    "transport, target info, last event and log path.",
     VmParams,
     effect="read",
 )

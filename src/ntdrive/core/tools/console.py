@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import base64
 import time
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 
 from ntdrive.core.registry import tool
-from ntdrive.core.service import NtDriveService
 from ntdrive.core.tools.common import VmParams
 from ntdrive.errors import BACKEND_ERROR, NtDriveError
 from ntdrive.screen import vnc
+
+if TYPE_CHECKING:
+    from ntdrive.core.service import NtDriveService
 
 
 class ScreenshotParams(VmParams):

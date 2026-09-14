@@ -230,6 +230,14 @@ def _norm_guest(path: str) -> str:
     return path.replace("/", "\\").rstrip("\\").lower()
 
 
+def _power_from(vm: VmConfig, running: set[str]) -> PowerState:
+    if _norm(vm.vmx) in running:
+        return PowerState.RUNNING
+    if Path(vm.vmx).with_suffix(".vmss").exists():
+        return PowerState.SUSPENDED
+    return PowerState.OFF
+
+
 class VmwareAdapter(HypervisorAdapter):
     """HypervisorAdapter implementation for VMware Workstation."""
 
@@ -331,11 +339,12 @@ class VmwareAdapter(HypervisorAdapter):
 
     async def power_state(self, vm: VmConfig) -> PowerState:
         """Running if vmrun lists it, suspended if a .vmss exists, else off."""
-        if _norm(vm.vmx) in await self.running_vmx_paths():
-            return PowerState.RUNNING
-        if Path(vm.vmx).with_suffix(".vmss").exists():
-            return PowerState.SUSPENDED
-        return PowerState.OFF
+        return (await self.power_states([vm]))[vm.name]
+
+    async def power_states(self, vms: list[VmConfig]) -> dict[str, PowerState]:
+        """One `vmrun list` (about 0.4 s) answers for every VM of a call."""
+        running = set(await self.running_vmx_paths())
+        return {vm.name: _power_from(vm, running) for vm in vms}
 
     async def start(self, vm: VmConfig, gui: bool = False) -> None:
         """`vmrun start` also resumes a suspended VM."""
@@ -382,7 +391,20 @@ class VmwareAdapter(HypervisorAdapter):
 
     async def guest_ip(self, vm: VmConfig, timeout: float = 60.0) -> str:
         """IPv4 from VMware Tools. `-wait` blocks until Tools report an address."""
-        out = await self._exec("getGuestIPAddress", vm, "-wait", retry=True, timeout=timeout)
+        try:
+            out = await self._exec("getGuestIPAddress", vm, "-wait", retry=True, timeout=timeout)
+        except NtDriveError as exc:
+            if exc.code != TIMEOUT:
+                raise
+            # Not a wedged vmrun: Tools answer only once the guest has booted far enough.
+            raise NtDriveError(
+                TIMEOUT,
+                f"VMware Tools in {vm.name} reported no IP address within {timeout:.0f}s",
+                "the guest is still booting or VMware Tools is not running: wait and retry, or "
+                "con_screenshot method=vnc to see whether it sits at a login screen or a BSOD. "
+                "vm_stop mode=kill is only for a VM whose vm_stop or vm_reboot mode=hard time "
+                "out as well",
+            ) from None
         ip = out.strip().splitlines()[-1].strip() if out.strip() else ""
         if not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip):
             raise NtDriveError(BACKEND_ERROR, f"vmrun returned no guest IP: {out.strip()[:200]}")
@@ -510,7 +532,7 @@ class VmwareAdapter(HypervisorAdapter):
         current: dict[str, str] = {}
         kept: list[str] = []
         for line in text.splitlines():
-            m = re.match(r'\s*(RemoteDisplay\.vnc\.[\w.]+)\s*=\s*"(.*)"\s*$', line, re.I)
+            m = re.match(r'\s*(RemoteDisplay\.vnc\.[\w.]+)\s*=\s*"(.*)"\s*$', line, re.IGNORECASE)
             if m and m.group(1).lower() in {k.lower() for k in wanted}:
                 current[m.group(1).lower()] = m.group(2)
             else:

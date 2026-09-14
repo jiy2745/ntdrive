@@ -126,7 +126,7 @@ def spawn_kd(argv: list[str]) -> KdProcess:
     itself, so the break still lands.
     """
     kwargs: dict[str, Any] = no_window_kwargs(subprocess.CREATE_NEW_PROCESS_GROUP)
-    proc = subprocess.Popen(  # noqa: S603 - argv is built from config, not user text
+    return subprocess.Popen(
         argv,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -134,7 +134,6 @@ def spawn_kd(argv: list[str]) -> KdProcess:
         bufsize=0,
         **kwargs,
     )
-    return proc
 
 
 def send_ctrl_break(proc: KdProcess) -> None:
@@ -284,7 +283,14 @@ class KdSession:
                 await self._notify()
         elif wait_for_target:
             await self._wait_state({KdState.RUNNING, KdState.BROKEN}, timeout, allow_timeout=True)
-        return self.status()
+        status = self.status()
+        if wait_for_target and self.state == KdState.WAITING:
+            status["note"] = (
+                f"the target did not connect within {timeout:.0f}s. A KDNET target connects "
+                "while it boots: vm_reboot mode=soft (kd.exe stays attached and waits for it), "
+                "or kd_break to confirm [no_debuggee]"
+            )
+        return status
 
     def _read_loop(self, proc: KdProcess) -> None:
         assert proc.stdout is not None
@@ -491,7 +497,7 @@ class KdSession:
             if not self.target_info:
                 hint = (
                     "the debugger never connected to the target (kd is at [no_debuggee]). Reboot "
-                    "the guest so it reconnects: vm_reboot mode=soft confirm=true, then kd_break"
+                    "the guest so it reconnects: vm_reboot mode=soft, then kd_break"
                 )
             else:
                 hint = "the target did not stop in time; retry kd_break with a larger timeout"
@@ -501,7 +507,8 @@ class KdSession:
         output = bytes(self._buf[start - self._base :]).decode("utf-8", errors="replace")
         self.last_event = {"event": "user_break", "at": time.time(), "output": output[-2000:]}
         result = self.status()
-        result["output"] = output
+        result["output"] = output[-65536:]
+        result["truncated"] = len(output) > 65536
         return result
 
     async def wait_event(self, timeout: float = 300.0) -> dict[str, Any]:

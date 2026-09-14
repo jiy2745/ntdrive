@@ -5,30 +5,35 @@ from __future__ import annotations
 import re
 import secrets
 import time
-from typing import Any, Literal
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ntdrive.core.registry import tool
-from ntdrive.core.service import NtDriveService
 from ntdrive.core.tools.common import VmParams
 from ntdrive.errors import INVALID_ARGS, TIMEOUT, NtDriveError
 from ntdrive.term.keys import encode_key_list, encode_keys
 from ntdrive.term.session import TermSession
+
+if TYPE_CHECKING:
+    from ntdrive.core.service import NtDriveService
 
 
 class OpenParams(VmParams):
     """term_open."""
 
     shell: Literal["powershell", "cmd", "pwsh"] | None = Field(
-        default=None, description="Shell to start; defaults to guest.shell from vms.yaml"
+        default=None, description="Shell to start (default: guest.shell from vms.yaml)"
     )
-    transport: Literal["auto", "ssh"] = Field(default="auto", description="Transport")
+    transport: Literal["auto", "ssh"] = Field(
+        default="auto", description="auto or ssh (auto picks ssh)"
+    )
     account: Literal["admin", "standard"] = Field(
         default="admin",
         description=(
-            "Guest account to log in as: admin (guest.user, the administrator, the default) or "
-            "standard (guest.standard_user, a plain user without administrator rights)"
+            "admin (guest.user, the default) or standard (guest.standard_user, no administrator "
+            "rights)"
         ),
     )
     cols: int = Field(default=120, ge=20, le=500, description="Terminal width in columns")
@@ -46,7 +51,7 @@ class SessionParams(BaseModel):
 class SendParams(SessionParams):
     """term_send."""
 
-    text: str = Field(default="", description="Text to type; {tokens} like {ctrl+c} are expanded")
+    text: str = Field(default="", description="Text to type. {tokens} like {ctrl+c} are expanded")
     keys: list[str] = Field(default_factory=list, description="Burst of keys or text chunks")
     enter: bool = Field(default=True, description="Press Enter after the text")
 
@@ -63,7 +68,7 @@ class ReadParams(SessionParams):
     max_bytes: int = Field(
         default=65536, ge=256, le=1 << 20, description="Cap on the returned text (truncated says)"
     )
-    cursor: int | None = Field(default=None, description="Absolute cursor; omit to continue")
+    cursor: int | None = Field(default=None, description="Absolute cursor (omit to continue)")
     clean: bool = Field(default=True, description="Strip terminal control sequences")
 
 
@@ -106,6 +111,11 @@ def _session(service: NtDriveService, session_id: str) -> TermSession:
     return session
 
 
+def _frozen(service: NtDriveService, session: TermSession) -> Callable[[], bool]:
+    """Abort predicate for waits: true once the debugger holds the guest at a kd> prompt."""
+    return lambda: service.runtime(session.vm).guest_frozen
+
+
 def _touch(service: NtDriveService, session: TermSession) -> None:
     info = service.state.term(session.session_id)
     if info is not None:
@@ -114,8 +124,7 @@ def _touch(service: NtDriveService, session: TermSession) -> None:
 
 @tool(
     "term_open",
-    "Open a real-time PTY session (SSH) on the guest, as the administrator or as a standard "
-    "user, and return its session_id.",
+    "Open a real-time PTY session (SSH) on the guest and return its session_id.",
     OpenParams,
     touches_guest=True,
     effect="additive",
@@ -128,7 +137,7 @@ async def term_open(service: NtDriveService, p: OpenParams) -> dict[str, Any]:
             INVALID_ARGS,
             f"{p.vm} has no standard account (guest.standard_user is empty)",
             "in the guest run setup-guest.cmd -Standard (creates ntdrive-user), then ntdrive "
-            "setup on the host and answer the standard account prompt; or use account=admin",
+            "setup on the host and answer the standard account prompt, or use account=admin",
         )
     service.ensure_not_frozen(p.vm)
     await service.ensure_running(cfg)
@@ -153,7 +162,9 @@ async def term_open(service: NtDriveService, p: OpenParams) -> dict[str, Any]:
 
 @tool(
     "term_send",
-    "Type text and/or a burst of keys into a session. Tokens: {enter} {tab} {esc} {ctrl+c} {up}.",
+    "Type text and/or keys into a session and return at once. Tokens: {enter} {tab} {esc} "
+    "{ctrl+c} {up}. Use it for a long-running command or one that will stop in the debugger, "
+    "then term_read or kd_wait_event.",
     SendParams,
     positional=("session_id", "text"),
     touches_guest=True,
@@ -176,7 +187,8 @@ async def term_send(service: NtDriveService, p: SendParams) -> dict[str, Any]:
 
 @tool(
     "term_read",
-    "Read new output (delta), wait for a regex (until), or render the screen (mode=screen).",
+    "Read new output (delta), wait for a regex (until), or render the screen (mode=screen). "
+    "A wait ends with guest_frozen_by_debugger when the target stops at kd>.",
     ReadParams,
     positional=("session_id",),
     long_poll=True,
@@ -196,7 +208,14 @@ async def term_read(service: NtDriveService, p: ReadParams) -> dict[str, Any]:
             "successor": session.successor,
         }
     if p.until:
-        result = await session.wait_until(p.until, p.timeout, cursor=p.cursor, clean=p.clean)
+        result = await session.wait_until(
+            p.until,
+            p.timeout,
+            cursor=p.cursor,
+            clean=p.clean,
+            max_bytes=p.max_bytes,
+            abort=_frozen(service, session),
+        )
     else:
         result = session.read_delta(cursor=p.cursor, max_bytes=p.max_bytes, clean=p.clean)
     result["session_id"] = p.session_id
@@ -205,7 +224,9 @@ async def term_read(service: NtDriveService, p: ReadParams) -> dict[str, Any]:
 
 @tool(
     "term_exec",
-    "Run one command in the session and return only its output and exit code.",
+    "Run one command in the session, wait for it to end (up to timeout) and return only its "
+    "output and exit code. For a command that will stop in the kernel debugger or drop SSH, "
+    "use term_send, then kd_wait_event or term_read.",
     ExecParams,
     positional=("session_id", "cmd"),
     touches_guest=True,
@@ -232,7 +253,11 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     # The marker line ends the command: marker, a space, the exit code if the shell has one, end
     # of line. PowerShell prints no number before the first external program ran.
     result = await session.wait_until(
-        rf"{re.escape(marker)} (-?\d*)[ \t]*\r?(?:\n|$)", p.timeout, cursor=start_cursor, clean=True
+        rf"{re.escape(marker)} (-?\d*)[ \t]*\r?(?:\n|$)",
+        p.timeout,
+        cursor=start_cursor,
+        clean=True,
+        abort=_frozen(service, session),
     )
     text: str = result.get("text", "")
     if result.get("matched") is None:
@@ -308,7 +333,8 @@ async def term_close(service: NtDriveService, p: SessionParams) -> dict[str, Any
 
 @tool(
     "term_list",
-    "List terminal sessions and their state, plus the ids that are open and usable.",
+    "List terminal sessions (the usable ids in open) and the CoView page that mirrors them "
+    "live in a browser (#<session_id> selects one).",
     ListParams,
     positional=("vm",),
     effect="read",
@@ -319,6 +345,7 @@ async def term_list(service: NtDriveService, p: ListParams) -> dict[str, Any]:
     return {
         "sessions": sessions,
         "open": [s["session_id"] for s in sessions if s.get("state") == "open"],
+        "coview": service.term.coview_base,
     }
 
 

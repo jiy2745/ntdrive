@@ -34,6 +34,7 @@ class Steps:
             result = await coro
         except NtDriveError as exc:
             self.add(name, False, error=exc.to_dict()["error"], **info)
+            exc.extra["steps"] = self.items  # what ran before the failure
             raise
         self.add(name, True, **info)
         return result
