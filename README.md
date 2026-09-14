@@ -99,7 +99,8 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `term_close` | additive | Close a session. |
 | `term_list` | read | List terminal sessions and their state, plus the ids that are open and usable. |
 | `term_prune` | additive | Forget closed and disconnected terminal sessions (their open successors stay), so the list shows only what is usable. |
-| `con_screenshot` | read | Save a PNG of the VM console and return its path (base64 on request). |
+| `con_screenshot` | read | Save a PNG of the VM console and return its path (base64 on request). method=vnc reads the console framebuffer without any guest login (con_enable_vnc turns VNC on first). |
+| `con_enable_vnc` | additive | Turn on the console VNC server in the vmx so con_screenshot method=vnc can read the screen without a guest login. Run it with the VM off, then start the VM. |
 | `file_push` | destructive | Copy a file, directory or glob from the host into the guest and verify it by SHA-256 (over SFTP, or through VMware Tools when SSH is down). |
 | `file_pull` | additive | Copy a file from the guest to the host. |
 | `file_stat` | read | Size, last-modified time and is_dir of a guest path, so freshness can be checked without a shell. exists=false when the path is not there. |

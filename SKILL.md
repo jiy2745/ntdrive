@@ -105,7 +105,7 @@ kd_go vm=win11-dev
 kd_wait_event vm=win11-dev timeout=600     -> event=bugcheck
 kd_exec vm=win11-dev cmd="!analyze -v"
 kd_exec vm=win11-dev cmd=".dump /f C:\\dumps\\crash.dmp"   # written on the host, no guest needed
-con_screenshot vm=win11-dev                -> png_path (vmrun captureScreen needs a working guest login; a broken/logged-out guest cannot be shot this way)
+con_screenshot vm=win11-dev                -> png_path. vmrun captureScreen needs a working guest login, so for a login screen, a boot hang or a frozen guest enable VNC once (con_enable_vnc, VM off) and use con_screenshot method=vnc, which reads the framebuffer with no guest login
 snap_revert vm=win11-dev name=base-kd      -> steps: detach, revert, start, attach, term
 ```
 

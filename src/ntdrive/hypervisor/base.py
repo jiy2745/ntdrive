@@ -126,6 +126,14 @@ class HypervisorAdapter(ABC):
             BACKEND_UNSUPPORTED, f"backend {self.backend} cannot configure a serial pipe"
         )
 
+    def vnc_endpoint(self, vm: VmConfig) -> tuple[str, int] | None:
+        """(host, port) of the VM's console VNC server when enabled, else None."""
+        return None
+
+    async def ensure_vnc(self, vm: VmConfig, port: int) -> dict[str, Any]:
+        """Enable the console VNC server in the vmx (VM off). {changed, port}."""
+        raise NtDriveError(BACKEND_UNSUPPORTED, f"backend {self.backend} cannot enable VNC")
+
     async def guest_stat(self, vm: VmConfig, remote: str) -> dict[str, Any] | None:
         """{size, modified, is_dir} through the backend's guest tools, or None when absent."""
         raise NtDriveError(BACKEND_UNSUPPORTED, f"backend {self.backend} cannot stat a guest file")

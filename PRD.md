@@ -181,6 +181,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 |---|---|---|
 | CON-1 | Save a console screenshot as a PNG file and return the path. base64 optional. For BSOD, boot hang, login screen. `vmrun captureScreen` on Workstation is a VIX guest operation (verified on 17.6: no credentials returns "Anonymous guest operations are not allowed"), so it needs a working guest login and cannot shoot a broken or logged-out guest; the failure hint points at fixing the login or reading a crashed guest through the debugger. A login-free framebuffer capture would use Workstation's built-in VNC (`RemoteDisplay.vnc`), planned. | P0 |
 | CON-2 | Console key input (`con_send_keys`). Hyper-V uses WMI `Msvm_Keyboard`, VMware uses its built-in VNC (`RemoteDisplay.vnc.enabled`). For when SSH is unavailable (before login, dead network). | P1 |
+| CON-3 | **Login-free screenshot over VNC.** `con_enable_vnc(vm, port?)` writes `RemoteDisplay.vnc.enabled/port` into the vmx (VM off, like the serial pipe), and `con_screenshot method=vnc` reads that framebuffer from the host loopback with a built-in RFB client (no dependency), so it works at a login screen, a boot hang or on a frozen or unprovisioned guest, where `vmrun captureScreen` cannot. `method=auto` tries vmrun and falls back to VNC when guest login fails. VNC is set with no password and reached only over the host, which the enable result states. | P1 |
 
 ### 5.6 FR-FILE: file transfer
 
@@ -413,7 +414,8 @@ messages are written in English (ST-9).
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `con_screenshot` | `vm, base64=false` | `{png_path, png_base64?}` |
+| `con_screenshot` | `vm, base64=false, method=auto\|guest\|vnc` | `{png_path, via, png_base64?}` |
+| `con_enable_vnc` | `vm, port?` | `{changed, port, note}` (VM off) |
 | `con_send_keys` | `vm, keys[]` | `{sent}` (P1) |
 | `file_push` | `vm, local, remote, verify=true` (`local` is an absolute host path, the CLI and SDK absolutize) | `{files, bytes, verified, via: sftp\|guest_tools, copied:[{local, remote, bytes, verified, verify_error?}], note?}`. `verified` is true or false for SFTP and guest-tools copies alike; null with `verify_error` when the hash could not be read |
 | `file_pull` | `vm, remote, local` (a trailing separator on `local` means directory) | `{bytes, via, note?}` |

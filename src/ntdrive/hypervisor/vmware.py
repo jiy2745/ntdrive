@@ -15,6 +15,7 @@ import re
 import secrets
 import shutil
 import tempfile
+import zlib
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -217,6 +218,11 @@ def parse_guest_entry(line: str) -> dict[str, Any] | None:
         }
     except ValueError:
         return None
+
+
+def default_vnc_port(vm_name: str) -> int:
+    """A stable console VNC port per VM in the 5900-5963 range, so several VMs differ."""
+    return 5900 + (zlib.crc32(vm_name.encode("utf-8")) % 64)
 
 
 def _norm_guest(path: str) -> str:
@@ -475,6 +481,45 @@ class VmwareAdapter(HypervisorAdapter):
                 f"VM {vm.name} is {power}; the vmx can only be edited while powered off",
                 "call vm_stop (or vm_resume then vm_stop) and retry",
             )
+
+    def vnc_endpoint(self, vm: VmConfig) -> tuple[str, int] | None:
+        """(127.0.0.1, port) when RemoteDisplay.vnc is on in the vmx, else None."""
+        settings = vmx_settings(vm.vmx)
+        if settings.get("remotedisplay.vnc.enabled", "").lower() != "true":
+            return None
+        try:
+            return ("127.0.0.1", int(settings.get("remotedisplay.vnc.port", "")))
+        except ValueError:
+            return None
+
+    async def ensure_vnc(self, vm: VmConfig, port: int) -> dict[str, Any]:
+        """Turn on the console VNC server in the vmx while the VM is off. Idempotent.
+
+        No password is set, so the server relies on being reached only over the host loopback;
+        the tool result says so. Like the serial pipe, the vmx is rewritten byte for byte apart
+        from the RemoteDisplay.vnc lines, and only while the VM is off (Workstation rewrites the
+        vmx on power off and would drop a live edit).
+        """
+        await self._require_off(vm)
+        path = Path(vm.vmx)
+        text = path.read_text(encoding="latin-1")
+        wanted = {
+            "RemoteDisplay.vnc.enabled": "TRUE",
+            "RemoteDisplay.vnc.port": str(port),
+        }
+        current: dict[str, str] = {}
+        kept: list[str] = []
+        for line in text.splitlines():
+            m = re.match(r'\s*(RemoteDisplay\.vnc\.[\w.]+)\s*=\s*"(.*)"\s*$', line, re.I)
+            if m and m.group(1).lower() in {k.lower() for k in wanted}:
+                current[m.group(1).lower()] = m.group(2)
+            else:
+                kept.append(line)
+        if {k.lower(): v for k, v in wanted.items()} == current:
+            return {"changed": False, "port": port}
+        block = [f'{key} = "{value}"' for key, value in wanted.items()]
+        path.write_text("\n".join(kept + block) + "\n", encoding="latin-1")
+        return {"changed": True, "port": port}
 
     async def hardware(self, vm: VmConfig) -> dict[str, Any]:
         """cpus, cores_per_socket, memory_mb and nic from the vmx (readable at any power state)."""

@@ -34,6 +34,7 @@ EXPECTED = {
     "term_list",
     "term_prune",
     "con_screenshot",
+    "con_enable_vnc",
     "file_push",
     "file_pull",
     "file_stat",
