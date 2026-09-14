@@ -17,15 +17,32 @@ from typing import Any
 from ntdrive.errors import TIMEOUT, NtDriveError
 
 
+def no_window_kwargs(extra_flags: int = 0) -> dict[str, Any]:
+    """Popen keyword arguments that keep a Windows child off the screen.
+
+    CREATE_NO_WINDOW alone leaves a console (conhost) that can flash for a frame before it is
+    hidden, which showed up as brief cmd-like windows during vm and kd operations. Pairing it
+    with a STARTUPINFO that says SW_HIDE stops the window from ever being shown. The child still
+    has a console, so kd.exe break-in over CTRL_BREAK keeps working. Empty off Windows.
+    """
+    if sys.platform != "win32":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": subprocess.CREATE_NO_WINDOW | extra_flags,
+        "startupinfo": startupinfo,
+    }
+
+
 async def run_hidden(args: list[str], timeout: float) -> tuple[int, str]:
     """Run a command and return (exit code, combined stdout+stderr).
 
     stdin is closed so a child that asks a question fails instead of waiting forever. On timeout
     the child is killed and reaped, then NtDriveError(TIMEOUT) is raised.
     """
-    kwargs: dict[str, Any] = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    kwargs: dict[str, Any] = no_window_kwargs()
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdin=asyncio.subprocess.DEVNULL,

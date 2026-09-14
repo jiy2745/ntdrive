@@ -37,6 +37,7 @@ from ntdrive.errors import (
     TIMEOUT,
     NtDriveError,
 )
+from ntdrive.hostproc import no_window_kwargs
 
 PROMPT_RE = re.compile(rb"(?:^|\r?\n)(?:\d+: )?kd> ?\Z")
 CONNECTED_RE = re.compile(rb"Connected to (Windows[^\r\n]*)")
@@ -120,13 +121,11 @@ def spawn_kd(argv: list[str]) -> KdProcess:
     """Start kd.exe in a console of its own that has no window, in a separate process group.
 
     CREATE_NO_WINDOW still gives the child a console, so `send_ctrl_break` can attach to it
-    (verified from a detached parent, which is how ntdrived runs). CREATE_NEW_CONSOLE plus
-    SW_HIDE delivers the break too, but not every console host honors the hide request and an
-    empty window was seen on Windows 11, so no window is requested at all.
+    (verified from a detached parent, which is how ntdrived runs). A hidden STARTUPINFO
+    (SW_HIDE) is added so the console never flashes a window, which does not remove the console
+    itself, so the break still lands.
     """
-    kwargs: dict[str, Any] = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    kwargs: dict[str, Any] = no_window_kwargs(subprocess.CREATE_NEW_PROCESS_GROUP)
     proc = subprocess.Popen(  # noqa: S603 - argv is built from config, not user text
         argv,
         stdin=subprocess.PIPE,

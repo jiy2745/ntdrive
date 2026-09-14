@@ -124,7 +124,13 @@ def spawn_daemon(config_path: str | None = None) -> subprocess.Popen[bytes]:
     out = log.open("ab")
     kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
+        # DETACHED_PROCESS gives the daemon no console at all; a hidden STARTUPINFO makes sure
+        # nothing flashes on the way there. Logs go to daemon.out.log, not a window.
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs["startupinfo"] = startupinfo
     else:
         kwargs["start_new_session"] = True
     return subprocess.Popen(  # noqa: S603

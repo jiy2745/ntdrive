@@ -80,3 +80,20 @@ async def test_transport_file_ops_raise_ntdrive_error_on_dead_link(tmp_path) -> 
         with pytest.raises(NtDriveError) as exc:
             await coro
         assert exc.value.code == BACKEND_ERROR
+
+
+def test_no_window_kwargs_hides_the_console_on_windows() -> None:
+    import subprocess
+    import sys
+
+    from ntdrive.hostproc import no_window_kwargs
+
+    kwargs = no_window_kwargs(subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0)
+    if sys.platform != "win32":
+        assert kwargs == {}
+        return
+    assert kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW
+    assert kwargs["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+    si = kwargs["startupinfo"]
+    assert si.dwFlags & subprocess.STARTF_USESHOWWINDOW
+    assert si.wShowWindow == subprocess.SW_HIDE
