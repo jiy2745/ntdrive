@@ -11,6 +11,16 @@ that let an agent drive VMware Workstation guests on Windows: power and snapshot
 debugging with `kd.exe` over a serial named pipe or KDNET, and a real-time SSH terminal.
 Requirements live in `PRD.md`. Setup is in `README.md`.
 
+## What to read for a change
+
+- A bug fix inside one module: this file and the module. `README.md` and `PRD.md` are not needed.
+- A tool change (a new parameter, a new tool): this file, the tables in `PRD.md` section 7 and the
+  matching requirement row in section 5 (rule 3 below needs the feature in the PRD), plus
+  `SKILL.md` when the procedure for agents changes. The README table is generated.
+- Setup, the scripts, `ntdrive setup` or `ntdrive verify`: also `README.md`, Setup.
+- `PRD.md` section 12 lists decisions already made: read it before changing a default. The other
+  PRD sections are background.
+
 ## Hard rules
 
 - English only. Code, comments, docstrings, tool descriptions, error messages, logs, docs and
@@ -31,8 +41,9 @@ Requirements live in `PRD.md`. Setup is in `README.md`.
   either inline or as the name of an environment variable. Environment variables are preferred.
   Mask them in anything that is logged (`_mask_argv` in the VMware adapter, `redact` in
   `kd_setup_guest`).
-- Destructive tools (`snap_delete`, hard `vm_stop`, hard `vm_reboot`) require `confirm=true` and
-  go through the policy gate in `ntdrive.core.policy`.
+- Destructive tools (`snap_delete`, `vm_stop mode=hard` or `kill`, `vm_reboot mode=hard`) require
+  `confirm=true` and go through the policy gate in `ntdrive.core.policy`. No other tool has a
+  `confirm` argument.
 - Anything that becomes a command line in the guest (bcdedit arguments from `kd_setup_guest`)
   is validated against a strict pattern first. Free text from tool arguments never gets
   interpolated into a shell command except in the tools whose purpose is running a command
@@ -48,8 +59,8 @@ Requirements live in `PRD.md`. Setup is in `README.md`.
 
 ## Output of the setup commands and scripts
 
-`ntdrive setup`, `ntdrive verify`, `scripts/setup-host.ps1` and `scripts/setup-guest.ps1` share
-one shape, defined in `src/ntdrive/cli/log.py` and copied as small functions in the scripts:
+`ntdrive setup`, `ntdrive verify`, `scripts/setup-host.ps1` and `scripts/setup-guest.ps1` (each with a
+`.cmd` launcher that bypasses the execution policy) share one shape, defined in `src/ntdrive/cli/log.py` and copied as small functions in the scripts:
 
 - A section is `== n/total title`.
 - A result line is two spaces, a tag padded to five characters (`OK`, `FAIL`, `WARN`, `INFO`, or
@@ -63,48 +74,79 @@ one shape, defined in `src/ntdrive/cli/log.py` and copied as small functions in 
 ## Commands
 
 ```powershell
-uv sync                                  # install everything, including dev tools
-uv tool install -e .                     # ntdrive, ntdrive-mcp, ntdrived on PATH, running this checkout
-uv tool install -e . --reinstall         # after a dependency change, with Claude Code closed
-uv run pytest -q                         # unit tests with fakes for vmrun, kd.exe and SSH
-uv run ruff format src tests scripts     # the only formatter
-uv run ruff check src tests scripts      # the only linter
-uv run mypy                              # strict for ntdrive.core, basic elsewhere
-uv run pre-commit run --all-files        # everything above plus the ASCII check
-uv run ntdrive daemon restart            # after editing daemon-side code, or the old code keeps running
+uv sync                                          # once, and after a dependency change
+uv tool install -e .                             # ntdrive, ntdrive-mcp, ntdrived on PATH, running this checkout
+uv tool install -e . --reinstall                 # after a dependency change, with every MCP client closed
+uv run --no-sync pre-commit install              # once per clone (scripts/setup-host.ps1 does it too)
+uv run --no-sync pre-commit run --all-files      # ruff format, ruff check, mypy, prettier, ASCII check: what CI runs
+uv run --no-sync pytest -q                       # unit tests with fakes for vmrun, kd.exe and SSH: what CI runs next
+uv run --no-sync ntdrive daemon restart          # after editing daemon-side code, or the old code keeps running
 ```
 
-All four checks (ruff format, ruff check, mypy, pytest) must pass before a commit. Commit
-messages follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`).
-CI (`.github/workflows/ci.yml`, GitHub Actions on windows-latest) runs `pre-commit run
---all-files` and `pytest` on every push to main and every pull request, so a red check on
-GitHub means one of those failed on a clean machine.
+`pre-commit run --all-files` and `pytest` must both pass before a commit. They are exactly what
+`.github/workflows/ci.yml` (GitHub Actions, windows-latest) runs on every push to main and every
+pull request, so a red check on GitHub means one of them failed on a clean machine. The hooks run
+ruff and mypy from the project environment, so the versions in `uv.lock` are the only ones.
+`--no-sync` because a sync rewrites `ntdrive-mcp.exe`, which fails while an MCP client holds it.
+Commit messages follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`, `ci:`,
+`perf:`).
 
 ## Where things live
 
 - `src/ntdrive/config.py`: `vms.yaml` and `policy.yaml` models and loaders.
 - `src/ntdrive/errors.py`: `NtDriveError(code, message, hint)`, the error codes and the
   `REASON_*` tags the VMware adapter attaches so tools never match error text themselves.
+- `src/ntdrive/hostproc.py`: `run_hidden` for vmrun and the PowerShell helpers, `no_window_kwargs`
+  for kd.exe, `force_utf8_stdio` for the CLI and daemon stdio. Start every new host subprocess here.
 - `src/ntdrive/paths.py`: host path helpers shared by the CLI, SDK and file tools.
-- `src/ntdrive/core/registry.py`: `ToolSpec`, `ToolRegistry`, the `tool` decorator.
+- `src/ntdrive/core/registry.py`: `ToolSpec`, `ToolRegistry`, the `tool` decorator, and the
+  compact JSON schema (no titles, `x | None` as one node) that LLM clients receive.
 - `src/ntdrive/core/service.py`: `NtDriveService`, the object that owns adapters, sessions and
-  state and dispatches tool calls with validation, policy and audit.
-- `src/ntdrive/core/orchestrator.py`: multi-step flows (`snap_revert`, `vm_reboot`).
+  state and dispatches tool calls with validation, policy and audit. `release_guest` detaches the
+  debugger and drops terminals before anything that suspends, stops or reverts. `refresh_powers`
+  asks the hypervisor once for every VM of a call.
+- `src/ntdrive/core/state.py`: `StateStore`, `VmRuntime`, `TermInfo`, the state enums and the
+  session-relative `T+` clock.
+- `src/ntdrive/core/policy.py`: the allow, confirm, deny gate for destructive tools.
+- `src/ntdrive/core/audit.py`: the JSONL audit log with secrets and view tokens masked.
+- `src/ntdrive/core/orchestrator.py`: multi-step flows (`snap_revert`, `vm_reboot`) whose `steps`
+  also travel in the error when a step fails.
 - `src/ntdrive/core/tools/`: one module per tool group (`vm`, `snap`, `kd`, `term`, `console`,
-  `file`, `sys`). Note `console.py`, not `con.py`: `CON` is a reserved file name on Windows.
-- `src/ntdrive/hypervisor/`: `HypervisorAdapter` and `VmwareAdapter` (vmrun, `-vp` for encrypted
-  VMs, error classification, serial pipe setup in the vmx).
+  `file`, `sys`) plus `common.py` for the shared parameter models. Note `console.py`, not
+  `con.py`: `CON` is a reserved file name on Windows.
+- `src/ntdrive/hypervisor/`: `HypervisorAdapter` (`base.py`), `VmwareAdapter` (`vmware.py`: vmrun,
+  `-vp` for encrypted VMs, `_mask_argv`, error classification, one `vmrun list` per call through
+  `power_states`, serial pipe and VNC settings in the vmx) and `vmx.py` (the vmx reader and the
+  hardware edits behind `vm_config`).
 - `src/ntdrive/kd/session.py`: `KdSession` (kd.exe subprocess, sentinel-delimited command output,
   break-in via CTRL_BREAK, event classification, serial pipe liveness check).
-- `src/ntdrive/term/`: `TermSession` (ring buffer, pyte screen, cursors, regex wait),
-  `SshPtyTransport` (every paramiko failure becomes `NtDriveError`), key tokens like `{ctrl+c}`.
-- `src/ntdrive/daemon/`: aiohttp app, `daemon.json` lifecycle, `DaemonClient`, CoView page.
-- `src/ntdrive/mcp/server.py`, `src/ntdrive/cli/main.py`, `src/ntdrive/sdk/__init__.py`:
-  generated front doors. Four CLI commands are hand-written because they are not daemon tools:
-  `term attach` and the `daemon` group in `main.py`, `ntdrive setup` in `cli/setup.py` (writes
-  `vms.yaml`) and `ntdrive verify` in `cli/verify.py` (the end-to-end check).
+  `src/ntdrive/kd/firewall.py`: the host firewall read and repair for KDNET.
+- `src/ntdrive/term/`: `TermSession` (`session.py`: ring buffer, pyte screen, cursors, a bounded
+  regex wait with a frozen-guest abort), `TermManager` (`manager.py`: sessions, reconnect,
+  successor ids, prune), `SshPtyTransport` (`ssh.py`: every paramiko failure becomes
+  `NtDriveError`), `transport.py`, and key tokens like `{ctrl+c}` in `keys.py`.
+- `src/ntdrive/screen/vnc.py`: the VNC framebuffer capture behind `con_screenshot method=vnc`.
+- `src/ntdrive/daemon/`: the aiohttp app (`app.py`), the `daemon.json` lifecycle (`lifecycle.py`),
+  `DaemonClient` (`client.py`: one kept connection, re-reads `daemon.json` after a restart) and
+  the CoView page (`static/coview.html`).
+- `src/ntdrive/mcp/server.py` and `src/ntdrive/sdk/__init__.py`: generated front doors, no
+  hand-written tool. `src/ntdrive/cli/main.py`: the generated tool commands plus the hand-written
+  `daemon` group and `term attach` (its body is `cli/attach.py`). `cli/setup.py` (`ntdrive setup`,
+  writes `vms.yaml`), `cli/verify.py` (`ntdrive verify`, the end-to-end check) and `cli/log.py`
+  (the shared output shape) are hand-written too.
+- `scripts/`: `setup-host.ps1` and `setup-guest.ps1`, each with a `.cmd` launcher that bypasses
+  the execution policy, `probe-guest.ps1` (a guest diagnostic), `check_ascii.py` (the hook) and
+  `tools_table.py` (the README table).
 - `tests/conftest.py`: `FakeVmrun`, `FakeTransport`, `FakeKdProcess` and the `service` fixture.
-  Live testing against a real VM is manual and described in `README.md`.
+  `tests/test_registry.py` pins the tool list and the README table, `tests/test_faces.py` the
+  front-door parity over HTTP, `tests/test_imports.py` the light CLI and MCP imports. Live testing
+  against a real VM is manual: `uv run ntdrive verify`, then the SKILL.md procedures by hand.
+
+Import direction: `config.py`, `errors.py`, `hostproc.py`, `paths.py` and `core/state.py` import
+nothing else from ntdrive. `hypervisor/`, `kd/`, `term/` and `screen/` import only those and their
+own package. `core/tools/` import `core.service` only under `TYPE_CHECKING`. `cli/`, `mcp/` and
+`sdk/` never import `core.service` at module level (the SDK imports it in its in-process mode),
+which is what keeps a CLI command well under a second (`tests/test_imports.py` guards it).
 
 ## When you change a tool
 
@@ -114,9 +156,9 @@ GitHub means one of those failed on a clean machine.
 2. Add or update a test that uses the fakes. `tests/test_registry.py` lists every tool name and
    `tests/test_faces.py` checks that MCP, HTTP, CLI and SDK all expose it.
 3. Update `PRD.md` section 7 (the tool tables), refresh the README table with
-   `uv run python scripts/tools_table.py --write README.md`, and `SKILL.md` if the procedure for
+   `uv run --no-sync python scripts/tools_table.py --write README.md`, and `SKILL.md` if the procedure for
    agents changes.
-4. Restart the daemon (`uv run ntdrive daemon restart`) before trying it live.
+4. Restart the daemon (`uv run --no-sync ntdrive daemon restart`) before trying it live.
 
 ## Things that bit us in live testing
 
@@ -133,11 +175,14 @@ GitHub means one of those failed on a clean machine.
   them). The Win32-OpenSSH zip works, and `scripts/setup-guest.ps1` falls back to it on its own.
 - PSReadLine redraws the input line on every keystroke and floods terminal reads. The terminal
   unloads it at session start.
-- The daemon runs detached, without a console. Any child started without `CREATE_NO_WINDOW`
-  gets a console window of its own, so the desktop flashed an empty window on every vmrun call.
-  kd.exe keeps a console of its own (CREATE_NO_WINDOW gives it one, just without a window)
-  because break-in attaches to that console to send CTRL_BREAK. `tests/test_kd.py` checks that
-  delivery from a detached parent, so keep it green when touching `spawn_kd`.
+- The daemon runs detached, without a console. A child started the normal way opens a console
+  window on the desktop, and `CREATE_NO_WINDOW` alone still lets conhost flash for a frame.
+  `ntdrive.hostproc` (`run_hidden`, `no_window_kwargs`) pairs it with a hidden `STARTUPINFO`, and
+  vmrun and the PowerShell helpers go through it, so start every new host subprocess there.
+  `daemon/lifecycle.py` applies the same hidden STARTUPINFO when it starts ntdrived. kd.exe takes
+  `no_window_kwargs` too but keeps a console of its own (with `CREATE_NEW_PROCESS_GROUP`) because
+  break-in attaches to that console to send CTRL_BREAK. `tests/test_kd.py` checks that delivery
+  from a detached parent, so keep it green when touching `spawn_kd`.
 - `vms.yaml` used to be looked up in the working directory too, so the daemon picked up whatever
   checkout the first client ran from. The config now lives only in `%LOCALAPPDATA%\ntdrive` (or
   `NTDRIVE_CONFIG`, or `--config`), clients resolve it and pass `--config`, and `ensure_daemon`

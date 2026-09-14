@@ -6,10 +6,12 @@ description: Drive a VMware Workstation Windows guest through the ntdrive MCP to
 # ntdrive for agents
 
 You control VMs through MCP tools named `<group>_<verb>`: `vm_*`, `snap_*`, `kd_*`, `term_*`,
-`con_*`, `file_*`, `sys_*`. Every tool takes `vm` (the name from `vms.yaml`) and returns JSON.
-Errors carry `error.code` and `error.hint`. The hint tells you what to do next. Backend errors
-also carry `error.reason` when the daemon recognized the cause (for example
-`encrypted_live_snapshot`).
+`con_*`, `file_*`, `sys_*`. Tools that act on a VM take `vm`. Get the names from `vm_list`, or
+from `sys_health`, which you call first anyway. Do not read `vms.yaml`: it holds credentials and
+the daemon has already loaded it. `term_send`, `term_read`, `term_exec`, `term_resize` and
+`term_close` take `session_id` (from `term_open`) instead of `vm`. Every tool returns JSON.
+Errors carry `error.code` and `error.hint`, and the hint names the next call. Backend errors also
+carry `error.reason` when the daemon recognized the cause (for example `encrypted_live_snapshot`).
 
 ## State model (read this first)
 
@@ -25,15 +27,25 @@ Rules that follow from the state model:
 1. While `kd_state == broken` the whole guest is frozen. `term_*`, `file_*` and `con_screenshot`
    fail at once with `guest_frozen_by_debugger`. Call `kd_go` before touching the guest.
    `vm_reboot` (soft or hard) resumes a broken-in target itself and reports it as a `kd_go` step.
-2. `snap_revert`, `vm_reboot`, `vm_suspend`, `vm_stop` and the `allow_suspend` path of
-   `snap_take` and `snap_delete` detach the debugger and drop every terminal session. Revert,
-   reboot and the suspend path reattach the debugger for you (`reattach_kd`, default true), and
-   revert and reboot reopen terminals (`reopen_term`). Read the `steps` array (or `terms_dropped`
-   and `kd` on the snapshot tools) to see what happened.
-3. After a reconnect the old session id still works for `term_list` and reports `successor`, the
-   id of the new session. Use the new id.
-4. Call `sys_state` whenever you are unsure. It is cheap and returns VM, debugger and terminal
-   state in one answer.
+2. `snap_revert`, `vm_suspend`, `vm_stop` and the `allow_suspend` path of `snap_take` and
+   `snap_delete` detach the debugger and drop every terminal session. `vm_reboot` drops the
+   terminals but keeps kd.exe running and waits for the target to reconnect (step
+   `kd_reconnect`), respawning it only when that takes longer than `timeout`. Revert and reboot
+   reattach the debugger (`reattach_kd`, default true) and reopen terminals (`reopen_term`,
+   default true). The result has `steps` (each `{step, ok, ...}`, `skipped` says why a step did
+   not apply), `kd` (the debugger status after the reattach, or null) and `term`, a list of
+   `{old, new}` session ids. Use `new` at once, no `term_list` needed. Revert steps: kd_detach,
+   term_drop, snapshot_revert, start, kd_attach, guest_ip, term_reopen. Reboot steps: kd_go (only
+   for a broken-in target), term_drop, guest_shutdown or reset or kd_reboot, kd_reconnect (or
+   kd_attach), guest_ip, term_reopen.
+3. When a step fails the call returns that step's error and `error.steps` lists what ran before
+   it. A `timeout` from term_reopen means the guest rebooted and kd is back, only SSH was late:
+   `term_open` once the guest is up. An old session id still answers `term_list` and names its
+   `successor`.
+4. `kd_state` and `term_list` answer in milliseconds and cover the debugger and the terminals.
+   `sys_state` adds power, which costs one `vmrun list` (about half a second) for every VM of the
+   call. `sys_health` probes the guest too and is the slowest, so call it first and then when
+   something is wrong, not as a heartbeat.
 
 ## Standard procedures
 
@@ -68,7 +80,10 @@ kd_setup_host vm=win11-dev                 -> firewall checked, repaired after t
 vm_start vm=win11-dev
 term_open vm=win11-dev                     -> session_id (needs OpenSSH in the guest)
 kd_attach vm=win11-dev                     -> no key saved: reads the guest's KDNET settings over SSH
-                                              (adopted), then waiting, then running once the target connects
+                                              (adopted), then waiting, then running once the target connects.
+                                              Still waiting after the timeout (the result carries a note):
+                                              vm_reboot mode=soft, kd.exe keeps waiting and the target
+                                              connects while the guest boots
 kd_break vm=win11-dev                      -> broken, target_info filled in
 kd_exec vm=win11-dev cmd="!process 0 0"
 kd_go vm=win11-dev
@@ -78,6 +93,12 @@ snap_take vm=win11-dev name=base-kd
 With `kd_transport: serial` (a VMware named pipe, no firewall and no prompt) the flow is the same
 except that `kd_setup_host` must run while the VM is off, because it adds the COM port to the vmx,
 `kd_setup_guest` writes the serial bcdedit setting, and `kd_attach` reports `running` at once.
+
+Waiting for a boot: `vm_start` returns when vmrun does, before the guest is usable. `term_open` is
+the boot wait: it blocks up to 60 s for VMware Tools to report an IP and 10 s for SSH. A `timeout`
+that says VMware Tools reported no IP, or a `backend_error` whose message starts with `ssh
+connect`, in the first minutes after a start means the guest is still booting: retry `term_open`,
+or poll `sys_health` until `guest.ssh_open` is true. Do not touch credentials for that.
 
 `vm_config` reads or changes the virtual hardware in the vmx. When `sys_health` says the guest
 NIC is not `e1000e`, `vm_config vm=win11-dev nic=e1000e` fixes it, and `cpus=1` or
@@ -93,7 +114,8 @@ term_exec session_id=<sid> cmd="sc create mydrv type= kernel binPath= C:\drv\myd
 kd_break vm=win11-dev
 kd_exec vm=win11-dev cmd="bp mydrv!DriverEntry"
 kd_go vm=win11-dev
-term_exec session_id=<sid> cmd="sc start mydrv"        # may hang if the bp hits first; use term_send
+term_exec session_id=<sid> cmd="sc start mydrv"        # ends with guest_frozen_by_debugger if the bp
+                                                        # hits first: kd_exec, kd_go, then term_read
 kd_wait_event vm=win11-dev timeout=120                  -> event=breakpoint
 kd_exec vm=win11-dev cmds=["k", "dv", "r"]
 kd_go vm=win11-dev
@@ -106,7 +128,8 @@ kd_wait_event vm=win11-dev timeout=600     -> event=bugcheck
 kd_exec vm=win11-dev cmd="!analyze -v"
 kd_exec vm=win11-dev cmd=".dump /f C:\\dumps\\crash.dmp"   # written on the host, no guest needed
 con_screenshot vm=win11-dev                -> png_path. vmrun captureScreen needs a working guest login, so for a login screen, a boot hang or a frozen guest enable VNC once (con_enable_vnc, VM off) and use con_screenshot method=vnc, which reads the framebuffer with no guest login
-snap_revert vm=win11-dev name=base-kd      -> steps: detach, revert, start, attach, term
+snap_revert vm=win11-dev name=base-kd      -> steps: kd_detach, term_drop, snapshot_revert, start,
+                                              kd_attach, guest_ip, term_reopen, and term: [{old, new}]
 ```
 
 A crashed guest answers neither SSH nor VMware Tools, so `file_pull` cannot fetch its logs until it
@@ -154,12 +177,19 @@ same flag. A snapshot of a powered-off VM never needs it.
 
 ## Tips
 
-- `term_exec` is for short commands with a clear end. For interactive or streaming programs use
-  `term_send` plus `term_read`.
+- `term_exec` runs one complete statement and returns when the prompt is back: it appends its
+  own end marker to the same line, so the statement must end normally. Nothing interactive, no
+  trailing `&`, no `exit`, `shutdown` or `logoff`. `exit_code` is null when PowerShell ran no
+  external program. For anything that streams, prompts, or ends the SSH connection use
+  `term_send` (fire-and-forget, returns at once) and read later with `term_read`, or write to a
+  file and `file_pull` it. After a command that ended the connection the session is
+  `disconnected` with no successor: `term_open` again.
 - `kd_state.attached` is the truth about kd.exe. A `detached` answer with `previous_session` means
   the last session's banner and break, not the present: call `kd_attach` before `kd_exec`.
-- `term_list` returns `open`, the ids that are usable. After reboots and reverts the stale ids stay
-  listed (each names its successor), and `term_prune` forgets them once you no longer need them.
+- `term_list` returns `open`, the ids that are usable, and `coview`, the browser page that mirrors
+  sessions live (`#<session_id>` selects one). `sys_state` and `vm_list` only list ids
+  (`term_open`, and `term_disconnected` with successors). After reboots and reverts the stale ids
+  stay in `term_list` (each names its successor) until `term_prune` forgets them.
 - `term_open account=standard` opens the shell as the guest's plain account (`guest.standard_user`
   in vms.yaml, created by `setup-guest.cmd -Standard`) instead of the administrator. Use it when
   the question is what a normal user sees: UAC, access denied, per-user settings. `file_push`,
@@ -170,14 +200,24 @@ same flag. A snapshot of a powered-off VM never needs it.
 - `kd_exec` accepts a list in `cmds` so that several debugger commands cost one tool call.
 - Symbols resolve out of the box: `kd_attach` passes a normalized `srv*C:\symbols*<msdl>` path
   and kd.exe downloads from the Microsoft server (it runs on the host). No `.sympath` fix needed.
-- `term_send` is fire-and-forget: it types the text and returns at once, so use it (not
-  `term_exec`, which waits for the command to finish) for something long-running or for a command
-  that will drop the SSH connection. Read the result later with `term_read`, or from a file the
-  command wrote.
-- Large outputs are cut at `max_bytes` (64 KB by default) and flagged `truncated: true`. The
-  full text is in the session log named in `kd_state.log_path`.
-- Destructive tools need `confirm=true`: `snap_delete`, `vm_stop mode=hard`, `vm_reboot mode=hard`.
-  Soft and kd reboots run without it.
+- Reading output, three different `truncated` flags:
+  - `term_read` (delta): `truncated: true` means more output waits after `cursor`. Call
+    `term_read` again, it continues from the cursor. `lost_before_cursor: true` means the 1 MB
+    ring overflowed and that output is gone. `until` with the default `timeout=0` returns at
+    once: a miss is not an error response but a normal result with `matched: null` and an
+    `error` object inside, so always pass `timeout` with `until` and check `matched`.
+  - `term_exec`: `truncated: true` means `output` was cut at `max_bytes` (up to 1 MB) and the
+    rest is not retrievable by tool. Redirect the command to a file and `file_pull` it. A
+    `timeout` error carries the partial `output` and the command may still be running:
+    `term_read` to watch it, `term_send keys=["{ctrl+c}"] enter=false` to stop it.
+  - `kd_exec`: `truncated: true` per command, the full text is in the transcript (`kd_log_tail`,
+    path in `kd_state.log_path`).
+- Only `snap_delete`, `vm_stop mode=hard` or `kill` and `vm_reboot mode=hard` take `confirm=true`.
+  No other tool has a `confirm` argument, and passing one is an `invalid_args` error.
+- `unauthorized` or `daemon_unavailable` means the daemon was restarted or is down. The client
+  re-reads `daemon.json` and retries once by itself, so a second call normally works. Live kd and
+  terminal sessions are gone after a restart. If it keeps failing a person runs `ntdrive daemon
+  status` on the host.
 - `kd_exec` runs whatever you send at the `kd>` prompt, including `.shell`, which executes
   commands on the host. Do not use it unless the task calls for it.
 - Never put passwords or KDNET keys in tool arguments. They live in `vms.yaml` and environment

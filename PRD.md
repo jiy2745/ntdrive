@@ -123,7 +123,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | VM-5 | The VMware backend uses **`vmrun` as the single path**. The Workstation REST API (vmrest) does not support snapshots. | P0 |
 | VM-6 | **Encrypted VM support.** A VMware Workstation encrypted VM needs a password to open the vmx. Store the per-VM password in `vms.yaml` as an environment variable name (`encryption_password_env`, preferred) or inline (`encryption_password`, acceptable because `vms.yaml` is git-ignored) and add `-vp <password>` to every vmrun command that opens the vmx. Like other secrets, the password never appears in tool arguments, results or logs. If the password is required but missing, surface the vmrun error as `backend_error`. The adapter classifies vmrun failures once and tags the error with a `reason` (`password_required`, `encrypted_live_snapshot`, `config_unreadable`, `snapshot_missing`), so no tool matches English error text. | P0 |
 | VM-7 | **Hardware settings.** `vm_config(vm, cpus?, memory_mb?, nic?)` reads the VM's virtual hardware from the vmx (`numvcpus`, `cpuid.coresPerSocket`, `memsize`, `ethernet0.virtualDev`) and, when arguments are given, writes them while the VM is powered off (Workstation rewrites the vmx on power off, the same rule as the serial pipe). `cpus` writes one socket with that many cores because Windows client editions ignore CPUs beyond their socket limit. `nic` is `e1000e`, `e1000` or `vmxnet3`, and `sys_health`'s NIC warning names this tool as the fix. The vmx is edited byte for byte apart from the touched lines. The same shape as `modify_vm_resources` in vSphere MCP servers and the network reconfiguration tools of Proxmox ones. | P1 |
-| VM-8 | **Kill a VM that vmrun no longer controls.** After a guest bugcheck under load, `vmrun stop hard` and `vmrun reset` can time out again and again while the VM's `vmware-vmx.exe` sits wedged and its `*.lck` files block the next start. `vm_stop mode=kill` (confirm required, like hard) ends the `vmware-vmx` and `vmrun` processes whose command line names the vmx, waits for them, deletes the `*.lck` entries next to the vmx and reports `{killed, locks_removed}`; `vm_start` then boots the VM again. Every vmrun timeout names this path in its hint, and `vm_reboot mode=kd` names `mode=hard` and kill when KDNET dropped during a crash. It is a power cut: whatever the guest had not flushed is lost, which `mode=soft` avoids while the guest still answers. | P1 |
+| VM-8 | **Kill a VM that vmrun no longer controls.** After a guest bugcheck under load, `vmrun stop hard` and `vmrun reset` can time out again and again while the VM's `vmware-vmx.exe` sits wedged and its `*.lck` files block the next start. `vm_stop mode=kill` (confirm required, like hard) ends the `vmware-vmx` and `vmrun` processes whose command line names the vmx, waits for them, deletes the `*.lck` entries next to the vmx and reports `{killed, locks_removed}`. `vm_start` then boots the VM again. Every vmrun timeout on a power or snapshot command names this path in its hint, while a `getGuestIPAddress -wait` timeout is reported as the guest still booting or VMware Tools not running, with kill as the last resort. `vm_reboot mode=kd` names `mode=hard` and kill when KDNET dropped during a crash. It is a power cut: whatever the guest had not flushed is lost, which `mode=soft` avoids while the guest still answers. | P1 |
 
 ### 5.2 FR-HV: hypervisor adapter
 
@@ -147,7 +147,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | KD-5 | State query: `detached / waiting / running / broken`, current port and key, connected target info, last event. | P0 |
 | KD-6 | Keep the full session log in a file (`-loga`), and let a tool read the last N KB. | P0 |
 | KD-7 | Automate guest debug setup (`kd_setup_guest`): over the terminal, first read `bcdedit /dbgsettings`, and when the guest already debugs to this host's IP with a key (`scripts/setup-guest.ps1` configures KDNET by default, inferring the host IP from the NAT gateway) save that port and key without rewriting anything (`adopted`). Otherwise apply `bcdedit /debug on` and, for `kd_transport: net`, `bcdedit /dbgsettings net hostip:<host virtual adapter IP> port:<n> key:<k>` (the server generates the key and saves it in `vms.yaml`), or, for `kd_transport: serial`, `bcdedit /dbgsettings serial debugport:1 baudrate:115200` (no key), then reboot. hostip is the VMnet8 host adapter for VMware, or the external/internal virtual switch vEthernet adapter IP for Hyper-V. | P0 |
-| KD-8 | Symbol path: pass the configured value with `-y`, normalized so dbghelp accepts it. The local cache element of a `srv*<cache>*<url>` path must use backslashes (`C:\symbols`, not `C:/symbols`, which symsrv reports as "not a valid store" and which stopped `.reload`), and a path that names a URL without a store keyword gets an `srv*` prefix. Default `srv*C:\symbols*https://msdl.microsoft.com/download/symbols`; kd.exe runs on the host so it can reach the Microsoft symbol server. | P0 |
+| KD-8 | Symbol path: pass the configured value with `-y`, normalized so dbghelp accepts it. The local cache element of a `srv*<cache>*<url>` path must use backslashes (`C:\symbols`, not `C:/symbols`, which symsrv reports as "not a valid store" and which stopped `.reload`), and a path that names a URL without a store keyword gets an `srv*` prefix. Default `srv*C:\symbols*https://msdl.microsoft.com/download/symbols`. kd.exe runs on the host so it can reach the Microsoft symbol server. | P0 |
 | KD-9 | On detach, resume the target (`g`) and then stop the process. Force-kill option. | P0 |
 | KD-10 | Reconnect the debugger after snapshot revert or reboot, for both transports. The target looks for the debugger again early in boot, so restarting the host-side kd.exe reconnects. A live session is kept through a reboot and waited on. A session that does not announce the reconnection within the timeout is respawned, for KDNET as much as for serial, so the reported state is a known one: a KDNET session left waiting sat at [no_debuggee] after a hard reboot until someone detached and attached by hand. Retry policy (count, interval) on failure. | P0 |
 | KD-11 | **Serial transport (guest COM1 -> host named pipe), the alternative to KDNET for hosts where nobody can approve a UAC prompt.** `kd_setup_host` writes `serial0.*` (pipe server, `\\.\pipe\ntdrive-<vm>`) into the vmx while the VM is off and is idempotent. kd.exe connects as the pipe client, so there is no network, no host firewall rule and no administrator step, unlike KDNET. `sys_health` reports a missing pipe entry. Hyper-V would use `Set-VMComPort` (later). | P0 |
@@ -179,7 +179,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 
 | ID | Requirement | Priority |
 |---|---|---|
-| CON-1 | Save a console screenshot as a PNG file and return the path. base64 optional. For BSOD, boot hang, login screen. `vmrun captureScreen` on Workstation is a VIX guest operation (verified on 17.6: no credentials returns "Anonymous guest operations are not allowed"), so it needs a working guest login and cannot shoot a broken or logged-out guest; the failure hint points at fixing the login or reading a crashed guest through the debugger. A login-free framebuffer capture would use Workstation's built-in VNC (`RemoteDisplay.vnc`), planned. | P0 |
+| CON-1 | Save a console screenshot as a PNG file and return the path. base64 optional. For BSOD, boot hang, login screen. `vmrun captureScreen` on Workstation is a VIX guest operation (verified on 17.6: no credentials returns "Anonymous guest operations are not allowed"), so it needs a working guest login and cannot shoot a broken or logged-out guest. The failure hint points at fixing the login or reading a crashed guest through the debugger. `con_enable_vnc` turns on Workstation's built-in VNC server (`RemoteDisplay.vnc`, VM off) and `con_screenshot method=vnc` then reads the framebuffer without a guest login. | P0 |
 | CON-2 | Console key input (`con_send_keys`). Hyper-V uses WMI `Msvm_Keyboard`, VMware uses its built-in VNC (`RemoteDisplay.vnc.enabled`). For when SSH is unavailable (before login, dead network). | P1 |
 | CON-3 | **Login-free screenshot over VNC.** `con_enable_vnc(vm, port?)` writes `RemoteDisplay.vnc.enabled/port` into the vmx (VM off, like the serial pipe), and `con_screenshot method=vnc` reads that framebuffer from the host loopback with a built-in RFB client (no dependency), so it works at a login screen, a boot hang or on a frozen or unprovisioned guest, where `vmrun captureScreen` cannot. `method=auto` tries vmrun and falls back to VNC when guest login fails. VNC is set with no password and reached only over the host, which the enable result states. | P1 |
 
@@ -199,10 +199,10 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | ST-1 | `sys_state` returns VM power, current snapshot position, KD state, terminal session list and last event in one call. | P0 |
 | ST-2 | The server guarantees the order of compound operations. Example: `snap_revert` = KD detach -> revert -> start -> KD attach (optional) -> wait for SSH -> resume terminal (optional). The result records each step. | P0 |
 | ST-3 | Log every tool call to a JSONL audit log (secrets masked in arguments, `T+` relative time included). | P0 |
-| ST-4 | Destructive operations (`snap_delete`, `vm_stop hard`, `.reboot`, revert without a snapshot) are refused without `confirm: true`. A policy file (`policy.yaml`) tunes the per-tool level (allow/confirm/deny). | P0 |
+| ST-4 | Destructive operations (`snap_delete`, `vm_stop mode=hard` or `kill`, `vm_reboot mode=hard`) are refused without `confirm: true`. No other tool has a `confirm` argument. A policy file (`policy.yaml`) tunes the per-tool level (allow/confirm/deny). | P0 |
 | ST-5 | The front doors are **MCP, CLI and Python SDK**, defined in section 5.8 (FR-FACE). The core is a pure Python library (`ntdrive.core`) and the three front doors are thin layers on top. The core must be callable directly from pytest and a REPL, without the daemon or MCP. | P0 |
 | ST-6 | Ship `SKILL.md`: document the state model, standard procedures (setup, debug loop, BSOD recovery) and forbidden moves (calling the terminal while broken, and so on) for agents. | P0 |
-| ST-7 | Target **20 tools or fewer**. Because tool schemas load into context at session start, group similar operations under an `action` argument (open issue 8). | P1 |
+| ST-7 | **One tool per action, and a cheap tool list.** Tool schemas load into context at session start, so every description is one or two sentences, parameter descriptions do not repeat what the schema carries, and the registry emits a compact JSON schema (no property titles, no model docstrings, `x or null` as one node). Measured 2026-09-14: 39 tools, about 18k chars of descriptions plus schemas, about 4.6k tokens per `tools/list`. Decided in open issue 8. | P1 |
 | ST-8 | The max wait of a long-poll tool (`kd_wait_event`, `term_read(until)`) must be shorter than the MCP client's tool-call timeout. The server holds the cap as a setting and clips a longer request to the cap, returning a `timeout` event. | P0 |
 | ST-9 | **Language rule**: every document and text string in the repository (README, CLAUDE.md, SKILL.md, this PRD, docstrings, tool description and hint, error messages, logs, commit messages) is written in **English**. **Code comments too.** No file is exempt. This is enforced by the DEV-5 hook. | P0 |
 | ST-10 | **Style rule**: documents and code text are written plainly, without an AI look. No emoji, no em dash, no decorative symbols (arrow, check, star glyphs), no box-drawing-character diagrams, and no overuse of bold and headers per section. **No semicolon as sentence punctuation** either. End sentences with a period. Semicolons inside code and commands (`cmd; .echo`, PowerShell) are the exception. Draw diagrams with plain characters like `+ - | >` and write arrows as `->`. The DEV-5 hook mechanically catches non-ASCII and semicolons in Markdown prose. | P0 |
@@ -213,7 +213,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 |---|---|---|
 | FACE-1 | **Daemon `ntdrived`**: the only process that holds sessions (SSH connections, PTY, `kd.exe`, ring buffers) and the StateStore. Exposes the tool API over local HTTP + WebSocket (127.0.0.1, default 8765). One instance per user (lock file). | P0 |
 | FACE-2 | **Single source tool registry**: tool name, argument schema (pydantic) and handler are defined once in the `ntdrive.core.tools` registry. MCP tools, HTTP endpoints, CLI subcommands and SDK methods are all **generated** from this registry. The same definition is never written three times by hand. | P0 |
-| FACE-3 | **MCP server `ntdrive-mcp`**: stdio, FastMCP. Stateless, and forwards tool calls to the daemon over HTTP. Auto-starts the daemon if absent. Registered in Claude Code with one line in `.mcp.json`, whose command is the installed `ntdrive-mcp` (`uv tool install`, editable for contributors) so the entry carries no path and no `uv run`. At initialize the server sends `instructions`, a short digest of SKILL.md (call sys_health first, a broken-in debugger freezes the guest, revert and reboot reattach for you, destructive tools need confirm, no secrets in arguments), so an agent without the skill file still gets the rules. Every tool carries MCP annotations from the registry: `readOnlyHint` and `destructiveHint` come from the tool's `effect` (read, additive, destructive), `idempotentHint` from its `idempotent` flag, and `openWorldHint` is false because the tools reach only the VMs in `vms.yaml`. | P0 |
+| FACE-3 | **MCP server `ntdrive-mcp`**: stdio, `mcp.server.Server` from the official Python SDK. Stateless, and forwards tool calls to the daemon over HTTP. Auto-starts the daemon if absent. Registered in Claude Code with one line in `.mcp.json`, whose command is the installed `ntdrive-mcp` (`uv tool install`, editable for contributors) so the entry carries no path and no `uv run`. At initialize the server sends `instructions`, a short digest of SKILL.md (call sys_health first, a broken-in debugger freezes the guest, revert and reboot reattach for you and reopen terminals under new ids, only snap_delete, vm_stop mode=hard or kill and vm_reboot mode=hard take confirm, no secrets in arguments), so an agent without the skill file still gets the rules. Every tool carries MCP annotations from the registry: `readOnlyHint` and `destructiveHint` come from the tool's `effect` (read, additive, destructive), `idempotentHint` from its `idempotent` flag, and `openWorldHint` is false because the tools reach only the VMs in `vms.yaml`. | P0 |
 | FACE-4 | **CLI `ntdrive`**: `ntdrive <group> <verb> [args]` maps one-to-one to tools (`ntdrive kd exec win11-dev "!process 0 0"`). Default output is a human table, `--json` gives the raw tool result. Exit codes map to `error.code`. To avoid shell quoting, command bodies can come from `--stdin`/`--file`. | P0 |
 | FACE-5 | **CLI `term attach <session>`**: connect the local console raw to a daemon PTY session (WebSocket). A person sits down in a session the agent opened. Detach key is `Ctrl+]`. Input is logged with a human tag. | P1 |
 | FACE-6 | **Python SDK `ntdrive`**: `NtDrive()` is a daemon client (default). `NtDrive(inprocess=True)` runs the core in the same process without the daemon (for tests and a REPL). Method names and arguments match the tools (`vt.kd.exec("win11-dev", "!process 0 0")`). | P0 |
@@ -260,15 +260,15 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 
 | ID | Requirement | Priority |
 |---|---|---|
-| DEV-1 | **Ruff is the only Python formatter and linter.** Use `ruff format` and `ruff check --fix` (lint, import sorting). Config lives in `pyproject.toml`: line-length 100, target py312, rules `E, F, I, UP, B, SIM, D` (Google-style docstrings). Do not add Black, isort or flake8. | P0 |
-| DEV-2 | **mypy for type checking.** `ntdrive.core` is `strict`, the rest is default. Parsers of external binary output declare their return types. | P0 |
+| DEV-1 | **Ruff is the only Python formatter and linter.** Use `ruff format` and `ruff check` (the pre-commit hook adds `--fix`). Config lives in `pyproject.toml`: line-length 100, target py312, the rule families listed there (`E, F, I, UP, B, SIM, D` with Google-style docstrings, plus `RUF, BLE, SLF, ISC, N, PIE, C4, PERF, FURB, RSE, RET, T20, PT, ERA, TID, PGH, A, Q, LOG, G` and a few `PL` rules). Do not add Black, isort or flake8. | P0 |
+| DEV-2 | **mypy for type checking.** `strict` for the whole package. Parsers of external binary output declare their return types. | P0 |
 | DEV-3 | **Prettier for web assets (CoView HTML/CSS/JS).** `.prettierrc` is printWidth 100, singleQuote, semicolons on. Not applied to Python. | P1 |
-| DEV-4 | **Everything automated by a pre-commit hook.** `.pre-commit-config.yaml` runs ruff-format, ruff, mypy, prettier (web assets only), the non-ASCII check (DEV-5), trailing-whitespace, end-of-file-fixer, check-yaml, check-toml. M0 puts `pre-commit install` in the setup script. CI (GitHub Actions, windows-latest) runs `pre-commit run --all-files` and `pytest`. | P0 |
-| DEV-5 | **Code comments, docstrings, identifiers, strings and log messages are English only.** The hook `scripts/check_ascii.py` refuses a commit when it finds a non-ASCII character in a `.py .toml .yaml .json .js .css .html .md` file. In Markdown files it also catches semicolons outside code fences and inline code. The `[tool.check_ascii] exclude` list in `pyproject.toml` is empty, so every file including this PRD is checked. This hook mechanically enforces ST-9 (English) and ST-10 (no emoji, decorative symbols or semicolons). | P0 |
+| DEV-4 | **Everything automated by a pre-commit hook.** `.pre-commit-config.yaml` runs ruff check, ruff format and mypy from the project environment (the versions in `uv.lock`, not a second pin), prettier (web assets only), the non-ASCII check (DEV-5), trailing-whitespace, end-of-file-fixer, check-yaml, check-toml, check-merge-conflict. M0 puts `pre-commit install` in the setup script. CI (GitHub Actions, windows-latest) runs `pre-commit run --all-files` and `pytest`. | P0 |
+| DEV-5 | **Code comments, docstrings, identifiers, strings and log messages are English only.** The hook `scripts/check_ascii.py` refuses a commit when it finds a non-ASCII character in any text file pre-commit hands it (`types: [text]`, so scripts, LICENSE and `uv.lock` included). In Markdown files it also catches semicolons outside code fences and inline code. The `[tool.check_ascii] exclude` list in `pyproject.toml` is empty, so every file including this PRD is checked. This hook mechanically enforces ST-9 (English) and ST-10 (no emoji, decorative symbols or semicolons). | P0 |
 | DEV-6 | **Docstrings required on public functions and classes** (ruff `D` rules). One-line summary plus args, returns and raises. Comments say "why", not "what". | P0 |
-| DEV-7 | **Editor and repo conventions.** `.editorconfig` (UTF-8, LF, Python 4 spaces, YAML/JSON 2 spaces), LF pinned by `.gitattributes`. Commit messages follow Conventional Commits (`feat:`, `fix:`, `docs:`), in English. | P0 |
-| DEV-8 | **Tests.** pytest + pytest-asyncio. Unit tests replace `vmrun`, `kd.exe` and SSH with fakes. Integration tests that need a real VM are marked `@pytest.mark.vm` and skip when no test VM is in `vms.yaml`. `uv run pytest` is the one entry point. | P0 |
-| DEV-9 | **CLAUDE.md (English) summarizes these conventions** so an agent follows the same rules when writing code. The source of truth is `CLAUDE.md` and `pyproject.toml`, not this PRD. | P0 |
+| DEV-7 | **Editor and repo conventions.** `.editorconfig` (UTF-8, LF, Python and TOML 4 spaces, PowerShell, YAML, JSON and web assets 2 spaces, `.cmd` files CRLF), LF pinned by `.gitattributes`. Commit messages follow Conventional Commits (`feat:`, `fix:`, `docs:`), in English. | P0 |
+| DEV-8 | **Tests.** pytest + pytest-asyncio. Unit tests replace `vmrun`, `kd.exe` and SSH with fakes. Live checks against a real VM are manual: `ntdrive verify` (FACE-11) and the `SKILL.md` procedures. The one test that touches the real Windows firewall runs only with `NTDRIVE_LIVE_TESTS=1`. `uv run pytest` is the one entry point. | P0 |
+| DEV-9 | **AGENTS.md (English) is the source of truth for these conventions**, with `pyproject.toml` for the tool settings. `CLAUDE.md` points at it. This table states the requirement, not the reference. | P0 |
 
 ---
 
@@ -307,13 +307,13 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 |---|---|---|
 | ToolRegistry | Single definition of tool name, argument schema and handler. Argument validation, state precondition checks (for example refuse `term_*` when `broken`), policy gate | pydantic models. MCP, HTTP, CLI and SDK are generated from it |
 | ntdrived (daemon API) | Local HTTP + WebSocket server. `POST /api/tools/<name>`, `/ws/term/<sid>`, `/health`, CoView static files | aiohttp, 127.0.0.1:8765, token auth, one instance per user |
-| ntdrive-mcp | stdio MCP server. Generates tools from the registry and forwards calls to the daemon. Stateless | FastMCP (official Python SDK). Auto-starts the daemon |
+| ntdrive-mcp | stdio MCP server. Generates tools from the registry and forwards calls to the daemon. Stateless | `mcp.server.Server` from the official Python SDK. Auto-starts the daemon |
 | ntdrive CLI | Generates subcommands from the registry. Table or `--json` output, `term attach` raw passthrough | click + httpx + websockets |
 | Python SDK | `NtDrive()` daemon client, or `inprocess=True` runs the core directly | httpx. Methods generated from the registry |
-| StateStore | The single truth of VM, KD and TERM state. Each adapter reports state changes over an event bus | In-memory plus periodic backend reconciliation |
-| HypervisorAdapter | Backend abstraction for power, snapshots, IP and console | `VmwareAdapter` (vmrun, `-T ws`), `HyperVAdapter` (long-lived pwsh + JSON) |
-| KdSession | kd.exe lifecycle, output reader thread, prompt/sentinel detection, break-in | Prompt regex `^\d*: ?kd> ?$`, log `-loga` |
-| TermManager / TermTransport | Per-session PTY, ring buffer, pyte screen, reconnect polling | `SshPtyTransport` (paramiko), `PsDirectTransport`, reserved: `HvcSshTransport`, `SerialTransport` |
+| StateStore | The single truth of VM, KD and TERM state. Adapters and sessions push changes into it, tools read it before touching a VM | In-memory, session-relative `T+` clock, last event per VM. No event bus and no periodic reconciliation in this version |
+| HypervisorAdapter | Backend abstraction for power, snapshots, IP, console and vmx hardware | `VmwareAdapter` (vmrun, `-T ws`, `-vp` for encrypted VMs, one `vmrun list` per call) plus `hypervisor/vmx.py` for vmx reads and edits. Hyper-V is a later version (3.2) |
+| KdSession | kd.exe lifecycle, output reader thread, prompt and sentinel detection, break-in over CTRL_BREAK, serial pipe liveness | Prompt regex on the tail of the output. The daemon writes the session log itself (`kd_state.log_path`), kd.exe gets no `-loga` |
+| TermManager / TermTransport | Per-session PTY, ring buffer, pyte screen, reconnect polling | `SshPtyTransport` (paramiko). `PsDirectTransport`, `HvcSshTransport` and `SerialTransport` are names reserved for a later version, no code yet |
 | CoView | Session mirroring web UI plus console screenshot stream. Served inside the daemon | xterm.js, `/coview` path on the same port |
 | Orchestrator | Compound-operation sequences like `snap_revert`, `vm_reboot` | ST-2 |
 | AuditLog | JSONL of tool calls and results | Secret masking, `T+` relative time |
@@ -336,7 +336,7 @@ TERM:  none --open--> open --(ssh drop / revert / reboot)--> disconnected --reop
 
 Transition rules (partial):
 - While `KD.broken`, `term_*`, `file_*` and `con_screenshot` updates fail at once with `guest_frozen_by_debugger`.
-- `snap_revert` and `vm_reboot` set `KD` to `detached` and all `TERM` to `disconnected`, then try to recover per the options.
+- `snap_revert` sets `KD` to `detached`, `vm_reboot` keeps kd.exe attached and waiting for the reconnect, and both set every `TERM` to `disconnected`, then recover per the options.
 - `vm_stop` when `KD` is `broken` first sends `g` or allows only a hard stop.
 
 ### 6.4 Real-time terminal data flow
@@ -359,7 +359,7 @@ Transition rules (partial):
 
 ## 7. MCP tool specification
 
-Common: every tool takes a `vm` argument (the registered name). Results are JSON. Errors carry `error.code`
+Common: tools that act on a VM take `vm` (a name from `vm_list`), the `term_*` session tools take `session_id`, and `vm_list` and `sys_health` take nothing. Every field that carries guest or debugger output is capped by `max_bytes` (default 65536, ceiling 1048576) and paired with `truncated`. Results are JSON. Errors carry `error.code`
 (`vm_not_running`, `guest_frozen_by_debugger`, `kd_not_attached`, `session_disconnected`, `confirm_required`,
 `backend_unsupported`, `timeout`) and `error.hint` (what the agent should do next). Tool names and schemas do
 not change with the backend (VMware/Hyper-V). The same tool is also exposed over HTTP (`POST /api/tools/<name>`),
@@ -370,11 +370,11 @@ messages are written in English (ST-9).
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `vm_list` | - | `[{name, backend, power, ip?, kd, term_sessions}]` |
+| `vm_list` | - | `{vms:[{name, backend, power, kd, current_snapshot, term_open:[ids], term_disconnected:[{session_id, successor}], guest_frozen, last_event, power_error?}]}` |
 | `vm_state` | `vm` | detail of one item above |
 | `vm_start` | `vm, gui=false` | `{power}` |
 | `vm_stop` | `vm, mode=soft\|hard\|kill, confirm?` | `{power, terms_dropped, killed?, locks_removed?, power_error?}` |
-| `vm_reboot` | `vm, mode=soft\|hard\|kd, reattach_kd=true, reopen_term=true, timeout=180` | `{steps:[...], kd, term}` |
+| `vm_reboot` | `vm, mode=soft\|hard\|kd, confirm? (hard), reattach_kd=true, reopen_term=true, timeout=180` | `{steps:[...], kd, term:[{old, new}]}`. On a failure `error.steps` lists what ran |
 | `vm_suspend` / `vm_resume` | `vm` | `{power}` |
 | `vm_config` | `vm, cpus?, memory_mb?, nic=e1000e\|e1000\|vmxnet3?` | `{hardware:{cpus, cores_per_socket, memory_mb, nic}, before?, changed:[vmx keys]}` (a change needs the VM off) |
 | `snap_list` | `vm` | `{tree:[{name, children:[...]}], current}` |
@@ -388,7 +388,7 @@ messages are written in English (ST-9).
 |---|---|---|
 | `kd_setup_host` | `vm`, `fix_firewall=true`, `timeout=120` (serial: VM must be off, edits the vmx. net: reads the host firewall rules for kd.exe and, when they block KDNET, removes the Block rules and adds an Allow rule through one UAC prompt. `fix_firewall=false` only reports) | `{transport, changed, serial_pipe?, firewall?, next}` |
 | `kd_setup_guest` | `vm, port?, key?` (needs SSH to the guest) | `{transport, port?, key_saved, adopted, needs_reboot, steps}`. `adopted` means the guest already debugged to this host's IP (scripts/setup-guest.ps1 does that by default), so the port and key were read back over SSH instead of written, and `needs_reboot` is false when debugging was already on |
-| `kd_attach` | `vm, port?, key?, symbol_path?, wait_for_target=true, timeout=120` | `{state, transport, target_info?}`. On net with no saved key it runs the `kd_setup_guest` step first (reads the guest's settings over SSH, `adopted`) and fails with a reboot hint when settings had to be written |
+| `kd_attach` | `vm, port?, key?, symbol_path?, wait_for_target=true, timeout=120` | `{state, transport, target_info?, note?}` (`note` when the target did not connect within the timeout: a KDNET target connects while it boots, so `vm_reboot mode=soft` next). On net with no saved key it runs the `kd_setup_guest` step first (reads the guest's settings over SSH, `adopted`) and fails with a reboot hint when settings had to be written |
 | `kd_detach` | `vm, force=false` | `{state}` |
 | `kd_break` | `vm, timeout=20` | `{state, output}`. A timeout with no target ever connected (kd at [no_debuggee]) tells the caller to reboot the guest so KDNET reconnects |
 | `kd_go` | `vm` | `{state}` |
@@ -401,14 +401,14 @@ messages are written in English (ST-9).
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `term_open` | `vm, shell=powershell\|cmd\|pwsh, transport=auto\|ssh\|psdirect, account=admin\|standard, cols=120, rows=40` | `{session_id, transport, account, coview_url}` |
+| `term_open` | `vm, shell=powershell\|cmd\|pwsh, transport=auto\|ssh, account=admin\|standard, cols=120, rows=40` | `{session_id, transport, account, coview_url}` |
 | `term_send` | `session_id, text | keys[], enter=true` | `{bytes_sent}` |
-| `term_read` | `session_id, mode=delta\|screen, until?, timeout=0, max_bytes=65536` | `{text, cursor, truncated, matched?, state}` |
-| `term_exec` | `session_id, cmd, timeout=60` | `{output, exit_code?, state, note?, elapsed_ms}` (`exit_code` is null with a `note` when the shell reported no number: PowerShell sets `$LASTEXITCODE` only after an external program ran. A dead session raises `session_disconnected` instead) |
+| `term_read` | `session_id, mode=delta\|screen, until?, timeout=0, max_bytes=65536, cursor?, clean=true` | `{text, cursor, truncated, lost_before_cursor, matched?, state, successor?}`. A wait ends with `guest_frozen_by_debugger` when the target stops at `kd>` |
+| `term_exec` | `session_id, cmd, timeout=60, max_bytes=65536` | `{output, exit_code?, state, truncated, note?, elapsed_ms}` (`exit_code` is null with a `note` when the shell reported no number: PowerShell sets `$LASTEXITCODE` only after an external program ran. A dead session raises `session_disconnected` instead) |
 | `term_resize` | `session_id, cols, rows` | `{}` |
 | `term_close` | `session_id` | `{}` |
-| `term_list` | `vm?` | `{sessions:[{session_id, vm, shell, transport, account, state, last_activity, successor?}], open:[session ids that are usable]}` |
-| `term_prune` | `vm?` | `{pruned:[ids], remaining}`. Forgets closed and disconnected sessions; open successors stay |
+| `term_list` | `vm?` | `{sessions:[{session_id, vm, shell, transport, account, state, last_activity, successor?}], open:[session ids that are usable], coview: the CoView page URL, #<session_id> selects one}` |
+| `term_prune` | `vm?` | `{pruned:[ids], remaining}`. Forgets closed and disconnected sessions. Open successors stay |
 
 ### 7.4 Console / file / system
 
@@ -417,13 +417,13 @@ messages are written in English (ST-9).
 | `con_screenshot` | `vm, base64=false, method=auto\|guest\|vnc` | `{png_path, via, png_base64?}` |
 | `con_enable_vnc` | `vm, port?` | `{changed, port, note}` (VM off) |
 | `con_send_keys` | `vm, keys[]` | `{sent}` (P1) |
-| `file_push` | `vm, local, remote, verify=true` (`local` is an absolute host path, the CLI and SDK absolutize) | `{files, bytes, verified, via: sftp\|guest_tools, copied:[{local, remote, bytes, verified, verify_error?}], note?}`. `verified` is true or false for SFTP and guest-tools copies alike; null with `verify_error` when the hash could not be read |
+| `file_push` | `vm, local, remote, verify=true` (`local` is an absolute host path, the CLI and SDK absolutize) | `{files, bytes, verified, via: sftp\|guest_tools, copied:[{local, remote, bytes, verified, verify_error?}], note?}`. `verified` is true or false for SFTP and guest-tools copies alike. It is null with `verify_error` when the hash could not be read |
 | `file_pull` | `vm, remote, local` (a trailing separator on `local` means directory) | `{bytes, via, note?}` |
 | `file_stat` | `vm, remote` | `{exists, size?, modified?, is_dir?, via}` |
 | `file_ls` | `vm, remote` | `{exists, entries:[{name, size, modified, is_dir}], via}` |
 | `file_delete` | `vm, remote, recurse=false` | `{deleted, via}` |
 | `sys_state` | `vm?` | unified VM, KD, TERM state |
-| `sys_health` | - | binary paths and versions, backend capabilities, hypervisor service, a `kdnet_firewall` read when any VM uses net, and per VM: config `issues` (missing vmx, Secure Boot on, wrong NIC for KDNET, encrypted VM without a password, empty password environment variables, missing serial pipe or KDNET key, each naming the fix), `power`, `kd_state`, `guest {ip, user, standard_user, ssh_port, ssh_open, skipped}`, and `serial_pipe {path, open}` or `kdnet_port {port, free, held_by_ntdrive, firewall_ok}`. The guest probe is bounded to a few seconds and skipped while the VM is off or frozen by the debugger |
+| `sys_health` | - | `ok` (false when the host or any VM has an issue), `problems`, `vm_issues`, binary paths and versions, backend capabilities, hypervisor service, a `kdnet_firewall` read when any VM uses net, and per VM: config `issues` (missing vmx, Secure Boot on, wrong NIC for KDNET, encrypted VM without a password, empty password environment variables, missing serial pipe or KDNET key, each naming the fix), `power`, `kd_state`, `guest {ip, user, standard_user, ssh_port, ssh_open, skipped}`, and `serial_pipe {path, open}` or `kdnet_port {port, free, held_by_ntdrive, firewall_ok}`. The guest probe is bounded to a few seconds and skipped while the VM is off or frozen by the debugger |
 
 ### 7.5 Config file (`vms.yaml`)
 
@@ -559,7 +559,7 @@ KDNET was just configured, and ends with ALL SET or the first failing check and 
 | **M2 terminal** | TermManager, `SshPtyTransport`, `term_*`, pyte screen, reconnect poller, session logs | AT-2, AT-3 pass |
 | **M3 KDNET** | KdSession, `kd_*`, sentinel execution, break-in, event wait | AT-4 passes |
 | **M4 consistency** | Orchestrator (`snap_revert`, `vm_reboot`), StateStore transition rules, `sys_state`, policy gate | AT-5, AT-6 pass |
-| **M5 collaboration and hardening** | CoView web terminal (in the daemon), CLI `term attach`, tool consolidation (<= 20), audit log, 48-hour soak test, docs | AT-7, AT-9, NFR met |
+| **M5 collaboration and hardening** | CoView web terminal (in the daemon), CLI `term attach`, a cheap tool list (ST-7), audit log, 48-hour soak test, docs | AT-7, AT-9, NFR met |
 | **(later) Hyper-V / VirtualBox** | `HyperVAdapter` (long-lived pwsh) or `VirtualBoxAdapter` (`VBoxManage`), the matching transport and console, re-run AT-1 through AT-6 | AT-8 passes. Out of scope this release |
 
 ---
@@ -627,7 +627,7 @@ KDNET was just configured, and ends with ALL SET or the first failing check and 
 5. Whether to include Linux guests (serial console, hvc ssh) in 1.0.
 6. (deferred, later) How to get a Hyper-V verification host: upgrade to Windows 11 Pro vs a separate machine.
 7. (deferred, later) Settle the post-`Restore-VMCheckpoint` VM state (saved/running) and the adapter normalization logic. VirtualBox needs a power-off before revert, so it fits the same normalization rule.
-8. Tool consolidation: whether to group into `vm_power(action=start|stop|reboot|suspend|resume)`, `snap(action=list|take|revert|delete)` to get under 20, or keep one tool per action as now. Current plan: consolidate in M5 after looking at real usage logs.
+8. Tool consolidation: decided on 2026-09-14 to keep one tool per action (39 tools) and to keep the tool list cheap instead (ST-7: short descriptions, a compact schema, about 4.6k tokens per `tools/list`).
 9. Whether to add daemon idle exit. Current plan: no (explicit stop). If added, it must never exit while an active KD session exists.
 10. Whether to generate CLI subcommand names mechanically from tool names (`kd wait-event`) or hand-tune them (`kd wait`). Current plan: mechanical generation plus aliases only.
 
