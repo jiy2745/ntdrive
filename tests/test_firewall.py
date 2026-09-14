@@ -71,14 +71,14 @@ async def test_firewall_status_is_cached_between_calls(
     assert fake_firewall.checks == 1
 
     # An unreadable answer is not kept, so the next call reads again.
-    service._firewall_cache = None  # noqa: SLF001
+    service._firewall_cache = None
     fake_firewall.unreadable = "boom"
     await service.call("sys_health", {})
     await service.call("sys_health", {})
     assert fake_firewall.checks == 3
 
     # A repair replaces whatever was cached.
-    service._firewall_cache = None  # noqa: SLF001
+    service._firewall_cache = None
     fake_firewall.unreadable = ""
     fake_firewall.allow = False
     await service.call("kd_setup_host", {"vm": "win11-dev"})

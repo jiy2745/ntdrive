@@ -12,6 +12,7 @@ dependencies: the PNG is built with zlib and struct.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import struct
 import zlib
 
@@ -147,8 +148,7 @@ def _png(width: int, height: int, rgb: bytes) -> bytes:
 
 
 async def _recv(reader: asyncio.StreamReader, n: int) -> bytes:
-    data = await reader.readexactly(n)
-    return data
+    return await reader.readexactly(n)
 
 
 async def capture(host: str, port: int, password: str, out_path: str, timeout: float = 15.0) -> str:
@@ -226,7 +226,7 @@ async def _capture(host: str, port: int, password: str, out_path: str) -> str:
         return out_path
     finally:
         writer.close()
-        with _suppress():
+        with contextlib.suppress(BaseException):
             await writer.wait_closed()
 
 
@@ -255,11 +255,3 @@ async def _read_framebuffer(reader: asyncio.StreamReader, width: int, height: in
                     canvas[dst + 2] = value & 0xFF
             painted += w * h
     return bytes(canvas)
-
-
-class _suppress:
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, *exc: object) -> bool:
-        return True

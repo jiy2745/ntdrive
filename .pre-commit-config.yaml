@@ -8,21 +8,28 @@ repos:
       - id: check-toml
       - id: check-merge-conflict
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.0
-    hooks:
-      - id: ruff-format
-      - id: ruff
-        args: [--fix]
-
   - repo: local
     hooks:
-      # The mirrors-mypy hook runs in an isolated environment without click, aiohttp, mcp and
-      # the other runtime packages, so it reported untyped decorators everywhere. Running the
-      # project's own mypy keeps the hook identical to `uv run mypy`.
+      # ruff and mypy run from the project environment, the versions pinned in uv.lock, so the
+      # hook, CI and `uv run ruff` or `uv run mypy` are one and the same tool. A mirror hook would
+      # pin a second ruff version, and the mirrors-mypy hook runs without click, aiohttp, mcp and
+      # the other runtime packages. `--no-sync` because a sync rewrites ntdrive-mcp.exe, which
+      # fails while an MCP client holds it. CI runs `uv sync --locked` before the hooks.
+      - id: ruff-check
+        name: ruff check (lint, import order, --fix)
+        entry: uv run --no-sync ruff check --fix src tests scripts
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --no-sync ruff format src tests scripts
+        language: system
+        types: [python]
+        pass_filenames: false
       - id: mypy
         name: mypy (project environment)
-        entry: uv run mypy
+        entry: uv run --no-sync mypy
         language: system
         types: [python]
         pass_filenames: false
@@ -40,4 +47,3 @@ repos:
         entry: python scripts/check_ascii.py
         language: system
         types: [text]
-        exclude: ^PRD\.md$

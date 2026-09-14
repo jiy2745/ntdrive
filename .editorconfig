@@ -8,11 +8,14 @@ trim_trailing_whitespace = true
 indent_style = space
 indent_size = 4
 
-[*.{yaml,yml,json,toml,html,css,js}]
+[*.{yaml,yml,json,html,css,js}]
+indent_size = 2
+
+[*.ps1]
 indent_size = 2
 
 [*.md]
 trim_trailing_whitespace = false
 
-[*.{ps1,cmd}]
+[*.cmd]
 end_of_line = crlf

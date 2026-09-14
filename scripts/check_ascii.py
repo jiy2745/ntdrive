@@ -1,6 +1,6 @@
 """Reject non-ASCII characters, and semicolons in Markdown prose, in repository files.
 
-This is the enforcement hook for the writing rules in the PRD: everything except PRD.md is
+This is the enforcement hook for the writing rules in the PRD: every file is
 English, documents carry no emoji, em dashes, decorative symbols or box-drawing characters, and
 prose does not use semicolons as punctuation. Plain ASCII covers the first three rules. The
 semicolon rule applies to Markdown text outside fenced code blocks and inline code spans, so
@@ -8,7 +8,7 @@ commands like `cmd; .echo done` stay legal.
 
 Usage: python scripts/check_ascii.py FILE [FILE ...]
 Exit code 1 when a violation is found. Excluded files come from [tool.check_ascii] exclude in
-pyproject.toml plus the exclude pattern in .pre-commit-config.yaml.
+pyproject.toml, which is empty.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def check_markdown_semicolons(path: Path, text: str) -> int:
     in_fence = False
     for lineno, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
+        if stripped.startswith(("```", "~~~")):
             in_fence = not in_fence
             continue
         if in_fence or stripped.startswith("    ") or line.startswith("\t"):

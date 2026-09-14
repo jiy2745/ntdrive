@@ -25,7 +25,10 @@ CHILD = (
     "signal.signal(signal.SIGBREAK, stop)\n"
     "sys.stdout.write('READY\\n')\n"
     "sys.stdout.flush()\n"
-    "time.sleep(20)\n"
+    # One long sleep is not interruptible by CTRL_BREAK on Windows: the handler would only run
+    # after it ends, so the child sleeps in short slices.
+    "for _ in range(200):\n"
+    "    time.sleep(0.1)\n"
 )
 proc = spawn_kd([sys.executable, "-c", CHILD])
 assert proc.stdout.readline().strip() == b"READY"
@@ -38,10 +41,11 @@ print("rest", rest.strip(), "rc", proc.wait(timeout=15))
 @pytest.mark.skipif(sys.platform != "win32", reason="CTRL_BREAK delivery is Windows only")
 def test_ctrl_break_reaches_a_process_spawned_like_kd() -> None:
     # send_ctrl_break drops the caller's console, so it must not run in the pytest process.
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(
         [sys.executable, "-c", BREAK_PROBE],
         capture_output=True,
         text=True,
+        check=False,
         timeout=60,
         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
     )
@@ -144,7 +148,7 @@ async def test_serial_attach_reports_dead_kd_and_missing_pipe(
     cfg = service.config.vms["win11-dev"]
     cfg.kd_transport = "serial"
     cfg.kdnet.key = ""
-    service._kd_pipe_check = lambda pipe: False  # noqa: SLF001
+    service._kd_pipe_check = lambda pipe: False
     with pytest.raises(NtDriveError) as exc:
         await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
     assert exc.value.code == BACKEND_ERROR and "kd_setup_host" in exc.value.hint
@@ -156,8 +160,8 @@ async def test_serial_attach_reports_dead_kd_and_missing_pipe(
         return proc
 
     service.kd_sessions.clear()
-    service._kd_pipe_check = lambda pipe: True  # noqa: SLF001
-    service._kd_spawner = dying  # noqa: SLF001
+    service._kd_pipe_check = lambda pipe: True
+    service._kd_spawner = dying
     with pytest.raises(NtDriveError) as exc:
         await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
     assert exc.value.code == BACKEND_ERROR and "exited right after start" in exc.value.message
@@ -364,12 +368,12 @@ async def test_kd_exec_frames_a_line_eating_meta_command(
     # A dot-command eats to end of line. The sentinel is a separate line, so it survives and the
     # command's output still comes back framed.
     result = await service.call(
-        "kd_exec", {"vm": "win11-dev", "cmd": ".sympath srv*c:\sym*https://x"}
+        "kd_exec", {"vm": "win11-dev", "cmd": r".sympath srv*c:\sym*https://x"}
     )
     out = result["outputs"][0]
-    assert out["output"] == "output of [.sympath srv*c:\sym*https://x]\nline two"
+    assert out["output"] == "output of [.sympath srv*c:\\sym*https://x]\nline two"
     proc = kd_procs[-1]
-    assert ".sympath srv*c:\sym*https://x" in proc.commands
+    assert ".sympath srv*c:\\sym*https://x" in proc.commands
     assert any(c.startswith(".echo __NTDRIVE_END_") for c in proc.commands)
     assert not any("; .echo" in c for c in proc.commands)
 
@@ -379,7 +383,7 @@ async def test_kd_break_timeout_points_at_reconnecting_the_guest(
 ) -> None:
     # A break that never reaches a prompt (the target is at [no_debuggee], never connected) tells
     # the caller to reboot the guest so it reconnects, instead of a bare timeout.
-    service._kd_breaker = lambda proc: None  # noqa: SLF001 - break does nothing here
+    service._kd_breaker = lambda proc: None
     await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
     service.kd_sessions["win11-dev"].target_info = ""  # never saw the target connect
     with pytest.raises(NtDriveError) as exc:

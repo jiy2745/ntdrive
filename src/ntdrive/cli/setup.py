@@ -188,7 +188,7 @@ def _read_masked(label: str) -> str:
             click.echo("")
             return "".join(chars)
         if ch == "\x03":
-            raise click.Abort()
+            raise click.Abort
         if ch in ("\x08", "\x7f"):
             if chars:
                 chars.pop()
@@ -510,10 +510,14 @@ def run_setup(
         guest_does = f"OpenSSH, KDNET and the {standard} account"
     log.next_steps(
         [
-            f"in the guest: copy setup-guest.cmd and setup-guest.ps1 in and run {guest_cmd} "
-            f"({guest_does}, one UAC click)",
-            f"on the host: ntdrive kd setup-host {name} for the firewall (scripts\\setup-host.cmd "
-            "does it), then ntdrive verify",
+            (
+                f"in the guest: copy setup-guest.cmd and setup-guest.ps1 in and run {guest_cmd} "
+                f"({guest_does}, one UAC click)"
+            ),
+            (
+                f"on the host: ntdrive kd setup-host {name} for the firewall "
+                "(scripts\\setup-host.cmd does it), then ntdrive verify"
+            ),
         ]
     )
 

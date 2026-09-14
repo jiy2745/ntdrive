@@ -40,6 +40,12 @@ from ntdrive.daemon.lifecycle import DaemonInfo, new_token, remove_info, write_i
 from ntdrive.errors import SESSION_DISCONNECTED, UNAUTHORIZED, NtDriveError
 from ntdrive.hostproc import force_utf8_stdio
 
+# Typed application keys: aiohttp warns about plain string keys, and mypy learns the types.
+SERVICE_KEY = web.AppKey("service", NtDriveService)
+TOKEN_KEY = web.AppKey("token", str)
+VIEW_TOKEN_KEY = web.AppKey("view_token", str)
+STOP_KEY = web.AppKey("stop", asyncio.Event)
+
 log = logging.getLogger("ntdrived")
 # Grace period for open connections to close during shutdown, before the socket is forced down.
 SHUTDOWN_TIMEOUT = 1.0
@@ -74,8 +80,8 @@ def _presented_token(request: web.Request) -> str:
 
 def _accepted_tokens(request: web.Request) -> list[str]:
     """The daemon token everywhere, plus the view token on the terminal-stream routes."""
-    tokens: list[str] = [request.app["token"]]
-    view: str = request.app.get("view_token", "")
+    tokens: list[str] = [request.app[TOKEN_KEY]]
+    view: str = request.app[VIEW_TOKEN_KEY]
     if view and (request.path in VIEW_PATHS or request.path.startswith(VIEW_PREFIX)):
         tokens.append(view)
     return tokens
@@ -93,13 +99,12 @@ async def auth_middleware(
     """Token check for everything but /health and the CoView page."""
     if request.path in OPEN_PATHS:
         response = await handler(request)
+    elif not _token_matches(_presented_token(request), _accepted_tokens(request)):
+        response = error_response(
+            NtDriveError(UNAUTHORIZED, "missing or wrong daemon token", "read daemon.json")
+        )
     else:
-        if not _token_matches(_presented_token(request), _accepted_tokens(request)):
-            response = error_response(
-                NtDriveError(UNAUTHORIZED, "missing or wrong daemon token", "read daemon.json")
-            )
-        else:
-            response = await handler(request)
+        response = await handler(request)
     for name, value in SAFE_HEADERS.items():
         response.headers.setdefault(name, value)
     return response
@@ -107,7 +112,7 @@ async def auth_middleware(
 
 async def health(request: web.Request) -> web.Response:
     """Liveness and version."""
-    service: NtDriveService = request.app["service"]
+    service: NtDriveService = request.app[SERVICE_KEY]
     return web.json_response(
         {
             "ok": True,
@@ -123,13 +128,13 @@ async def health(request: web.Request) -> web.Response:
 
 async def list_tools(request: web.Request) -> web.Response:
     """Registry summary."""
-    service: NtDriveService = request.app["service"]
+    service: NtDriveService = request.app[SERVICE_KEY]
     return web.json_response({"tools": [spec.summary() for spec in service.registry]})
 
 
 async def call_tool(request: web.Request) -> web.Response:
     """Run one tool."""
-    service: NtDriveService = request.app["service"]
+    service: NtDriveService = request.app[SERVICE_KEY]
     name = request.match_info["name"]
     try:
         body: Any = await request.json() if request.can_read_body else {}
@@ -149,7 +154,7 @@ async def call_tool(request: web.Request) -> web.Response:
 
 async def shutdown(request: web.Request) -> web.Response:
     """Stop the daemon after answering."""
-    request.app["stop"].set()
+    request.app[STOP_KEY].set()
     return web.json_response({"ok": True, "stopping": True})
 
 
@@ -160,13 +165,13 @@ async def coview_page(request: web.Request) -> web.StreamResponse:
 
 async def coview_sessions(request: web.Request) -> web.Response:
     """Session list for the page."""
-    service: NtDriveService = request.app["service"]
+    service: NtDriveService = request.app[SERVICE_KEY]
     return web.json_response({"sessions": service.term.sessions(None)})
 
 
 async def term_ws(request: web.Request) -> web.StreamResponse:
     """Bidirectional PTY stream for CoView and `ntdrive term attach`."""
-    service: NtDriveService = request.app["service"]
+    service: NtDriveService = request.app[SERVICE_KEY]
     session_id = request.match_info["session_id"]
     source = request.query.get("source", "human")
     if source not in INPUT_SOURCES:
@@ -230,10 +235,10 @@ async def term_ws(request: web.Request) -> web.StreamResponse:
 def create_app(service: NtDriveService, token: str, view_token: str = "") -> web.Application:
     """Build the aiohttp application."""
     app = web.Application(middlewares=[auth_middleware], client_max_size=64 * 1024 * 1024)
-    app["service"] = service
-    app["token"] = token
-    app["view_token"] = view_token
-    app["stop"] = asyncio.Event()
+    app[SERVICE_KEY] = service
+    app[TOKEN_KEY] = token
+    app[VIEW_TOKEN_KEY] = view_token
+    app[STOP_KEY] = asyncio.Event()
     app.router.add_get("/health", health)
     app.router.add_get("/api/tools", list_tools)
     app.router.add_post("/api/tools/{name}", call_tool)
@@ -297,7 +302,7 @@ async def serve(config_path: str | None = None, bind: str | None = None) -> None
     write_info(info)
     log.info("ntdrived %s listening on %s:%s (pid %s)", __version__, host, port, os.getpid())
     try:
-        await app["stop"].wait()
+        await app[STOP_KEY].wait()
     finally:
         log.info("ntdrived stopping")
         await service.shutdown()

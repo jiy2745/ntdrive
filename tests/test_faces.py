@@ -136,7 +136,7 @@ async def test_websocket_streams_session(
 
 def test_cli_builds_commands_for_every_tool() -> None:
     cli = cli_main.build_cli(load_builtin_tools())
-    groups = {name: cmd for name, cmd in cli.commands.items()}
+    groups = dict(cli.commands.items())
     assert set(groups) == {
         "vm",
         "snap",

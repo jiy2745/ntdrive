@@ -23,7 +23,7 @@ PIXELS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)]
 def test_des_matches_the_classic_vector() -> None:
     # The standard DES test vector proves the block cipher used by VNC auth is correct.
     key = bytes.fromhex("133457799BBCDFF1")
-    out = vnc._des(key, bytes.fromhex("0123456789ABCDEF"))  # noqa: SLF001
+    out = vnc._des(key, bytes.fromhex("0123456789ABCDEF"))
     assert out == bytes.fromhex("85E813540F0AB405")
 
 
@@ -83,8 +83,7 @@ def _decode_png(data: bytes) -> tuple[int, int, list[tuple[int, int, int]]]:
     stride = width * 3
     for y in range(height):
         row = raw[y * (stride + 1) + 1 : (y + 1) * (stride + 1)]  # skip the filter byte
-        for x in range(width):
-            pixels.append((row[x * 3], row[x * 3 + 1], row[x * 3 + 2]))
+        pixels.extend((row[x * 3], row[x * 3 + 1], row[x * 3 + 2]) for x in range(width))
     return width, height, pixels
 
 

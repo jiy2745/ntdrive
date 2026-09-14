@@ -149,7 +149,7 @@ def _params_for(spec: ToolSpec) -> list[click.Parameter]:
                 click.Argument(
                     [name],
                     required=required,
-                    default=None if not required else None,
+                    default=None,
                     nargs=-1 if name == greedy else 1,
                 )
             )

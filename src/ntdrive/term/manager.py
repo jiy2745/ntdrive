@@ -87,8 +87,7 @@ class TermManager:
         for runtime in self.state.all():
             if vm and runtime.name != vm:
                 continue
-            for info in runtime.terms.values():
-                out.append(info.to_dict())
+            out.extend(info.to_dict() for info in runtime.terms.values())
         return out
 
     def transport_for(self, vm: VmConfig, account: GuestAccount = "admin") -> TermTransport | None:

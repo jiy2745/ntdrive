@@ -183,8 +183,8 @@ def test_helpers() -> None:
     assert setup_mod.slug("Insider Preview Windows 11 x64") == "insider-preview-windows-11-x64"
     assert setup_mod.env_name("win11-dev", "PW") == "NTDRIVE_WIN11_DEV_PW"
     assert setup_mod.env_name("a.b", "VMPW") == "NTDRIVE_A_B_VMPW"
-    assert setup_mod._next_kdnet_port({"a": {"kdnet": {"port": 50000}}, "b": None}) == 50001  # noqa: SLF001
-    assert setup_mod._next_kdnet_port({"a": {"kdnet": {"port": "abc"}}}) == 50000  # noqa: SLF001
+    assert setup_mod._next_kdnet_port({"a": {"kdnet": {"port": 50000}}, "b": None}) == 50001
+    assert setup_mod._next_kdnet_port({"a": {"kdnet": {"port": "abc"}}}) == 50000
 
 
 def test_mask_shows_enough_to_recognize_a_password() -> None:

@@ -28,8 +28,8 @@ def test_udp_port_free_sees_a_held_port() -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as held:
         held.bind(("127.0.0.1", 0))
         port = held.getsockname()[1]
-        assert sys_tools._udp_port_free(port) is False  # noqa: SLF001
-    assert sys_tools._udp_port_free(port) is True  # noqa: SLF001
+        assert sys_tools._udp_port_free(port) is False
+    assert sys_tools._udp_port_free(port) is True
 
 
 async def test_health_skips_guest_probe_while_vm_is_off(
@@ -122,7 +122,7 @@ async def test_health_checks_the_serial_pipe_server_on_the_host(service: NtDrive
     vm = await _vm(service)
     assert vm["serial_pipe"]["open"] is True and vm["issues"] == []
 
-    service._kd_pipe_check = lambda pipe: False  # noqa: SLF001
+    service._kd_pipe_check = lambda pipe: False
     vm = await _vm(service)
     assert vm["serial_pipe"]["open"] is False
     assert any("no server on the host" in issue for issue in vm["issues"])
@@ -169,8 +169,10 @@ async def test_health_names_the_fix_for_common_vmx_and_secret_mistakes(
     assert any("guest NIC is vmxnet3" in i for i in issues)
     # The same variable backs both passwords, so it is reported once, with the fix.
     assert [i for i in issues if "NTDRIVE_TEST_PW" in i] == [
-        "environment variable NTDRIVE_TEST_PW is empty (set it at User scope: ntdrive reads it "
-        "from the registry at once, no new terminal needed)"
+        (
+            "environment variable NTDRIVE_TEST_PW is empty (set it at User scope: ntdrive reads it "
+            "from the registry at once, no new terminal needed)"
+        )
     ]
     assert not any("names no encryption password" in i for i in issues)
 

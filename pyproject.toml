@@ -64,31 +64,35 @@ target-version = "py312"
 src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "D"]
-ignore = ["D100", "D104", "D105", "D107", "D203", "D213"]
+select = [
+    "E", "F", "I", "UP", "B", "SIM", "D",
+    "RUF", "BLE", "SLF", "ISC", "N", "PIE", "C4", "PERF", "FURB", "RSE", "RET",
+    "T20", "PT", "ERA", "TID", "PGH", "A", "Q", "LOG", "G",
+    "PLE", "PLC0207", "PLR0402", "PLR5501", "PLW1510",
+]
+ignore = ["D100", "D104", "D105", "D107", "D203", "D213", "PT018"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["D", "E501"]
-"scripts/**" = ["D"]
+"tests/**" = ["D", "E501", "SLF001"]
+"scripts/**" = ["D", "T201"]
 
 [tool.mypy]
 python_version = "3.12"
 packages = ["ntdrive"]
 mypy_path = "src"
-ignore_missing_imports = true
-warn_unused_ignores = true
-
-[[tool.mypy.overrides]]
-module = "ntdrive.core.*"
 strict = true
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+# A new warning fails the run. A third-party deprecation that a lock bump introduces gets a
+# narrow ignore::<Category>:<module> entry here, not a revert to no filter.
+filterwarnings = ["error"]
 
 [tool.check_ascii]
 # Files that may contain non-ASCII text. Everything in the repo, PRD.md included, is now English

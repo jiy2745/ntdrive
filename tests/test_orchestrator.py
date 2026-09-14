@@ -143,6 +143,7 @@ async def test_revert_flow_restores_kd_and_terminal(
     fake_vmrun: FakeVmrun,
     fake_transport: FakeTransport,
     kd_procs: list[FakeKdProcess],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await service.call("vm_start", {"vm": "win11-dev"})
     await service.call("snap_take", {"vm": "win11-dev", "name": "base"})
@@ -155,7 +156,7 @@ async def test_revert_flow_restores_kd_and_terminal(
     async def fake_wait(host: str, port: int, timeout: float, interval: float = 2.0) -> bool:
         return True
 
-    manager_mod.wait_for_port = fake_wait  # type: ignore[assignment]
+    monkeypatch.setattr(manager_mod, "wait_for_port", fake_wait)
 
     result = await service.call("snap_revert", {"vm": "win11-dev", "name": "base", "timeout": 5})
     steps = [s["step"] for s in result["steps"]]

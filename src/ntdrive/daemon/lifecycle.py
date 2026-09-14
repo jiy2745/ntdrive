@@ -133,7 +133,7 @@ def spawn_daemon(config_path: str | None = None) -> subprocess.Popen[bytes]:
         kwargs["startupinfo"] = startupinfo
     else:
         kwargs["start_new_session"] = True
-    return subprocess.Popen(  # noqa: S603
+    return subprocess.Popen(
         argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **kwargs
     )
 
@@ -210,7 +210,7 @@ def restart_daemon(config_path: str | None = None, timeout: float = 25.0) -> Dae
 def _check_version(remote: str) -> None:
     if not remote:
         return
-    if remote.split(".")[0] != __version__.split(".")[0]:
+    if remote.split(".", maxsplit=1)[0] != __version__.split(".")[0]:
         raise NtDriveError(
             VERSION_MISMATCH,
             f"daemon version {remote} does not match client {__version__}",
@@ -236,8 +236,3 @@ def stop_daemon(info: DaemonInfo, timeout: float = 15.0) -> bool:
         psutil.Process(info.pid).kill()
     remove_info()
     return not pid_alive(info.pid)
-
-
-def current_pid() -> int:
-    """This process id (kept here so app.py has one import for lifecycle facts)."""
-    return os.getpid()

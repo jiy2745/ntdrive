@@ -20,12 +20,11 @@ def vmx_settings(vmx: str) -> dict[str, str]:
 
 # One line of a vmx: key = "value". Keys are matched without regard to case, as VMware does.
 _LINE = re.compile(r'^\s*([\w.:]+)\s*=\s*"(.*)"\s*$')
+
+
 # Hardware exposed by vm_config and the vmx keys behind it. cpus writes both numvcpus and
 # cpuid.coresPerSocket, so the guest sees one socket with that many cores: Windows client
 # editions accept at most one or two sockets and would ignore the rest.
-NIC_MODELS = ("e1000e", "e1000", "vmxnet3")
-
-
 def hardware_from_settings(settings: dict[str, str]) -> dict[str, Any]:
     """cpus, cores_per_socket, memory_mb and nic from lower-cased vmx pairs (None when absent)."""
 
