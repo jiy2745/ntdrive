@@ -166,6 +166,12 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   that error `reason=encrypted_live_snapshot` and the snapshot tools offer `allow_suspend`.
 - Right after a suspend `vmrun` may briefly report the vmx as unreadable, and a delete that worked
   can then report "does not exist". The suspend path checks the snapshot list, not the op result.
+- A snapshot taken while suspended can leave `checkpoint.vmState` in the vmx pointing at the
+  snapshot's `.vmsn`, and the resume then fails with "The operation was canceled" (2026-09-18,
+  encrypted VM). The adapter reports that as `saved_state_stale`, `sys_health` lists it, and
+  `vm_start discard_saved_state=true` drops the lines and boots fresh. The suspend path retries
+  the resume once and, when it still fails, records the snapshot and fails with the facts
+  (`error.completed`, `error.power`, `error.resume_error`) instead of a raw vmrun error.
 - KDNET needs an inbound firewall allow for `kd.exe`, and Windows often has a leftover Block rule
   that wins. `kd_setup_host` (net) reads the rules without privilege and repairs them through one
   UAC prompt (`ntdrive.kd.firewall`). KDNET is the default. The serial pipe transport avoids

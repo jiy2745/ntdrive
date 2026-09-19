@@ -37,6 +37,9 @@ REASON_ENCRYPTED_LIVE = "encrypted_live_snapshot"
 REASON_PASSWORD_REQUIRED = "password_required"
 REASON_CONFIG_UNREADABLE = "config_unreadable"
 REASON_SNAPSHOT_MISSING = "snapshot_missing"
+# The vmx names a saved state (checkpoint.vmState) that is not a .vmss next to it, so a
+# start cannot resume it. vm_start discard_saved_state=true boots fresh from the disk.
+REASON_SAVED_STATE_STALE = "saved_state_stale"
 
 # HTTP status used by the daemon for each code. Anything not listed is 500.
 HTTP_STATUS: dict[str, int] = {

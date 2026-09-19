@@ -156,7 +156,15 @@ term_read session_id=<sid> until="PS .*> $" timeout=30
 vmrun cannot snapshot its live memory. Retry with `allow_suspend=true`: the daemon suspends the
 VM, snapshots the saved state (memory included), resumes, and reattaches the debugger. Terminal
 sessions are dropped, so reopen them with `term_open`. `snap_delete` on such a snapshot needs the
-same flag. A snapshot of a powered-off VM never needs it.
+same flag. A snapshot of a powered-off VM never needs it. The result lists `snapshots`, so the
+snapshot is confirmed without a `snap_list`.
+
+When the resume fails the call fails, but the snapshot exists and is recorded: `error.completed`
+is the result it would have returned, `error.power` is where the VM was left (`suspended` or
+`off`) and `error.resume_error` is the start error. `vm_start` resumes it. When
+`error.resume_error.reason` (or a later `vm_start` error) is `saved_state_stale`, the vmx names
+a saved state Workstation cannot restore: `vm_start discard_saved_state=true` boots fresh from
+the disk, and the snapshot keeps the memory state. `sys_health` reports such a leftover too.
 
 ## Files
 

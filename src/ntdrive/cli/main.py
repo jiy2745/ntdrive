@@ -254,6 +254,10 @@ def build_cli(registry: ToolRegistry) -> click.Group:
     cli.add_command(_daemon_group())
     cli.add_command(setup_command())
     cli.add_command(verify_command())
+    # `ntdrive status` is `ntdrive sys state` under the name a person types first.
+    state_spec = registry.get("sys_state")
+    if state_spec is not None:
+        cli.add_command(_make_command(state_spec), name="status")
     return cli
 
 

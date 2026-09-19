@@ -213,14 +213,14 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 |---|---|---|
 | `vm_list` | read | List registered VMs with power, debugger and terminal state. |
 | `vm_state` | read | Power, debugger and terminal state of one VM. |
-| `vm_start` | additive | Power on (or resume) a VM without the GUI by default. |
+| `vm_start` | additive | Power on (or resume) a VM without the GUI by default. discard_saved_state boots fresh when a stale saved state blocks the resume. |
 | `vm_stop` | destructive | Stop the VM: mode soft, hard or kill. hard and kill need confirm=true. |
 | `vm_reboot` | destructive | Reboot the guest (soft, hard or from the debugger) and bring kd and terminals back, the terminals under new session ids. hard needs confirm=true. |
 | `vm_suspend` | additive | Suspend the VM to disk. |
 | `vm_resume` | additive | Resume a suspended VM (same as vm_start). |
 | `vm_config` | additive | Read or change the VM hardware in the vmx: cpus, memory_mb, nic. Without arguments it reports the current values. A change needs the VM powered off. |
 | `snap_list` | read | Snapshot tree of a VM plus the current snapshot and stored metadata. |
-| `snap_take` | additive | Take a snapshot (memory included while running) and record description and kd state. |
+| `snap_take` | additive | Take a snapshot (memory included while running), record description and kd state, and return the snapshot list. |
 | `snap_revert` | destructive | Revert to a snapshot: detach kd, revert, start, reattach kd, reopen terminals. |
 | `snap_delete` | destructive | Delete a snapshot (and optionally its children). Needs confirm=true. |
 | `kd_setup_host` | additive | Prepare the host side of the kd transport: serial adds the named-pipe COM port to the vmx (VM must be off), net checks the host firewall for kd.exe and repairs it through one UAC prompt. |
@@ -274,7 +274,9 @@ requires. The one rough edge: vmrun refuses a live snapshot, or a memory snapsho
 running encrypted VM. `snap_take` and `snap_delete` then answer with
 `error.reason=encrypted_live_snapshot`, and `--allow-suspend` handles it (suspend, snapshot or
 delete, resume: terminal sessions are dropped and the debugger is reattached). A snapshot of a
-powered-off VM never needs it. What vmrun accepts is recorded in `AGENTS.md`, Things that bit us.
+powered-off VM never needs it. When the resume fails the call fails with the snapshot recorded
+and the facts in the error, and `vm_start --discard-saved-state` boots fresh when the vmx still
+names a saved state Workstation cannot restore. What vmrun accepts is recorded in `AGENTS.md`, Things that bit us.
 
 ## Safety
 

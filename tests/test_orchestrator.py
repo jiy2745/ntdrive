@@ -467,3 +467,59 @@ def test_guest_output_parsers() -> None:
     assert parse_guest_stat("") is None
     assert parse_guest_entry("run.exe|512|2026-09-14T01:02:03Z|False")["name"] == "run.exe"
     assert parse_guest_entry("bad line") is None
+
+
+async def test_snap_take_allow_suspend_reports_a_failed_resume(
+    service: NtDriveService, fake_vmrun: FakeVmrun, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The snapshot is taken and recorded, the VM is not back: the call fails with the facts."""
+    import ntdrive.core.tools.snap as snap_mod
+
+    monkeypatch.setattr(snap_mod, "_RESUME_RETRY_PAUSE", 0.0)
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_vmrun.encrypted_live_snapshot_fails = True
+    fake_vmrun.fail_start = True
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("snap_take", {"vm": "win11-dev", "name": "live2", "allow_suspend": True})
+    err = exc.value
+    assert err.code == "backend_error"
+    assert "did not resume" in err.message
+    assert err.extra["power"] == "suspended"
+    assert err.extra["completed"]["name"] == "live2"
+    assert "live2" in err.extra["completed"]["snapshots"]
+    assert err.extra["resume_error"]["code"] == "backend_error"
+    # Two start attempts, and the snapshot is on record as if the call had succeeded.
+    assert sum(1 for argv in fake_vmrun.calls if "start" in argv) == 3
+    assert "live2" in service.load_snapshot_meta("win11-dev")
+    assert str(service.state.vm("win11-dev").power) == "suspended"
+
+
+async def test_vm_start_names_a_stale_saved_state_and_discards_it(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    vmx = Path(service.config.vm("win11-dev").vmx)
+    original = vmx.read_text(encoding="latin-1")
+    vmx.write_text(
+        original + 'checkpoint.vmState = "Snapshot5.vmsn"\ncheckpoint.vmState.readOnly = "FALSE"\n',
+        encoding="latin-1",
+    )
+    health = await service.call("sys_health", {})
+    issues = next(vm["issues"] for vm in health["vms"] if vm["name"] == "win11-dev")
+    assert any("saved state" in issue for issue in issues)
+    fake_vmrun.fail_start = True
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("vm_start", {"vm": "win11-dev"})
+    assert exc.value.reason == "saved_state_stale"
+    assert "discard_saved_state" in exc.value.hint
+    assert exc.value.extra["saved_state"] == "Snapshot5.vmsn"
+    fake_vmrun.fail_start = False
+    result = await service.call("vm_start", {"vm": "win11-dev", "discard_saved_state": True})
+    assert result["power"] == "running"
+    assert result["saved_state_dropped"]["saved_state"] == "Snapshot5.vmsn"
+    assert len(result["saved_state_dropped"]["removed"]) == 2
+    text = vmx.read_text(encoding="latin-1")
+    assert "checkpoint" not in text.lower()
+    assert text.startswith(original.rstrip("\n"))
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("vm_start", {"vm": "win11-dev", "discard_saved_state": True})
+    assert exc.value.code == "invalid_args"

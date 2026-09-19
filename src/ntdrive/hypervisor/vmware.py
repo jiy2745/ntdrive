@@ -30,6 +30,7 @@ from ntdrive.errors import (
     REASON_CONFIG_UNREADABLE,
     REASON_ENCRYPTED_LIVE,
     REASON_PASSWORD_REQUIRED,
+    REASON_SAVED_STATE_STALE,
     REASON_SNAPSHOT_MISSING,
     TIMEOUT,
     VM_NOT_RUNNING,
@@ -37,7 +38,14 @@ from ntdrive.errors import (
 )
 from ntdrive.hostproc import run_hidden
 from ntdrive.hypervisor.base import HypervisorAdapter, SnapshotNode, SnapshotTree
-from ntdrive.hypervisor.vmx import apply_hardware, hardware_from_settings, vmx_settings
+from ntdrive.hypervisor.vmx import (
+    apply_hardware,
+    drop_saved_state,
+    hardware_from_settings,
+    saved_state,
+    saved_state_is_stale,
+    vmx_settings,
+)
 
 Runner = Callable[[list[str], float], Awaitable[tuple[int, str]]]
 
@@ -347,8 +355,39 @@ class VmwareAdapter(HypervisorAdapter):
         return {vm.name: _power_from(vm, running) for vm in vms}
 
     async def start(self, vm: VmConfig, gui: bool = False) -> None:
-        """`vmrun start` also resumes a suspended VM."""
-        await self._exec("start", vm, "gui" if gui else "nogui", timeout=120)
+        """`vmrun start` also resumes a suspended VM.
+
+        A start that fails while the vmx names a saved state that is not a `.vmss` next to it
+        is reported as `saved_state_stale`: vmrun only says "The operation was canceled", and
+        the fix (drop the saved state, boot fresh) is nothing an agent can guess from that.
+        """
+        try:
+            await self._exec("start", vm, "gui" if gui else "nogui", timeout=120)
+        except NtDriveError as exc:
+            if exc.code != BACKEND_ERROR or exc.reason:
+                raise
+            settings = vmx_settings(vm.vmx)
+            if not saved_state_is_stale(vm.vmx, settings):
+                raise
+            raise NtDriveError(
+                BACKEND_ERROR,
+                exc.message,
+                f"the vmx names a saved state ({saved_state(settings)}) that is not a .vmss next "
+                "to it, a leftover of a suspend or of a snapshot taken while suspended, and "
+                "Workstation cannot restore it. vm_start discard_saved_state=true drops it and "
+                "boots fresh: the disk is kept, the suspended memory is lost",
+                reason=REASON_SAVED_STATE_STALE,
+                saved_state=saved_state(settings),
+            ) from exc
+
+    async def discard_saved_state(self, vm: VmConfig) -> dict[str, Any]:
+        """Remove the checkpoint.vmState lines from the vmx, so the next start boots fresh."""
+        path = Path(vm.vmx)
+        before = saved_state(vmx_settings(vm.vmx))
+        text, removed = drop_saved_state(path.read_text(encoding="latin-1"))
+        if removed:
+            path.write_text(text, encoding="latin-1")
+        return {"saved_state": before, "removed": removed}
 
     async def stop(self, vm: VmConfig, hard: bool = False) -> None:
         """Soft stop asks the guest to shut down (needs VMware Tools)."""

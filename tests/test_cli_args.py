@@ -39,3 +39,9 @@ def test_last_free_text_positional_is_one_argument(monkeypatch: pytest.MonkeyPat
     # Single-positional tools stay strict: a typo is still an error, not a mangled VM name.
     result = runner.invoke(cli, ["--json", "vm", "state", "win11-dev", "extra"])
     assert result.exit_code != 0 and "extra" in result.output.lower()
+
+
+def test_status_is_an_alias_of_sys_state() -> None:
+    cli = build_cli(load_builtin_tools())
+    status = cli.commands["status"]
+    assert status.help == cli.commands["sys"].commands["state"].help

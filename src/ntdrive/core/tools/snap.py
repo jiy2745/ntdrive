@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -23,6 +24,7 @@ from ntdrive.errors import (
     SNAPSHOT_NOT_FOUND,
     NtDriveError,
 )
+from ntdrive.hypervisor.base import HypervisorAdapter
 
 if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
@@ -85,29 +87,85 @@ async def _suspend_run_resume(
         raise
     finally:
         # Resume no matter what, but never let a resume failure hide the original error.
-        try:
-            await adapter.start(cfg)
-        except NtDriveError as exc:
-            if failure is None:
-                raise
-            log.warning("resume after a failed snapshot op also failed: %s", exc)
+        resume_error = await _resume(adapter, cfg)
+        if resume_error is not None and failure is not None:
+            log.warning("resume after a failed snapshot op also failed: %s", resume_error)
             if isinstance(failure, NtDriveError):
                 failure.hint = (
-                    f"{failure.hint} The VM may still be suspended (resume failed: "
-                    f"{exc.message}); call vm_start."
+                    f"{failure.hint} The VM is not running either (resume failed: "
+                    f"{resume_error.message}). Call vm_start."
                 ).strip()
-    service.state.vm(cfg.name).power = PowerState.RUNNING
-    kd_status: dict[str, Any] | None = None
-    if released["kd_was_attached"]:
-        try:
-            kd_status = await service.kd_session(cfg).attach(wait_for_target=True, timeout=120)
-        except NtDriveError as exc:
-            kd_status = {"state": "detached", "error": exc.to_dict()["error"]}
-    return {
+    detail: dict[str, Any] = {
         "via": "suspend-resume",
         "terms_dropped": released["terms_dropped"],
-        "kd": kd_status,
+        "kd": None,
     }
+    if resume_error is not None:
+        # The snapshot work is done, the VM is not back. The caller finishes its bookkeeping
+        # and then fails loudly with these facts instead of pretending the VM runs.
+        power = PowerState.UNKNOWN
+        with contextlib.suppress(NtDriveError):
+            power = await service.refresh_power(cfg)
+        detail["resume_error"] = resume_error.to_dict()["error"]
+        detail["power"] = str(power)
+        return detail
+    service.state.vm(cfg.name).power = PowerState.RUNNING
+    if released["kd_was_attached"]:
+        try:
+            detail["kd"] = await service.kd_session(cfg).attach(wait_for_target=True, timeout=120)
+        except NtDriveError as exc:
+            detail["kd"] = {"state": "detached", "error": exc.to_dict()["error"]}
+    return detail
+
+
+# Pause before the second resume attempt. Right after a snapshot of a suspended VM Workstation
+# may still be rewriting files, and a first refusal has been seen to clear on its own.
+_RESUME_RETRY_PAUSE = 3.0
+
+
+async def _resume(adapter: HypervisorAdapter, cfg: VmConfig) -> NtDriveError | None:
+    """`vmrun start` after the snapshot op, once more after a pause when the first try fails.
+
+    The error of the last attempt is returned, never raised, so the caller can report the
+    snapshot work that did succeed together with the state the VM was left in.
+    """
+    last: NtDriveError | None = None
+    for attempt in range(2):
+        try:
+            await adapter.start(cfg)
+            return None
+        except NtDriveError as exc:
+            last = exc
+            log.warning("resume attempt %s failed: %s", attempt + 1, exc.message)
+            if attempt == 0:
+                await asyncio.sleep(_RESUME_RETRY_PAUSE)
+    return last
+
+
+def _raise_if_resume_failed(detail: dict[str, Any], done: str, result: dict[str, Any]) -> None:
+    """The snapshot work succeeded but the VM did not come back: fail with the facts.
+
+    `error.completed` is the result the call would have returned (the snapshot exists and is
+    recorded), `error.power` is where the VM was left, `error.resume_error` is the start error
+    with its own reason and hint (`saved_state_stale` names `vm_start discard_saved_state`).
+    """
+    err = detail.get("resume_error")
+    if not err:
+        return
+    extra: dict[str, Any] = {
+        "power": detail.get("power"),
+        "resume_error": err,
+        "completed": result,
+    }
+    if err.get("reason"):
+        extra["reason"] = err["reason"]
+    raise NtDriveError(
+        BACKEND_ERROR,
+        f"{done}, but the VM did not resume and is {detail.get('power')}: {err.get('message')}",
+        err.get("hint")
+        or "vm_start resumes it (the snapshot is safe), then term_open and kd_attach again",
+        **extra,
+    )
 
 
 class SnapNameParams(VmParams):
@@ -169,7 +227,8 @@ async def snap_list(service: NtDriveService, p: VmParams) -> dict[str, Any]:
 
 @tool(
     "snap_take",
-    "Take a snapshot (memory included while running) and record description and kd state.",
+    "Take a snapshot (memory included while running), record description and kd state, and "
+    "return the snapshot list.",
     SnapTakeParams,
     positional=("vm", "name"),
     effect="additive",
@@ -213,7 +272,14 @@ async def snap_take(service: NtDriveService, p: SnapTakeParams) -> dict[str, Any
     service.save_snapshot_meta(p.vm, meta)
     runtime.current_snapshot = p.name
     service.state.record_event(p.vm, "snapshot_take", snapshot=p.name, via=detail["via"])
-    return {"vm": p.vm, "name": p.name, **entry, **_extra(detail)}
+    result = {"vm": p.vm, "name": p.name, **entry, **_extra(detail)}
+    # The list proves the snapshot exists, so the caller need not call snap_list to check.
+    with contextlib.suppress(NtDriveError):
+        tree = await adapter.snapshot_list(cfg)
+        result["snapshots"] = tree.names()
+        result["current"] = tree.current
+    _raise_if_resume_failed(detail, f"snapshot {p.name} was taken", result)
+    return result
 
 
 @tool(
@@ -285,13 +351,15 @@ async def snap_delete(service: NtDriveService, p: SnapDeleteParams) -> dict[str,
         meta.pop(name, None)
     service.save_snapshot_meta(p.vm, meta)
     service.state.record_event(p.vm, "snapshot_delete", deleted=deleted, via=detail["via"])
-    return {
+    result = {
         "vm": p.vm,
         "deleted": deleted,
         "current": after.current,
         "via": detail["via"],
         **_extra(detail),
     }
+    _raise_if_resume_failed(detail, f"snapshot {p.name} was deleted", result)
+    return result
 
 
 def _extra(detail: dict[str, Any]) -> dict[str, Any]:

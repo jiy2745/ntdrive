@@ -148,6 +148,7 @@ def test_cli_builds_commands_for_every_tool() -> None:
         "daemon",
         "setup",
         "verify",
+        "status",
     }
     kd = groups["kd"]
     assert isinstance(kd, cli_main.click.Group)

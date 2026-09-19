@@ -18,7 +18,7 @@ from ntdrive.core.registry import tool
 from ntdrive.core.state import PowerState
 from ntdrive.core.tools.common import NoParams
 from ntdrive.errors import NtDriveError
-from ntdrive.hypervisor.vmx import vmx_settings
+from ntdrive.hypervisor.vmx import saved_state, saved_state_is_stale, vmx_settings
 from ntdrive.kd.firewall import FirewallStatus
 
 if TYPE_CHECKING:
@@ -143,6 +143,12 @@ def config_issues(cfg: VmConfig, backends: set[str]) -> list[str]:
         issues.append(
             "the VM is encrypted (a Windows 11 vTPM does this) but vms.yaml names no encryption "
             "password: set encryption_password_env"
+        )
+    if vmx_ok and saved_state_is_stale(cfg.vmx, settings):
+        issues.append(
+            f"vmx names a saved state ({saved_state(settings)}) that is not a .vmss next to "
+            "it, a leftover of a suspend or of a snapshot taken while suspended, so vmrun "
+            "start fails: vm_start discard_saved_state=true boots fresh from the disk"
         )
     return issues
 

@@ -160,6 +160,13 @@ class HypervisorAdapter(ABC):
         """
         return {}
 
+    async def discard_saved_state(self, vm: VmConfig) -> dict[str, Any]:
+        """Forget a saved (suspended) state so the next start boots fresh from the disk.
+
+        Returns {saved_state, removed}. A backend without such a state removes nothing.
+        """
+        return {"saved_state": "", "removed": []}
+
     async def kill(self, vm: VmConfig) -> dict[str, Any]:
         """End the VM's hypervisor process on the host and clear stale locks.
 

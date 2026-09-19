@@ -10,7 +10,7 @@ from ntdrive.core.orchestrator import reboot_flow
 from ntdrive.core.registry import tool
 from ntdrive.core.state import PowerState
 from ntdrive.core.tools.common import ConfirmMixin, NoParams, VmParams
-from ntdrive.errors import NtDriveError
+from ntdrive.errors import INVALID_ARGS, NtDriveError
 
 if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
@@ -20,6 +20,13 @@ class StartParams(VmParams):
     """vm_start."""
 
     gui: bool = Field(default=False, description="Show the VMware console window")
+    discard_saved_state: bool = Field(
+        default=False,
+        description=(
+            "Drop the saved (suspended) state the vmx still names and boot fresh from the disk. "
+            "For a start that failed with reason saved_state_stale. The suspended memory is lost"
+        ),
+    )
 
 
 class StopParams(VmParams, ConfirmMixin):
@@ -85,17 +92,27 @@ async def vm_state(service: NtDriveService, p: VmParams) -> dict[str, Any]:
 
 @tool(
     "vm_start",
-    "Power on (or resume) a VM without the GUI by default.",
+    "Power on (or resume) a VM without the GUI by default. discard_saved_state boots fresh "
+    "when a stale saved state blocks the resume.",
     StartParams,
     effect="additive",
 )
 async def vm_start(service: NtDriveService, p: StartParams) -> dict[str, Any]:
-    """Start the VM."""
+    """Start the VM, after dropping a stale saved state when asked to."""
     cfg = service.vm_cfg(p.vm)
-    await service.adapter_for(cfg).start(cfg, gui=p.gui)
+    adapter = service.adapter_for(cfg)
+    result: dict[str, Any] = {"vm": p.vm}
+    if p.discard_saved_state:
+        if await service.refresh_power(cfg) == PowerState.RUNNING:
+            raise NtDriveError(
+                INVALID_ARGS, f"VM {p.vm} is running, there is no saved state to discard"
+            )
+        result["saved_state_dropped"] = await adapter.discard_saved_state(cfg)
+    await adapter.start(cfg, gui=p.gui)
     power = await service.refresh_power(cfg)
-    service.state.record_event(p.vm, "start")
-    return {"vm": p.vm, "power": str(power)}
+    service.state.record_event(p.vm, "start", discard_saved_state=p.discard_saved_state)
+    result["power"] = str(power)
+    return result
 
 
 @tool(
