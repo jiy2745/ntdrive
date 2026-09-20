@@ -239,6 +239,12 @@ the disk, and the snapshot keeps the memory state. `sys_health` reports such a l
   `["{password}", "{enter}"]` types the guest password from `vms.yaml` without it crossing the
   wire. When the login screen shows more than one account, read the tile's pixel off the same
   `con_screenshot method=vnc` and `con_click vm=... x=... y=...` it first, then send the password.
-  There is no autologon tool: a locked screen is unlocked this way each time.
+  To make a reboot land on an unlocked desktop instead of unlocking by hand each time, set
+  Windows autologon: `con_autologon vm=... account=standard` writes the Winlogon keys over SSH
+  (the password comes from vms.yaml, never through the arguments) and then `vm_reboot mode=soft`
+  boots straight into the standard account's desktop. Autologon signs in one account only, so
+  pick the one the task needs (standard for a Medium-IL desktop), and `con_autologon
+  enabled=false` clears it when done. The password is stored in the guest registry in cleartext,
+  so keep it to a debugging VM.
 - Never put passwords or KDNET keys in tool arguments. They live in `vms.yaml` and environment
   variables on the host. `con_send_keys` `{password}` and `term_open` read them there for you.

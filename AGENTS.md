@@ -127,6 +127,8 @@ Commit messages follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, 
   `NtDriveError`), `transport.py`, and key tokens like `{ctrl+c}` in `keys.py`.
 - `src/ntdrive/screen/vnc.py`: the RFB (VNC) client for `con_screenshot method=vnc` (read one
   framebuffer), `con_send_keys` (KeyEvent) and `con_click` (PointerEvent), sharing one handshake.
+  `con_autologon` (in `core/tools/console.py`) is the exception: it configures Windows autologon
+  over SSH, not VNC, so a reboot opens an unlocked interactive desktop.
   `src/ntdrive/screen/keymap.py`: the `{token}` vocabulary turned into X keysym press and release
   events, the VNC counterpart of `term/keys.py`.
 - `src/ntdrive/daemon/`: the aiohttp app (`app.py`), the `daemon.json` lifecycle (`lifecycle.py`),

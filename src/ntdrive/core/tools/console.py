@@ -68,6 +68,28 @@ class ClickParams(VmParams):
 _BUTTON_MASK = {"left": 1, "middle": 2, "right": 4}
 
 
+class AutologonParams(VmParams):
+    """con_autologon."""
+
+    enabled: bool = Field(default=True, description="true sets autologon, false clears it")
+    account: Literal["admin", "standard"] = Field(
+        default="standard",
+        description=(
+            "Which guest account logs in automatically at boot: standard (guest.standard_user, a "
+            "plain Medium-IL desktop, the safer default) or admin (guest.user)"
+        ),
+    )
+
+
+# The registry key that Winlogon reads at boot for automatic logon.
+_WINLOGON = r"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+
+
+def _ps_literal(value: str) -> str:
+    """A string as a PowerShell single-quoted literal body (single quotes are doubled)."""
+    return value.replace("'", "''")
+
+
 def _out_path(service: NtDriveService, vm: str) -> str:
     out_dir = service.log_dir / "screens"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -190,6 +212,80 @@ async def con_click(service: NtDriveService, p: ClickParams) -> dict[str, Any]:
     await vnc.send_pointer(endpoint[0], endpoint[1], "", events)
     service.state.record_event(p.vm, "con_click", x=p.x, y=p.y, button=p.button)
     return {"vm": p.vm, "clicked": [p.x, p.y], "button": p.button, "double": p.double}
+
+
+@tool(
+    "con_autologon",
+    "Configure Windows automatic logon in the guest so a reboot lands on an unlocked interactive "
+    "desktop (session 1), which term_* over SSH (session 0) cannot open. enabled=false clears it. "
+    "needs_reboot: run vm_reboot mode=soft next.",
+    AutologonParams,
+    positional=("vm",),
+    touches_guest=True,
+    effect="additive",
+    idempotent=True,
+)
+async def con_autologon(service: NtDriveService, p: AutologonParams) -> dict[str, Any]:
+    """Set or clear the Winlogon autologon keys over SSH.
+
+    The password comes from vms.yaml inside the daemon and is written to the guest's
+    DefaultPassword value, so it stays out of the tool arguments, the result and the audit log.
+    That value is stored in the guest registry in cleartext, which is how Windows autologon
+    works, so use this on a debugging VM and clear it (enabled=false) when done.
+    """
+    cfg = service.vm_cfg(p.vm)
+    user, password = cfg.guest.credentials(p.account)
+    if p.enabled and not user:
+        field = "standard_user" if p.account == "standard" else "user"
+        raise NtDriveError(
+            INVALID_ARGS,
+            f"{p.vm} has no {p.account} account (guest.{field} is empty)",
+            "add it in vms.yaml (setup-guest.cmd -Standard creates ntdrive-user), or pass "
+            "account=admin",
+        )
+    service.ensure_not_frozen(p.vm)
+    await service.ensure_running(cfg)
+    transport = await service.transport(cfg)
+    if not hasattr(transport, "exec_once"):
+        raise NtDriveError(BACKEND_ERROR, "the transport cannot run commands")
+    if p.enabled:
+        # DefaultPassword goes last so no secret sits in the first characters of the command.
+        script = "; ".join(
+            [
+                f"$w = '{_WINLOGON}'",
+                "Set-ItemProperty -Path $w -Name AutoAdminLogon -Value '1'",
+                f"Set-ItemProperty -Path $w -Name DefaultUserName -Value '{_ps_literal(user)}'",
+                "Set-ItemProperty -Path $w -Name DefaultDomainName -Value $env:COMPUTERNAME",
+                "Remove-ItemProperty -Path $w -Name AutoLogonCount -ErrorAction SilentlyContinue",
+                f"Set-ItemProperty -Path $w -Name DefaultPassword -Value '{_ps_literal(password)}'",
+            ]
+        )
+    else:
+        script = "; ".join(
+            [
+                f"$w = '{_WINLOGON}'",
+                "Set-ItemProperty -Path $w -Name AutoAdminLogon -Value '0'",
+                "Remove-ItemProperty -Path $w -Name DefaultPassword -ErrorAction SilentlyContinue",
+            ]
+        )
+    code, out = await transport.exec_once(script, timeout=60)
+    if code != 0:
+        detail = out.strip()[:300]
+        if password:
+            detail = detail.replace(password, "***")
+        raise NtDriveError(
+            BACKEND_ERROR,
+            f"could not set autologon in {p.vm}: {detail}",
+            "the SSH account needs administrator rights",
+        )
+    service.state.record_event(p.vm, "con_autologon", enabled=p.enabled, account=p.account)
+    return {
+        "vm": p.vm,
+        "enabled": p.enabled,
+        "account": p.account,
+        "user": user if p.enabled else None,
+        "needs_reboot": True,
+    }
 
 
 @tool(
