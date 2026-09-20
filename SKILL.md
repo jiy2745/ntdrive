@@ -128,7 +128,9 @@ kd_wait_event vm=win11-dev timeout=600     -> event=bugcheck
 kd_exec vm=win11-dev cmd="!analyze -v"
 kd_exec vm=win11-dev cmd=".dump /f C:\\dumps\\crash.dmp"   # written on the host, no guest needed
 con_screenshot vm=win11-dev                -> png_path. vmrun captureScreen needs a working guest login, so for a login screen, a boot hang or a frozen guest enable VNC once (con_enable_vnc, VM off) and use con_screenshot method=vnc, which reads the framebuffer with no guest login
-con_send_keys vm=win11-dev keys=["{password}","{enter}"]  -> log in at a lock or login screen over VNC, no SSH
+con_screenshot vm=win11-dev method=vnc     -> read the pixel of a user tile or field on the lock screen
+con_click vm=win11-dev x=640 y=400         -> click it over VNC (framebuffer pixels), no guest login
+con_send_keys vm=win11-dev keys=["{password}","{enter}"]  -> then type the password over VNC, no SSH
 snap_revert vm=win11-dev name=base-kd      -> steps: kd_detach, term_drop, snapshot_revert, start,
                                               kd_attach, guest_ip, term_reopen, and term: [{old, new}]
 ```
@@ -235,6 +237,8 @@ the disk, and the snapshot keeps the memory state. `sys_health` reports such a l
   `con_screenshot method=vnc` shows a lock or login screen, log in over the console with
   `con_send_keys` (VNC must be on, `con_enable_vnc` with the VM off): `con_send_keys vm=... keys=`
   `["{password}", "{enter}"]` types the guest password from `vms.yaml` without it crossing the
-  wire. There is no autologon tool: a locked screen is unlocked this way each time.
+  wire. When the login screen shows more than one account, read the tile's pixel off the same
+  `con_screenshot method=vnc` and `con_click vm=... x=... y=...` it first, then send the password.
+  There is no autologon tool: a locked screen is unlocked this way each time.
 - Never put passwords or KDNET keys in tool arguments. They live in `vms.yaml` and environment
   variables on the host. `con_send_keys` `{password}` and `term_open` read them there for you.

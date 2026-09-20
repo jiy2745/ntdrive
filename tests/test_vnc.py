@@ -142,9 +142,12 @@ async def test_con_screenshot_vnc_reads_the_framebuffer_without_a_guest_login(
         assert auto["via"] == "vnc"
 
 
-async def _fake_rfb_key_server() -> tuple[asyncio.AbstractServer, int, list[tuple[int, bool]]]:
-    """A minimal RFB 3.8 server that handshakes then records the KeyEvent messages it receives."""
-    recorded: list[tuple[int, bool]] = []
+async def _fake_rfb_input_server() -> tuple[
+    asyncio.AbstractServer, int, list[tuple[int, bool]], list[tuple[int, int, int]]
+]:
+    """A minimal RFB 3.8 server that handshakes then records KeyEvent and PointerEvent messages."""
+    keys: list[tuple[int, bool]] = []
+    pointers: list[tuple[int, int, int]] = []
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -163,10 +166,15 @@ async def _fake_rfb_key_server() -> tuple[asyncio.AbstractServer, int, list[tupl
             await writer.drain()
             while True:
                 head = await reader.readexactly(1)
-                if head[0] != 4:  # only KeyEvent is expected here
+                if head[0] == 4:  # KeyEvent: down(1) + padding(2) + keysym(4)
+                    body = await reader.readexactly(7)
+                    keys.append((struct.unpack(">I", body[3:7])[0], bool(body[0])))
+                elif head[0] == 5:  # PointerEvent: mask(1) + x(2) + y(2)
+                    body = await reader.readexactly(5)
+                    x, y = struct.unpack(">HH", body[1:5])
+                    pointers.append((body[0], x, y))
+                else:
                     break
-                body = await reader.readexactly(7)  # down(1) + padding(2) + keysym(4)
-                recorded.append((struct.unpack(">I", body[3:7])[0], bool(body[0])))
         except (asyncio.IncompleteReadError, ConnectionError):
             pass
         finally:
@@ -174,13 +182,13 @@ async def _fake_rfb_key_server() -> tuple[asyncio.AbstractServer, int, list[tupl
 
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    return server, port, recorded
+    return server, port, keys, pointers
 
 
 async def test_send_keys_presses_and_releases_over_the_wire() -> None:
     from ntdrive.screen import keymap
 
-    server, port, recorded = await _fake_rfb_key_server()
+    server, port, recorded, _ = await _fake_rfb_input_server()
     async with server:
         events = keymap.flatten(keymap.key_strokes(["A", "{enter}"]))
         sent = await vnc.send_keys("127.0.0.1", port, "", events)
@@ -196,12 +204,62 @@ async def test_send_keys_presses_and_releases_over_the_wire() -> None:
     ]
 
 
+async def test_send_pointer_moves_presses_and_releases() -> None:
+    server, port, _, pointers = await _fake_rfb_input_server()
+    async with server:
+        events = [(0, 10, 20), (1, 10, 20), (0, 10, 20)]
+        sent = await vnc.send_pointer("127.0.0.1", port, "", events)
+        await asyncio.sleep(0.1)
+    assert sent == 3
+    assert pointers == [(0, 10, 20), (1, 10, 20), (0, 10, 20)]
+
+
+async def test_con_click_left_and_double(
+    service: NtDriveService, config: Config, fake_vmrun: FakeVmrun
+) -> None:
+    server, port, _, pointers = await _fake_rfb_input_server()
+    async with server:
+        vm = config.vm("win11-dev")
+        Path(vm.vmx).write_text(
+            f'displayName = "x"\nRemoteDisplay.vnc.enabled = "TRUE"\nRemoteDisplay.vnc.port = "{port}"\n',
+            encoding="latin-1",
+        )
+        await service.call("vm_start", {"vm": "win11-dev"})
+        single = await service.call("con_click", {"vm": "win11-dev", "x": 42, "y": 99})
+        double = await service.call(
+            "con_click", {"vm": "win11-dev", "x": 7, "y": 8, "button": "right", "double": True}
+        )
+        await asyncio.sleep(0.1)
+    assert single == {"vm": "win11-dev", "clicked": [42, 99], "button": "left", "double": False}
+    assert double == {"vm": "win11-dev", "clicked": [7, 8], "button": "right", "double": True}
+    assert pointers == [
+        (0, 42, 99),  # move, left down, left up
+        (1, 42, 99),
+        (0, 42, 99),
+        (0, 7, 8),  # move, right down, right up, right down, right up (double)
+        (4, 7, 8),
+        (0, 7, 8),
+        (4, 7, 8),
+        (0, 7, 8),
+    ]
+
+
+async def test_con_click_needs_vnc_enabled(
+    service: NtDriveService, config: Config, fake_vmrun: FakeVmrun
+) -> None:
+    Path(config.vm("win11-dev").vmx).write_text('displayName = "x"\n', encoding="latin-1")
+    await service.call("vm_start", {"vm": "win11-dev"})
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("con_click", {"vm": "win11-dev", "x": 1, "y": 1})
+    assert exc.value.code == "backend_error" and "con_enable_vnc" in exc.value.hint
+
+
 async def test_con_send_keys_types_the_password_without_leaking_it(
     service: NtDriveService, config: Config, fake_vmrun: FakeVmrun
 ) -> None:
     import json
 
-    server, port, recorded = await _fake_rfb_key_server()
+    server, port, recorded, _ = await _fake_rfb_input_server()
     async with server:
         vm = config.vm("win11-dev")
         Path(vm.vmx).write_text(

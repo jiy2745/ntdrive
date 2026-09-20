@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import struct
 import zlib
+from collections.abc import Awaitable, Callable
 
 from ntdrive.errors import BACKEND_ERROR, TIMEOUT, NtDriveError
 
@@ -169,6 +170,26 @@ async def capture(host: str, port: int, password: str, out_path: str, timeout: f
         ) from exc
 
 
+async def _run_rfb(
+    host: str, port: int, verb: str, timeout: float, factory: Callable[[], Awaitable[int]]
+) -> int:
+    """Run one RFB input session with a timeout, mapping failures the way capture does."""
+    try:
+        return await asyncio.wait_for(factory(), timeout)
+    except TimeoutError as exc:
+        raise NtDriveError(
+            TIMEOUT,
+            f"VNC {verb} to {host}:{port} timed out after {timeout:.0f}s",
+            "check that RemoteDisplay.vnc is enabled in the vmx and the VM is running",
+        ) from exc
+    except (OSError, asyncio.IncompleteReadError) as exc:
+        raise NtDriveError(
+            BACKEND_ERROR,
+            f"VNC {verb} to {host}:{port} failed: {exc}",
+            "enable RemoteDisplay.vnc in the vmx with the VM off, then start it (con_enable_vnc)",
+        ) from exc
+
+
 async def send_keys(
     host: str,
     port: int,
@@ -177,20 +198,25 @@ async def send_keys(
     timeout: float = 15.0,
 ) -> int:
     """Connect to an RFB server and send KeyEvent messages. Returns the number of events sent."""
-    try:
-        return await asyncio.wait_for(_send_keys(host, port, password, events), timeout)
-    except TimeoutError as exc:
-        raise NtDriveError(
-            TIMEOUT,
-            f"VNC key input to {host}:{port} timed out after {timeout:.0f}s",
-            "check that RemoteDisplay.vnc is enabled in the vmx and the VM is running",
-        ) from exc
-    except (OSError, asyncio.IncompleteReadError) as exc:
-        raise NtDriveError(
-            BACKEND_ERROR,
-            f"VNC key input to {host}:{port} failed: {exc}",
-            "enable RemoteDisplay.vnc in the vmx with the VM off, then start it (con_enable_vnc)",
-        ) from exc
+    return await _run_rfb(
+        host, port, "key input", timeout, lambda: _send_keys(host, port, password, events)
+    )
+
+
+async def send_pointer(
+    host: str,
+    port: int,
+    password: str,
+    events: list[tuple[int, int, int]],
+    timeout: float = 15.0,
+) -> int:
+    """Connect to an RFB server and send PointerEvent messages (button mask, x, y).
+
+    Coordinates are framebuffer pixels, the same ones con_screenshot method=vnc captures.
+    """
+    return await _run_rfb(
+        host, port, "pointer input", timeout, lambda: _send_pointer(host, port, password, events)
+    )
 
 
 async def _send_keys(host: str, port: int, password: str, events: list[tuple[int, bool]]) -> int:
@@ -202,6 +228,24 @@ async def _send_keys(host: str, port: int, password: str, events: list[tuple[int
             writer.write(struct.pack(">BBHI", 4, 1 if down else 0, 0, keysym))
         await writer.drain()
         # Let the server consume the events before the connection drops.
+        await asyncio.sleep(0.05)
+        return len(events)
+    finally:
+        writer.close()
+        with contextlib.suppress(BaseException):
+            await writer.wait_closed()
+
+
+async def _send_pointer(
+    host: str, port: int, password: str, events: list[tuple[int, int, int]]
+) -> int:
+    reader, writer = await asyncio.open_connection(host, port)
+    try:
+        await _handshake(reader, writer, password)
+        for mask, x, y in events:
+            # PointerEvent: message type 5, button mask, x, y.
+            writer.write(struct.pack(">BBHH", 5, mask, x, y))
+        await writer.drain()
         await asyncio.sleep(0.05)
         return len(events)
     finally:

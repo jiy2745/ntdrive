@@ -53,6 +53,21 @@ class SendKeysParams(VmParams):
     )
 
 
+class ClickParams(VmParams):
+    """con_click."""
+
+    x: int = Field(
+        ge=0, le=65535, description="X in framebuffer pixels (con_screenshot method=vnc)"
+    )
+    y: int = Field(ge=0, le=65535, description="Y in framebuffer pixels")
+    button: Literal["left", "right", "middle"] = Field(default="left", description="Which button")
+    double: bool = Field(default=False, description="Double-click instead of a single click")
+
+
+# RFB button mask bits: left 1, middle 2, right 4.
+_BUTTON_MASK = {"left": 1, "middle": 2, "right": 4}
+
+
 def _out_path(service: NtDriveService, vm: str) -> str:
     out_dir = service.log_dir / "screens"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -144,6 +159,37 @@ async def con_send_keys(service: NtDriveService, p: SendKeysParams) -> dict[str,
     await vnc.send_keys(endpoint[0], endpoint[1], "", keymap.flatten(strokes))
     service.state.record_event(p.vm, "con_send_keys", keys=len(p.keys))
     return {"vm": p.vm, "sent": len(p.keys)}
+
+
+@tool(
+    "con_click",
+    "Click the VM console at a framebuffer pixel over VNC, no guest login needed. Read the "
+    "coordinate off con_screenshot method=vnc (same pixels), for example to pick a user tile on "
+    "the lock screen, then con_send_keys for the password.",
+    ClickParams,
+    positional=("vm", "x", "y"),
+    touches_guest=True,
+    effect="destructive",
+)
+async def con_click(service: NtDriveService, p: ClickParams) -> dict[str, Any]:
+    """Move the pointer to (x, y) and click, through the VNC framebuffer server."""
+    cfg = service.vm_cfg(p.vm)
+    endpoint = service.adapter_for(cfg).vnc_endpoint(cfg)
+    if endpoint is None:
+        raise NtDriveError(
+            BACKEND_ERROR,
+            f"VNC is not enabled for {p.vm}",
+            "run con_enable_vnc with the VM off, then start it",
+        )
+    await service.ensure_running(cfg)
+    mask = _BUTTON_MASK[p.button]
+    # Move there with no button, press, release. A double-click presses and releases twice.
+    events = [(0, p.x, p.y), (mask, p.x, p.y), (0, p.x, p.y)]
+    if p.double:
+        events += [(mask, p.x, p.y), (0, p.x, p.y)]
+    await vnc.send_pointer(endpoint[0], endpoint[1], "", events)
+    service.state.record_event(p.vm, "con_click", x=p.x, y=p.y, button=p.button)
+    return {"vm": p.vm, "clicked": [p.x, p.y], "button": p.button, "double": p.double}
 
 
 @tool(
