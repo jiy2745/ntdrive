@@ -89,6 +89,16 @@ class HypervisorAdapter(ABC):
         """Suspend to disk."""
 
     @abstractmethod
+    async def clone(
+        self, source: VmConfig, dst_vmx: str, name: str, snapshot: str, linked: bool
+    ) -> None:
+        """Create a clone at dst_vmx from the source's snapshot (linked shares the base disk)."""
+
+    @abstractmethod
+    async def delete_vm(self, vm: VmConfig) -> None:
+        """Unregister the VM and delete its files (the VM must be powered off)."""
+
+    @abstractmethod
     async def snapshot_take(self, vm: VmConfig, name: str) -> None:
         """Take a snapshot; includes memory when the VM is running."""
 

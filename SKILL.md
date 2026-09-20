@@ -46,6 +46,12 @@ Rules that follow from the state model:
    `sys_state` adds power, which costs one `vmrun list` (about half a second) for every VM of the
    call. `sys_health` probes the guest too and is the slowest, so call it first and then when
    something is wrong, not as a heartbeat.
+5. One VM is one shared resource: a `kd_break` freezes it and a revert or reboot drops its
+   sessions, so several agents must not share a VM. To work in parallel, give each agent its own
+   VM with `vm_clone` (a linked clone shares the base disk, so it is cheap, but a running clone
+   uses its own RAM, so keep only as many running as the host has memory for) and `vm_delete` it
+   when done. A fresh clone's guest still points at the base's debugger, so run `kd_setup_guest`
+   then `vm_reboot mode=soft` on the clone before `kd_attach`.
 
 ## Standard procedures
 

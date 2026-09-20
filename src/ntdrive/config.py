@@ -255,6 +255,43 @@ def write_raw_config(path: str | os.PathLike[str], data: dict[str, Any]) -> None
     target.write_text(CONFIG_HEADER + body, encoding="utf-8", newline="\n")
 
 
+FIRST_KDNET_PORT = 50000
+
+
+def next_kdnet_port(config: Config) -> int:
+    """The first KDNET port from 50000 that no net-transport VM in the config uses."""
+    used = {v.kdnet.port for v in config.vms.values() if v.kd_transport == "net"}
+    port = FIRST_KDNET_PORT
+    while port in used:
+        port += 1
+    return port
+
+
+def add_vm_config(config: Config, vm: VmConfig) -> None:
+    """Persist a new VM entry to vms.yaml and register it in the loaded config."""
+    if not config.path:
+        raise NtDriveError(INVALID_ARGS, "no vms.yaml to save into", "run ntdrive setup first")
+    raw = read_raw_config(config.path)
+    vms = raw.setdefault("vms", {})
+    if vm.name in vms:
+        raise NtDriveError(INVALID_ARGS, f"VM {vm.name} is already registered")
+    vms[vm.name] = vm.model_dump(mode="json", exclude_defaults=True, exclude={"name"})
+    write_raw_config(config.path, raw)
+    config.vms[vm.name] = vm
+
+
+def remove_vm_config(config: Config, name: str) -> None:
+    """Remove a VM entry from vms.yaml and the loaded config."""
+    if not config.path:
+        raise NtDriveError(INVALID_ARGS, "no vms.yaml to remove from")
+    raw = read_raw_config(config.path)
+    vms = raw.get("vms") or {}
+    vms.pop(name, None)
+    raw["vms"] = vms
+    write_raw_config(config.path, raw)
+    config.vms.pop(name, None)
+
+
 def save_kdnet_settings(config: Config, vm_name: str, port: int, key: str) -> None:
     """Persist the KDNET port and key for a VM back into vms.yaml."""
     if not config.path:

@@ -221,6 +221,8 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `vm_suspend` | additive | Suspend the VM to disk. |
 | `vm_resume` | additive | Resume a suspended VM (same as vm_start). |
 | `vm_config` | additive | Read or change the VM hardware in the vmx: cpus, memory_mb, nic. Without arguments it reports the current values. A change needs the VM powered off. |
+| `vm_clone` | additive | Clone a VM into a new registered VM, for giving each agent its own guest. A linked clone shares the base disk (cheap) but a running clone uses its own RAM. The clone gets its own KDNET port, so set its debugger on the guest (kd_setup_guest, reboot) before kd_attach. |
+| `vm_delete` | destructive | Delete a VM and its files (a clone, usually). Powers it off first. Needs confirm=true. A base VM with linked clones cannot be deleted until the clones are gone. |
 | `snap_list` | read | Snapshot tree of a VM plus the current snapshot and stored metadata. |
 | `snap_take` | additive | Take a snapshot (memory included while running), record description and kd state, and return the snapshot list. |
 | `snap_revert` | destructive | Revert to a snapshot: detach kd, revert, start, reattach kd, reopen terminals. |

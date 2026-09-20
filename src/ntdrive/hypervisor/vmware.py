@@ -401,6 +401,25 @@ class VmwareAdapter(HypervisorAdapter):
         """Suspend to disk."""
         await self._exec("suspend", vm, "hard", timeout=180)
 
+    async def clone(
+        self, source: VmConfig, dst_vmx: str, name: str, snapshot: str, linked: bool
+    ) -> None:
+        """`vmrun clone`: a linked clone shares the source disk, a full clone copies it whole."""
+        mode = "linked" if linked else "full"
+        await self._exec(
+            "clone",
+            source,
+            dst_vmx,
+            mode,
+            f"-snapshot={snapshot}",
+            f"-cloneName={name}",
+            timeout=600,
+        )
+
+    async def delete_vm(self, vm: VmConfig) -> None:
+        """`vmrun deleteVM`: unregister and delete the VM's files. The VM must be powered off."""
+        await self._exec("deleteVM", vm, timeout=120)
+
     async def snapshot_take(self, vm: VmConfig, name: str) -> None:
         """Snapshot; vmrun includes memory when the VM is running."""
         await self._exec("snapshot", vm, name, timeout=600)

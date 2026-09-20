@@ -105,6 +105,15 @@ class FakeVmrun:
                 return 4294967295, "Error: Authentication for encrypted virtual machine failed"
             self.snapshots = [(n, d) for n, d in self.snapshots if n != rest[1]]
             return 0, ""
+        if cmd == "clone":
+            # rest = [source_vmx, dst_vmx, mode, -snapshot=..., -cloneName=...]. Make the dst file.
+            dst = Path(rest[1])
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text('displayName = "clone"\n', encoding="latin-1")
+            return 0, ""
+        if cmd == "deleteVM":
+            Path(rest[0]).unlink(missing_ok=True)
+            return 0, ""
         if cmd == "getGuestIPAddress":
             return 0, self.ip + "\n"
         if cmd == "captureScreen":

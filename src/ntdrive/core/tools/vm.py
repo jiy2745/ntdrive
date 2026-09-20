@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 
+from ntdrive.config import KdnetConfig, add_vm_config, next_kdnet_port, remove_vm_config
 from ntdrive.core.orchestrator import reboot_flow
 from ntdrive.core.registry import tool
 from ntdrive.core.state import PowerState
 from ntdrive.core.tools.common import ConfirmMixin, NoParams, VmParams
-from ntdrive.errors import INVALID_ARGS, NtDriveError
+from ntdrive.errors import INVALID_ARGS, SNAPSHOT_NOT_FOUND, NtDriveError
 
 if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
+
+# A clone name is a config key and a folder name, so keep it to safe characters.
+_CLONE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+class DeleteParams(VmParams, ConfirmMixin):
+    """vm_delete."""
 
 
 class StartParams(VmParams):
@@ -240,3 +250,99 @@ async def vm_config(service: NtDriveService, p: ConfigParams) -> dict[str, Any]:
         "before": before,
         "changed": result["changed"],
     }
+
+
+class CloneParams(VmParams):
+    """vm_clone."""
+
+    name: str = Field(description="Name for the new clone (its config key and vmx folder)")
+    snapshot: str | None = Field(
+        default=None, description="Source snapshot to clone from; the current one when omitted"
+    )
+    linked: bool = Field(
+        default=True,
+        description=(
+            "Linked clone (shares the base disk, only its own changes take space) or a full copy. "
+            "A running clone still uses its own RAM, so run only as many as the host has memory for"
+        ),
+    )
+
+
+@tool(
+    "vm_clone",
+    "Clone a VM into a new registered VM, for giving each agent its own guest. A linked clone "
+    "shares the base disk (cheap) but a running clone uses its own RAM. The clone gets its own "
+    "KDNET port, so set its debugger on the guest (kd_setup_guest, reboot) before kd_attach.",
+    CloneParams,
+    positional=("vm", "name"),
+    effect="additive",
+)
+async def vm_clone(service: NtDriveService, p: CloneParams) -> dict[str, Any]:
+    """Create a clone from a snapshot and register it as a new VM in vms.yaml."""
+    src = service.vm_cfg(p.vm)
+    if not _CLONE_NAME.match(p.name):
+        raise NtDriveError(
+            INVALID_ARGS, "clone name may use letters, digits, dot, dash and underscore only"
+        )
+    if p.name in service.config.vms:
+        raise NtDriveError(INVALID_ARGS, f"a VM named {p.name} is already registered")
+    adapter = service.adapter_for(src)
+    tree = await adapter.snapshot_list(src)
+    snapshot = p.snapshot or tree.current
+    if not snapshot:
+        raise NtDriveError(
+            INVALID_ARGS,
+            f"{p.vm} has no snapshot to clone from",
+            "snap_take a snapshot first, or pass snapshot=",
+        )
+    if snapshot not in tree.names():
+        raise NtDriveError(
+            SNAPSHOT_NOT_FOUND,
+            f"{p.vm} has no snapshot named {snapshot}",
+            f"known snapshots: {', '.join(tree.names()) or '(none)'}",
+        )
+    dst_vmx = str(Path(src.vmx).parent / "ntdrive-clones" / p.name / f"{p.name}.vmx")
+    await adapter.clone(src, dst_vmx, p.name, snapshot, p.linked)
+    clone = src.model_copy(deep=True)
+    clone.name = p.name
+    clone.vmx = dst_vmx
+    clone.serial_pipe = ""  # re-derives from the new name
+    if clone.kd_transport == "net":
+        clone.kdnet = KdnetConfig(port=next_kdnet_port(service.config), key=clone.kdnet.key)
+    add_vm_config(service.config, clone)
+    service.state.record_event(p.name, "vm_clone", source=p.vm, linked=p.linked)
+    return {
+        "vm": p.name,
+        "source": p.vm,
+        "vmx": dst_vmx,
+        "linked": p.linked,
+        "snapshot": snapshot,
+        "kd_transport": clone.kd_transport,
+        "kdnet_port": clone.kdnet.port if clone.kd_transport == "net" else None,
+        "note": (
+            "the clone shares the base guest, so its accounts and disk match. It has its own KDNET "
+            "port (net) or pipe (serial), but the guest still points at the base's, so run "
+            "kd_setup_guest on the clone then vm_reboot mode=soft before kd_attach"
+        ),
+    }
+
+
+@tool(
+    "vm_delete",
+    "Delete a VM and its files (a clone, usually). Powers it off first. Needs confirm=true. A "
+    "base VM with linked clones cannot be deleted until the clones are gone.",
+    DeleteParams,
+    destructive=True,
+    effect="destructive",
+)
+async def vm_delete(service: NtDriveService, p: DeleteParams) -> dict[str, Any]:
+    """Detach the debugger, drop terminals, power off, delete the VM, drop its config entry."""
+    cfg = service.vm_cfg(p.vm)
+    adapter = service.adapter_for(cfg)
+    released = await service.release_guest(p.vm)
+    if await service.refresh_power(cfg) != PowerState.OFF:
+        await adapter.stop(cfg, hard=True)
+    await adapter.delete_vm(cfg)
+    remove_vm_config(service.config, p.vm)
+    service.state.record_event(p.vm, "vm_delete")
+    return {"vm": p.vm, "deleted": True, "terms_dropped": released["terms_dropped"]}
