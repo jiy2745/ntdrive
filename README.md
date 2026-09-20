@@ -156,9 +156,11 @@ VS Code (`.vscode/mcp.json`), and Cursor takes the Claude Desktop shape in `.cur
 
 The CLI has the same tools as subcommands. The first call auto-starts the daemon.
 
-The daemon and the vmrun and kd.exe processes it starts run without console windows, so nothing
-pops up on the desktop. `ntdrive daemon status` says whether it is up, and its own output
-goes to `%LOCALAPPDATA%\ntdrive\logs\daemon.out.log`.
+The daemon runs windowless (started with `pythonw.exe`, detached), and the vmrun and kd.exe
+processes it starts are hidden too, so nothing pops up on the desktop. `ntdrive daemon status`
+says whether it is up. `ntdrive daemon logs -f` follows what it is doing: one line per tool call
+(name, caller, outcome, never the arguments) plus the daemon's own messages, from
+`%LOCALAPPDATA%\ntdrive\logs\daemon.out.log`.
 
 ```powershell
 ntdrive sys health                 # host binaries and config, then each VM live: power, SSH, debugger transport

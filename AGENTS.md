@@ -188,10 +188,16 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   window on the desktop, and `CREATE_NO_WINDOW` alone still lets conhost flash for a frame.
   `ntdrive.hostproc` (`run_hidden`, `no_window_kwargs`) pairs it with a hidden `STARTUPINFO`, and
   vmrun and the PowerShell helpers go through it, so start every new host subprocess there.
-  `daemon/lifecycle.py` applies the same hidden STARTUPINFO when it starts ntdrived. kd.exe takes
+  `daemon/lifecycle.py` starts ntdrived with `pythonw.exe` (`_daemon_executable`, the GUI-subsystem
+  interpreter that never allocates a console) plus `DETACHED_PROCESS` and the same hidden
+  STARTUPINFO, so the daemon cannot flash a window even for a frame. kd.exe takes
   `no_window_kwargs` too but keeps a console of its own (with `CREATE_NEW_PROCESS_GROUP`) because
   break-in attaches to that console to send CTRL_BREAK. `tests/test_kd.py` checks that delivery
   from a detached parent, so keep it green when touching `spawn_kd`.
+- The daemon has no window, so `service.call` logs one line per tool call (name, caller, outcome,
+  never the arguments, which may hold secrets) through the `ntdrive.call` logger to
+  `daemon.out.log`. `ntdrive daemon logs [-f]` tails it: that is how a person watches what an
+  agent is doing. Do not log argument values there.
 - `vms.yaml` used to be looked up in the working directory too, so the daemon picked up whatever
   checkout the first client ran from. The config now lives only in `%LOCALAPPDATA%\ntdrive` (or
   `NTDRIVE_CONFIG`, or `--config`), clients resolve it and pass `--config`, and `ensure_daemon`

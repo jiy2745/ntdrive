@@ -45,3 +45,22 @@ def test_status_is_an_alias_of_sys_state() -> None:
     cli = build_cli(load_builtin_tools())
     status = cli.commands["status"]
     assert status.help == cli.commands["sys"].commands["state"].help
+
+
+def test_daemon_logs_prints_the_tail(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    log = tmp_path / "daemon.out.log"
+    log.write_text("first\ncli con_send_keys win11 ok (12 ms)\n", encoding="utf-8")
+    monkeypatch.setattr(main_mod, "daemon_log_path", lambda: log)
+    cli = build_cli(load_builtin_tools())
+    result = CliRunner().invoke(cli, ["daemon", "logs", "--lines", "1"])
+    assert result.exit_code == 0, result.output
+    assert "con_send_keys win11 ok" in result.output
+    assert "first" not in result.output  # only the last line was asked for
+
+
+def test_daemon_logs_without_a_file_says_so(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    monkeypatch.setattr(main_mod, "daemon_log_path", lambda: tmp_path / "nope.log")
+    cli = build_cli(load_builtin_tools())
+    result = CliRunner().invoke(cli, ["daemon", "logs"])
+    assert result.exit_code == 0
+    assert "no daemon log yet" in result.output

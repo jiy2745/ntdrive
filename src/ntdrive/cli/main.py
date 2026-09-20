@@ -7,8 +7,10 @@ Extra commands that are not tools: `daemon start|stop|status|restart` and `term 
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
+import time
 import types
 import typing
 from typing import Any, get_args, get_origin
@@ -23,7 +25,13 @@ from ntdrive.cli.setup import setup_command
 from ntdrive.cli.verify import verify_command
 from ntdrive.core.registry import ToolRegistry, ToolSpec, load_builtin_tools
 from ntdrive.daemon.client import DaemonClient, connect
-from ntdrive.daemon.lifecycle import ensure_daemon, read_info, restart_daemon, stop_daemon
+from ntdrive.daemon.lifecycle import (
+    daemon_log_path,
+    ensure_daemon,
+    read_info,
+    restart_daemon,
+    stop_daemon,
+)
 from ntdrive.errors import (
     CONFIRM_REQUIRED,
     GUEST_FROZEN_BY_DEBUGGER,
@@ -324,6 +332,35 @@ def _daemon_group() -> click.Group:
             fail(ctx, exc)
             return
         emit(ctx, {"running": True, "pid": info.pid, "url": info.base_url})
+
+    @daemon.command("logs")
+    @click.option("-f", "--follow", is_flag=True, help="Keep printing new lines until Ctrl+C")
+    @click.option(
+        "-n", "--lines", default=40, show_default=True, help="Trailing lines to show first"
+    )
+    @click.pass_context
+    def logs(ctx: click.Context, follow: bool, lines: int) -> None:
+        """Show the detached daemon's output: one line per tool call, plus its own messages.
+
+        The daemon has no window of its own, so this is where you watch what an agent is doing.
+        """
+        path = daemon_log_path()
+        if not path.exists():
+            click.echo(f"no daemon log yet at {path} (start the daemon first)", err=True)
+            return
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh.readlines()[-lines:]:
+                click.echo(line.rstrip("\n"))
+            if not follow:
+                return
+            fh.seek(0, 2)
+            with contextlib.suppress(KeyboardInterrupt):
+                while True:
+                    line = fh.readline()
+                    if line:
+                        click.echo(line.rstrip("\n"))
+                    else:
+                        time.sleep(0.3)
 
     return daemon
 

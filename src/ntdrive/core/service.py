@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -44,6 +45,10 @@ from ntdrive.term.transport import TermTransport
 
 # A readable firewall answer is kept this long: the read enumerates every rule on the host.
 FIREWALL_CACHE_TTL = 30.0
+
+# One line per tool call to the daemon log, so `ntdrive daemon logs -f` shows what an agent is
+# doing live. The tool name, caller and outcome only, never the arguments: they may hold secrets.
+call_log = logging.getLogger("ntdrive.call")
 
 
 class NtDriveService:
@@ -129,36 +134,36 @@ class NtDriveService:
                 if float(params.timeout) > cap:
                     params.timeout = cap
             result = await spec.handler(self, params)
-            self.audit.record(
-                name,
-                args,
-                caller=caller,
-                ok=True,
-                elapsed_ms=(time.monotonic() - started) * 1000,
-                result=result,
-            )
+            elapsed = (time.monotonic() - started) * 1000
+            self.audit.record(name, args, caller=caller, ok=True, elapsed_ms=elapsed, result=result)
+            vm = args.get("vm") if isinstance(args, dict) else None
+            call_log.info("%s %s%s ok (%.0f ms)", caller, name, f" {vm}" if vm else "", elapsed)
             return result
         except NtDriveError as exc:
+            elapsed = (time.monotonic() - started) * 1000
             self.audit.record(
                 name,
                 args,
                 caller=caller,
                 ok=False,
-                elapsed_ms=(time.monotonic() - started) * 1000,
+                elapsed_ms=elapsed,
                 error=exc.to_dict()["error"],
             )
+            call_log.info("%s %s failed: %s (%.0f ms)", caller, name, exc.code, elapsed)
             raise
         except TimeoutError as exc:
             err = NtDriveError(TIMEOUT, f"{name} timed out")
             self.audit.record(
                 name, args, caller=caller, ok=False, elapsed_ms=0, error=err.to_dict()["error"]
             )
+            call_log.info("%s %s failed: timeout", caller, name)
             raise err from exc
         except Exception as exc:
             err = NtDriveError(INTERNAL, f"{name} failed: {type(exc).__name__}: {exc}")
             self.audit.record(
                 name, args, caller=caller, ok=False, elapsed_ms=0, error=err.to_dict()["error"]
             )
+            call_log.warning("%s %s crashed: %s: %s", caller, name, type(exc).__name__, exc)
             raise err from exc
 
     # -- lookups ------------------------------------------------------------------------

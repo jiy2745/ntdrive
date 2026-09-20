@@ -114,18 +114,38 @@ def probe_health(info: DaemonInfo, timeout: float = 2.0) -> dict[str, object] | 
     return None
 
 
+def daemon_log_path() -> Path:
+    """Where the detached daemon's stdout and stderr go (`ntdrive daemon logs` reads it)."""
+    return state_dir() / "logs" / "daemon.out.log"
+
+
+def _daemon_executable() -> str:
+    """pythonw.exe next to the interpreter on Windows, else the interpreter itself.
+
+    pythonw.exe is the GUI-subsystem Python: it never allocates a console, so the detached daemon
+    cannot flash an empty window even for a frame. python.exe is a console program, and a hidden
+    STARTUPINFO only hides the window conhost still briefly creates. The daemon writes to a log
+    file, not a console, so it needs none.
+    """
+    if sys.platform == "win32":
+        pyw = Path(sys.executable).with_name("pythonw.exe")
+        if pyw.is_file():
+            return str(pyw)
+    return sys.executable
+
+
 def spawn_daemon(config_path: str | None = None) -> subprocess.Popen[bytes]:
-    """Start ntdrived detached from this console."""
-    argv = [sys.executable, "-m", "ntdrive.daemon.app"]
+    """Start ntdrived detached from this console, with no window of its own."""
+    argv = [_daemon_executable(), "-m", "ntdrive.daemon.app"]
     if config_path:
         argv += ["--config", config_path]
-    log = state_dir() / "logs" / "daemon.out.log"
+    log = daemon_log_path()
     log.parent.mkdir(parents=True, exist_ok=True)
     out = log.open("ab")
     kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
-        # DETACHED_PROCESS gives the daemon no console at all; a hidden STARTUPINFO makes sure
-        # nothing flashes on the way there. Logs go to daemon.out.log, not a window.
+        # DETACHED_PROCESS gives the daemon no console, pythonw.exe makes sure it never wants one,
+        # and the hidden STARTUPINFO is a last guard. Logs go to daemon.out.log, not a window.
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = subprocess.SW_HIDE

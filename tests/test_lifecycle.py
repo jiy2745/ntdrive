@@ -144,3 +144,18 @@ def test_restart_daemon_stops_and_starts_on_the_resolved_config(
     info = lifecycle.restart_daemon()
     assert h.stopped == [42] and h.spawned == [str(cfg.resolve())]
     assert info.config_path == str(cfg.resolve())
+
+
+def test_daemon_executable_is_a_windowless_interpreter() -> None:
+    exe = Path(lifecycle._daemon_executable())
+    assert exe.is_file()
+    if sys.platform == "win32":
+        # pythonw.exe when it sits next to the interpreter, so the daemon never opens a console.
+        beside = Path(sys.executable).with_name("pythonw.exe")
+        assert exe.name.lower() == ("pythonw.exe" if beside.is_file() else "python.exe")
+
+
+def test_daemon_log_path_is_under_the_state_dir() -> None:
+    path = lifecycle.daemon_log_path()
+    assert path.name == "daemon.out.log"
+    assert path.parent.name == "logs"
