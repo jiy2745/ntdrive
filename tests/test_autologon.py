@@ -31,6 +31,10 @@ async def test_con_autologon_sets_the_winlogon_keys_without_leaking_the_password
     assert "DefaultUserName -Value 'dev'" in script
     assert "DefaultPassword -Value 'secret'" in script  # the guest command carries it, over SSH
     assert "secret" not in script[:40]  # written last, so no secret in the command's first chars
+    # A leftover AutoLogonSID or a LogonUI SID hint outranks DefaultUserName, so they are cleared.
+    assert "Remove-ItemProperty -Path $w -Name AutoLogonSID" in script
+    assert "Remove-ItemProperty -Path $l -Name LastLoggedOnUserSID" in script
+    assert "Remove-ItemProperty -Path $l -Name SelectedUserSID" in script
 
 
 async def test_con_autologon_disable_clears_the_password(
@@ -43,6 +47,7 @@ async def test_con_autologon_disable_clears_the_password(
     script = fake_transport.exec_log[-1]
     assert "AutoAdminLogon -Value '0'" in script
     assert "Remove-ItemProperty -Path $w -Name DefaultPassword" in script
+    assert "Remove-ItemProperty -Path $w -Name AutoLogonSID" in script
     assert "secret" not in script
 
 
@@ -53,3 +58,42 @@ async def test_con_autologon_standard_without_an_account_is_an_error(
     with pytest.raises(NtDriveError) as exc:
         await service.call("con_autologon", {"vm": "win11-dev", "account": "standard"})
     assert exc.value.code == "invalid_args" and "standard_user" in exc.value.message
+
+
+async def test_con_run_executes_in_the_interactive_session_and_captures_output(
+    service: NtDriveService, fake_transport: FakeTransport, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    # The guest returns the framed result the scheduled-task script prints.
+    fake_transport.exec_responses["$ErrorActionPreference='Stop'"] = (
+        "NTDRIVE_RC=0 STATE=Ready\nNTDRIVE_OUT_BEGIN\nhello from session 1\n"
+    )
+    result = await service.call("con_run", {"vm": "win11-dev", "cmd": "whoami", "account": "admin"})
+    assert result["exit_code"] == 0 and result["state"] == "Ready"
+    assert result["output"].strip() == "hello from session 1"
+    script = fake_transport.exec_log[-1]
+    assert "New-ScheduledTaskPrincipal -UserId 'dev' -LogonType Interactive" in script
+    assert "-RunLevel Highest" in script  # admin runs elevated
+    assert "cmd.exe" in script and "(whoami)" in script
+
+
+async def test_con_run_reports_a_command_that_did_not_finish(
+    service: NtDriveService, fake_transport: FakeTransport, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_transport.exec_responses["$ErrorActionPreference='Stop'"] = (
+        "NTDRIVE_RC=267009 STATE=Running\nNTDRIVE_OUT_BEGIN\n"
+    )
+    result = await service.call(
+        "con_run", {"vm": "win11-dev", "cmd": "notepad", "account": "admin", "timeout": 2}
+    )
+    assert result["state"] == "Running" and "did not finish" in result["note"]
+
+
+async def test_con_run_standard_without_an_account_is_an_error(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("con_run", {"vm": "win11-dev", "cmd": "whoami", "account": "standard"})
+    assert exc.value.code == "invalid_args"

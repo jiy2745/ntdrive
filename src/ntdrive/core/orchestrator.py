@@ -5,6 +5,7 @@ Each flow returns a `steps` list so the caller can see exactly what ran and what
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +15,10 @@ from ntdrive.errors import KD_NOT_BROKEN, NtDriveError
 
 if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
+
+# A soft reboot is confirmed by the guest going down within this grace, polled this often.
+_REBOOT_VERIFY_GRACE = 30.0
+_REBOOT_VERIFY_INTERVAL = 3.0
 
 
 class Steps:
@@ -138,6 +143,37 @@ async def _soft_shutdown(
     )
 
 
+async def _guest_boot_time(transport: Any) -> int | None:
+    """The guest's last boot time as a FILETIME int over SSH, or None when it cannot be read."""
+    if transport is None or not hasattr(transport, "exec_once"):
+        return None
+    try:
+        _, out = await transport.exec_once(
+            "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToFileTimeUtc()", timeout=20
+        )
+    except NtDriveError:
+        return None
+    line = out.strip().splitlines()[-1].strip() if out.strip() else ""
+    return int(line) if line.lstrip("-").isdigit() else None
+
+
+async def _soft_reboot_took(transport: Any, before_boot: int) -> bool:
+    """True once the guest goes down or returns with a newer boot time, False if it never does.
+
+    `shutdown /r /t 0` can return success without rebooting (seen live on one VM). While the guest
+    goes down SSH stops answering, which is the signal. A boot time unchanged through the whole
+    grace means the command was a no-op and the caller should fall back to a hard reset.
+    """
+    deadline = time.monotonic() + _REBOOT_VERIFY_GRACE
+    while True:
+        boot = await _guest_boot_time(transport)
+        if boot is None or boot > before_boot:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(_REBOOT_VERIFY_INTERVAL)
+
+
 async def _kd_after_reboot(
     service: NtDriveService, vm: VmConfig, steps: Steps, timeout: float, kd_alive: bool
 ) -> dict[str, Any] | None:
@@ -195,7 +231,18 @@ async def reboot_flow(
     dropped = service.term.mark_disconnected(vm.name)
     steps.add("term_drop", True, sessions=dropped)
     if mode == "soft":
+        before_boot = await _guest_boot_time(transport)
         await _soft_shutdown(service, vm, steps, transport)
+        # shutdown /r can report success without rebooting, so confirm the guest actually went
+        # down and fall back to a hard reset when it did not, instead of a silent no-op.
+        if before_boot is not None and not await _soft_reboot_took(transport, before_boot):
+            steps.add(
+                "reboot_verify",
+                False,
+                reason="guest did not reboot within the grace",
+                fallback="hard",
+            )
+            await steps.run("reset", adapter.reset(vm, hard=True), via="hard_fallback")
     elif mode == "hard":
         await steps.run("reset", adapter.reset(vm, hard=True))
     else:

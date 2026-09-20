@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import re
+import secrets
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -83,11 +85,68 @@ class AutologonParams(VmParams):
 
 # The registry key that Winlogon reads at boot for automatic logon.
 _WINLOGON = r"HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+# LogonUI remembers the last and selected user by SID, which can also outrank DefaultUserName.
+_LOGONUI = r"HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI"
 
 
 def _ps_literal(value: str) -> str:
     """A string as a PowerShell single-quoted literal body (single quotes are doubled)."""
     return value.replace("'", "''")
+
+
+class RunParams(VmParams):
+    """con_run."""
+
+    cmd: str = Field(description="Command line to run on the interactive desktop (via cmd.exe /c)")
+    account: Literal["admin", "standard"] = Field(
+        default="standard",
+        description="Whose interactive session to run in: standard (guest.standard_user) or admin",
+    )
+    timeout: float = Field(
+        default=60, ge=1, description="Seconds to wait for the command to finish"
+    )
+    capture: bool = Field(default=True, description="Return the command's stdout and stderr")
+    max_bytes: int = Field(
+        default=65536, ge=256, le=1 << 20, description="Cap on the returned output (truncated says)"
+    )
+
+
+def _run_script(task: str, log: str, user: str, run_level: str, cmd: str, timeout: float) -> str:
+    """The PowerShell that runs `cmd` in the user's interactive session and reports the result.
+
+    A scheduled task with LogonType Interactive runs in the logged-on user's session (session 1),
+    which SSH (session 0) cannot reach, and needs no stored password because it rides the existing
+    logon. The command's output goes to a world-readable file, read back and framed by markers.
+    """
+    argument = _ps_literal(f'/c ({cmd}) > "{log}" 2>&1')
+    wait = int(timeout)
+    lines = [
+        "$ErrorActionPreference='Stop'",
+        f"$t='{task}'",
+        f"$log='{log}'",
+        "if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }",
+        f"$a=New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '{argument}'",
+        (
+            f"$pr=New-ScheduledTaskPrincipal -UserId '{_ps_literal(user)}' -LogonType Interactive "
+            f"-RunLevel {run_level}"
+        ),
+        "Register-ScheduledTask -TaskName $t -Action $a -Principal $pr -Force | Out-Null",
+        "Start-ScheduledTask -TaskName $t",
+        f"$deadline=(Get-Date).AddSeconds({wait})",
+        (
+            "do { Start-Sleep -Milliseconds 400; $st=(Get-ScheduledTask -TaskName $t).State } "
+            "while ($st -eq 'Running' -and (Get-Date) -lt $deadline)"
+        ),
+        "$rc=(Get-ScheduledTaskInfo -TaskName $t).LastTaskResult",
+        "Unregister-ScheduledTask -TaskName $t -Confirm:$false",
+        "Write-Output ('NTDRIVE_RC=' + $rc + ' STATE=' + $st)",
+        "Write-Output 'NTDRIVE_OUT_BEGIN'",
+        (
+            "if (Test-Path -LiteralPath $log) { Get-Content -Raw -LiteralPath $log; "
+            "Remove-Item -LiteralPath $log -Force }"
+        ),
+    ]
+    return "; ".join(lines)
 
 
 def _out_path(service: NtDriveService, vm: str) -> str:
@@ -249,14 +308,23 @@ async def con_autologon(service: NtDriveService, p: AutologonParams) -> dict[str
     if not hasattr(transport, "exec_once"):
         raise NtDriveError(BACKEND_ERROR, "the transport cannot run commands")
     if p.enabled:
-        # DefaultPassword goes last so no secret sits in the first characters of the command.
+        # A leftover AutoLogonSID (from netplwiz or a hand edit) outranks DefaultUserName and
+        # makes Windows try the wrong account, so clear it and the LogonUI SID hints. The
+        # DefaultPassword line goes last so no secret sits in the command's first characters.
         script = "; ".join(
             [
                 f"$w = '{_WINLOGON}'",
+                f"$l = '{_LOGONUI}'",
                 "Set-ItemProperty -Path $w -Name AutoAdminLogon -Value '1'",
                 f"Set-ItemProperty -Path $w -Name DefaultUserName -Value '{_ps_literal(user)}'",
                 "Set-ItemProperty -Path $w -Name DefaultDomainName -Value $env:COMPUTERNAME",
                 "Remove-ItemProperty -Path $w -Name AutoLogonCount -ErrorAction SilentlyContinue",
+                "Remove-ItemProperty -Path $w -Name AutoLogonSID -ErrorAction SilentlyContinue",
+                (
+                    "Remove-ItemProperty -Path $l -Name LastLoggedOnUserSID "
+                    "-ErrorAction SilentlyContinue"
+                ),
+                "Remove-ItemProperty -Path $l -Name SelectedUserSID -ErrorAction SilentlyContinue",
                 f"Set-ItemProperty -Path $w -Name DefaultPassword -Value '{_ps_literal(password)}'",
             ]
         )
@@ -266,6 +334,7 @@ async def con_autologon(service: NtDriveService, p: AutologonParams) -> dict[str
                 f"$w = '{_WINLOGON}'",
                 "Set-ItemProperty -Path $w -Name AutoAdminLogon -Value '0'",
                 "Remove-ItemProperty -Path $w -Name DefaultPassword -ErrorAction SilentlyContinue",
+                "Remove-ItemProperty -Path $w -Name AutoLogonSID -ErrorAction SilentlyContinue",
             ]
         )
     code, out = await transport.exec_once(script, timeout=60)
@@ -286,6 +355,67 @@ async def con_autologon(service: NtDriveService, p: AutologonParams) -> dict[str
         "user": user if p.enabled else None,
         "needs_reboot": True,
     }
+
+
+@tool(
+    "con_run",
+    "Run a command on the guest's interactive desktop (session 1) and return its output, for GUI "
+    "or session-bound programs that SSH in session 0 cannot open. It runs through a scheduled "
+    "task in the logged-on user's session, so the account must be logged in (con_autologon).",
+    RunParams,
+    positional=("vm", "cmd"),
+    touches_guest=True,
+    long_poll=True,
+    effect="destructive",
+)
+async def con_run(service: NtDriveService, p: RunParams) -> dict[str, Any]:
+    """Run a command in the interactive session through a scheduled task and capture its output."""
+    cfg = service.vm_cfg(p.vm)
+    user, _ = cfg.guest.credentials(p.account)
+    if not user:
+        field = "standard_user" if p.account == "standard" else "user"
+        raise NtDriveError(
+            INVALID_ARGS,
+            f"{p.vm} has no {p.account} account (guest.{field} is empty)",
+            "add it in vms.yaml, or pass account=admin",
+        )
+    service.ensure_not_frozen(p.vm)
+    await service.ensure_running(cfg)
+    transport = await service.transport(cfg)
+    if not hasattr(transport, "exec_once"):
+        raise NtDriveError(BACKEND_ERROR, "the transport cannot run commands")
+    task = f"ntdrive_run_{secrets.token_hex(4)}"
+    log = f"C:\\Users\\Public\\{task}.log"  # world-readable, so admin SSH reads what the user ran
+    run_level = "Highest" if p.account == "admin" else "Limited"
+    script = _run_script(task, log, user, run_level, p.cmd, p.timeout)
+    _, out = await transport.exec_once(script, timeout=p.timeout + 30)
+    match = re.search(r"NTDRIVE_RC=(-?\d+) STATE=(\w+)", out)
+    if match is None:
+        raise NtDriveError(
+            BACKEND_ERROR,
+            f"could not run the command in {p.vm}: {out.strip()[:300]}",
+            "the account must be logged in on the interactive desktop (con_autologon), and the "
+            "SSH account needs administrator rights to schedule the task",
+        )
+    exit_code, state = int(match.group(1)), match.group(2)
+    begin = out.find("NTDRIVE_OUT_BEGIN")
+    captured = out[begin + len("NTDRIVE_OUT_BEGIN") :].lstrip("\r\n") if begin >= 0 else ""
+    result: dict[str, Any] = {
+        "vm": p.vm,
+        "account": p.account,
+        "exit_code": exit_code,
+        "state": state,
+    }
+    if state == "Running":
+        result["note"] = (
+            f"the command did not finish within {p.timeout:.0f}s and was left running; "
+            "raise timeout or check the desktop"
+        )
+    if p.capture:
+        result["truncated"] = len(captured) > p.max_bytes
+        result["output"] = captured[: p.max_bytes]
+    service.state.record_event(p.vm, "con_run", account=p.account, exit_code=exit_code)
+    return result
 
 
 @tool(

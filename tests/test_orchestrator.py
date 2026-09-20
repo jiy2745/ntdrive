@@ -298,6 +298,31 @@ async def test_soft_reboot_uses_existing_ssh_connection(
     assert fake_transport.closed  # dropped after the command went through
 
 
+async def test_soft_reboot_falls_back_to_hard_when_the_guest_does_not_reboot(
+    service: NtDriveService,
+    fake_transport: FakeTransport,
+    fake_vmrun: FakeVmrun,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ntdrive.core.orchestrator as orch
+
+    monkeypatch.setattr(orch, "_REBOOT_VERIFY_GRACE", 0.2)
+    monkeypatch.setattr(orch, "_REBOOT_VERIFY_INTERVAL", 0.05)
+    # The guest reports the same boot time throughout: shutdown /r was a no-op (seen live).
+    fake_transport.exec_responses["(Get-CimInstance"] = "130000000000000\n"
+    await service.call("vm_start", {"vm": "win11-dev"})
+    await service.call("term_open", {"vm": "win11-dev"})
+    result = await service.call(
+        "vm_reboot",
+        {"vm": "win11-dev", "mode": "soft", "confirm": True, "reopen_term": False, "timeout": 1},
+    )
+    verify = next(s for s in result["steps"] if s["step"] == "reboot_verify")
+    assert verify["ok"] is False and verify["fallback"] == "hard"
+    reset = next(s for s in result["steps"] if s["step"] == "reset")
+    assert reset["ok"] and reset["via"] == "hard_fallback"
+    assert _calls(fake_vmrun, "reset") == 1
+
+
 async def test_file_push_and_pull(
     service: NtDriveService, fake_transport: FakeTransport, tmp_path: Path
 ) -> None:

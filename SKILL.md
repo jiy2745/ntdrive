@@ -131,6 +131,8 @@ con_screenshot vm=win11-dev                -> png_path. vmrun captureScreen need
 con_screenshot vm=win11-dev method=vnc     -> read the pixel of a user tile or field on the lock screen
 con_click vm=win11-dev x=640 y=400         -> click it over VNC (framebuffer pixels), no guest login
 con_send_keys vm=win11-dev keys=["{password}","{enter}"]  -> then type the password over VNC, no SSH
+con_autologon vm=win11-dev account=standard  -> a reboot lands on the unlocked desktop, no click needed
+con_run vm=win11-dev cmd="myexe.exe" account=standard  -> run a GUI/session program on that desktop, capture output
 snap_revert vm=win11-dev name=base-kd      -> steps: kd_detach, term_drop, snapshot_revert, start,
                                               kd_attach, guest_ip, term_reopen, and term: [{old, new}]
 ```
