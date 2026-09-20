@@ -128,6 +128,7 @@ kd_wait_event vm=win11-dev timeout=600     -> event=bugcheck
 kd_exec vm=win11-dev cmd="!analyze -v"
 kd_exec vm=win11-dev cmd=".dump /f C:\\dumps\\crash.dmp"   # written on the host, no guest needed
 con_screenshot vm=win11-dev                -> png_path. vmrun captureScreen needs a working guest login, so for a login screen, a boot hang or a frozen guest enable VNC once (con_enable_vnc, VM off) and use con_screenshot method=vnc, which reads the framebuffer with no guest login
+con_send_keys vm=win11-dev keys=["{password}","{enter}"]  -> log in at a lock or login screen over VNC, no SSH
 snap_revert vm=win11-dev name=base-kd      -> steps: kd_detach, term_drop, snapshot_revert, start,
                                               kd_attach, guest_ip, term_reopen, and term: [{old, new}]
 ```
@@ -228,5 +229,12 @@ the disk, and the snapshot keeps the memory state. `sys_health` reports such a l
   status` on the host.
 - `kd_exec` runs whatever you send at the `kd>` prompt, including `.shell`, which executes
   commands on the host. Do not use it unless the task calls for it.
+- SSH runs in Windows session 0 (services), so `term_*` work even at a locked or logged-out
+  desktop. The interactive desktop (session 1) is a separate thing: an app window opens only
+  there, and only when it is logged in and unlocked. When a task needs an unlocked desktop and
+  `con_screenshot method=vnc` shows a lock or login screen, log in over the console with
+  `con_send_keys` (VNC must be on, `con_enable_vnc` with the VM off): `con_send_keys vm=... keys=`
+  `["{password}", "{enter}"]` types the guest password from `vms.yaml` without it crossing the
+  wire. There is no autologon tool: a locked screen is unlocked this way each time.
 - Never put passwords or KDNET keys in tool arguments. They live in `vms.yaml` and environment
-  variables on the host.
+  variables on the host. `con_send_keys` `{password}` and `term_open` read them there for you.

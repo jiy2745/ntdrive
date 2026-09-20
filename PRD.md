@@ -180,7 +180,7 @@ Priority: **P0** = MVP required, **P1** = required for 1.0, **P2** = later.
 | ID | Requirement | Priority |
 |---|---|---|
 | CON-1 | Save a console screenshot as a PNG file and return the path. base64 optional. For BSOD, boot hang, login screen. `vmrun captureScreen` on Workstation is a VIX guest operation (verified on 17.6: no credentials returns "Anonymous guest operations are not allowed"), so it needs a working guest login and cannot shoot a broken or logged-out guest. The failure hint points at fixing the login or reading a crashed guest through the debugger. `con_enable_vnc` turns on Workstation's built-in VNC server (`RemoteDisplay.vnc`, VM off) and `con_screenshot method=vnc` then reads the framebuffer without a guest login. | P0 |
-| CON-2 | Console key input (`con_send_keys`). Hyper-V uses WMI `Msvm_Keyboard`, VMware uses its built-in VNC (`RemoteDisplay.vnc.enabled`). For when SSH is unavailable (before login, dead network). | P1 |
+| CON-2 | Console key input (`con_send_keys`), VMware over its built-in VNC (`RemoteDisplay.vnc`), so no guest login is needed. For when SSH is unavailable: a lock or login screen, or before the network is up. Keys are text or `{token}` in the terminal's vocabulary ({enter}, {ctrl+alt+delete}, {win+r}, ...), and a `{password}` or `{standard_password}` item is expanded from `vms.yaml` inside the daemon and typed character by character, so the secret never enters the arguments, the result or the audit log. Hyper-V would use WMI `Msvm_Keyboard` in a later version. | P1 |
 | CON-3 | **Login-free screenshot over VNC.** `con_enable_vnc(vm, port?)` writes `RemoteDisplay.vnc.enabled/port` into the vmx (VM off, like the serial pipe), and `con_screenshot method=vnc` reads that framebuffer from the host loopback with a built-in RFB client (no dependency), so it works at a login screen, a boot hang or on a frozen or unprovisioned guest, where `vmrun captureScreen` cannot. `method=auto` tries vmrun and falls back to VNC when guest login fails. VNC is set with no password and reached only over the host, which the enable result states. | P1 |
 
 ### 5.6 FR-FILE: file transfer
@@ -336,7 +336,7 @@ TERM:  none --open--> open --(ssh drop / revert / reboot)--> disconnected --reop
 ```
 
 Transition rules (partial):
-- While `KD.broken`, `term_*`, `file_*` and `con_screenshot` updates fail at once with `guest_frozen_by_debugger`.
+- While `KD.broken`, `term_*`, `file_*` and `con_screenshot` (guest path) updates fail at once with `guest_frozen_by_debugger`. The VNC console tools (`con_screenshot method=vnc`, `con_send_keys`) read or drive the framebuffer over the host, so they are not blocked, but a broken-in guest will not process the keys until `kd_go`.
 - `snap_revert` sets `KD` to `detached`, `vm_reboot` keeps kd.exe attached and waiting for the reconnect, and both set every `TERM` to `disconnected`, then recover per the options.
 - `vm_stop` when `KD` is `broken` first sends `g` or allows only a hard stop.
 
@@ -417,7 +417,7 @@ messages are written in English (ST-9).
 |---|---|---|
 | `con_screenshot` | `vm, base64=false, method=auto\|guest\|vnc` | `{png_path, via, png_base64?}` |
 | `con_enable_vnc` | `vm, port?` | `{changed, port, note}` (VM off) |
-| `con_send_keys` | `vm, keys[]` | `{sent}` (P1) |
+| `con_send_keys` | `vm, keys[]` | `{sent}` (the count of items, not characters, so a password's length does not leak). VNC must be on (`con_enable_vnc`). `{password}`/`{standard_password}` items type that account's password from `vms.yaml` |
 | `file_push` | `vm, local, remote, verify=true` (`local` is an absolute host path, the CLI and SDK absolutize) | `{files, bytes, verified, via: sftp\|guest_tools, copied:[{local, remote, bytes, verified, verify_error?}], note?}`. `verified` is true or false for SFTP and guest-tools copies alike. It is null with `verify_error` when the hash could not be read |
 | `file_pull` | `vm, remote, local` (a trailing separator on `local` means directory) | `{bytes, via, note?}` |
 | `file_stat` | `vm, remote` | `{exists, size?, modified?, is_dir?, via}` |

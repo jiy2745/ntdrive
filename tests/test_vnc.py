@@ -140,3 +140,92 @@ async def test_con_screenshot_vnc_reads_the_framebuffer_without_a_guest_login(
         monkeypatch.setattr(service.adapter_for(vm), "screenshot", bad_guest)
         auto = await service.call("con_screenshot", {"vm": "win11-dev", "method": "auto"})
         assert auto["via"] == "vnc"
+
+
+async def _fake_rfb_key_server() -> tuple[asyncio.AbstractServer, int, list[tuple[int, bool]]]:
+    """A minimal RFB 3.8 server that handshakes then records the KeyEvent messages it receives."""
+    recorded: list[tuple[int, bool]] = []
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            writer.write(b"RFB 003.008\n")
+            await writer.drain()
+            await reader.readexactly(12)  # client version
+            writer.write(b"\x01\x01")  # one security type: None
+            await writer.drain()
+            await reader.readexactly(1)  # chosen type
+            writer.write(struct.pack(">I", 0))  # SecurityResult OK
+            await reader.readexactly(1)  # ClientInit
+            name = b"fake"
+            writer.write(
+                struct.pack(">HH", 4, 4) + b"\x00" * 16 + struct.pack(">I", len(name)) + name
+            )
+            await writer.drain()
+            while True:
+                head = await reader.readexactly(1)
+                if head[0] != 4:  # only KeyEvent is expected here
+                    break
+                body = await reader.readexactly(7)  # down(1) + padding(2) + keysym(4)
+                recorded.append((struct.unpack(">I", body[3:7])[0], bool(body[0])))
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    return server, port, recorded
+
+
+async def test_send_keys_presses_and_releases_over_the_wire() -> None:
+    from ntdrive.screen import keymap
+
+    server, port, recorded = await _fake_rfb_key_server()
+    async with server:
+        events = keymap.flatten(keymap.key_strokes(["A", "{enter}"]))
+        sent = await vnc.send_keys("127.0.0.1", port, "", events)
+        await asyncio.sleep(0.1)
+    assert sent == len(events)
+    assert recorded == [
+        (0xFFE1, True),  # Shift down
+        (0x41, True),  # 'A' down
+        (0x41, False),  # 'A' up
+        (0xFFE1, False),  # Shift up
+        (0xFF0D, True),  # Enter down
+        (0xFF0D, False),  # Enter up
+    ]
+
+
+async def test_con_send_keys_types_the_password_without_leaking_it(
+    service: NtDriveService, config: Config, fake_vmrun: FakeVmrun
+) -> None:
+    import json
+
+    server, port, recorded = await _fake_rfb_key_server()
+    async with server:
+        vm = config.vm("win11-dev")
+        Path(vm.vmx).write_text(
+            f'displayName = "x"\nRemoteDisplay.vnc.enabled = "TRUE"\nRemoteDisplay.vnc.port = "{port}"\n',
+            encoding="latin-1",
+        )
+        await service.call("vm_start", {"vm": "win11-dev"})
+        result = await service.call(
+            "con_send_keys", {"vm": "win11-dev", "keys": ["{password}", "{enter}"]}
+        )
+        await asyncio.sleep(0.1)
+    # The result counts items, not characters, so it does not even leak the password length.
+    assert result == {"vm": "win11-dev", "sent": 2}
+    assert "secret" not in json.dumps(result)
+    downs = [ks for ks, down in recorded if down and 0x20 <= ks <= 0x7E]
+    assert "".join(chr(k) for k in downs) == "secret"  # guest password from conftest
+    assert (0xFF0D, True) in recorded  # then Enter
+
+
+async def test_con_send_keys_needs_vnc_enabled(
+    service: NtDriveService, config: Config, fake_vmrun: FakeVmrun
+) -> None:
+    Path(config.vm("win11-dev").vmx).write_text('displayName = "x"\n', encoding="latin-1")
+    await service.call("vm_start", {"vm": "win11-dev"})
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("con_send_keys", {"vm": "win11-dev", "keys": ["hi"]})
+    assert exc.value.code == "backend_error" and "con_enable_vnc" in exc.value.hint

@@ -125,7 +125,10 @@ Commit messages follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, 
   regex wait with a frozen-guest abort), `TermManager` (`manager.py`: sessions, reconnect,
   successor ids, prune), `SshPtyTransport` (`ssh.py`: every paramiko failure becomes
   `NtDriveError`), `transport.py`, and key tokens like `{ctrl+c}` in `keys.py`.
-- `src/ntdrive/screen/vnc.py`: the VNC framebuffer capture behind `con_screenshot method=vnc`.
+- `src/ntdrive/screen/vnc.py`: the RFB (VNC) client for `con_screenshot method=vnc` (read one
+  framebuffer) and `con_send_keys` (send KeyEvent messages), sharing one handshake.
+  `src/ntdrive/screen/keymap.py`: the `{token}` vocabulary turned into X keysym press and release
+  events, the VNC counterpart of `term/keys.py`.
 - `src/ntdrive/daemon/`: the aiohttp app (`app.py`), the `daemon.json` lifecycle (`lifecycle.py`),
   `DaemonClient` (`client.py`: one kept connection, re-reads `daemon.json` after a restart) and
   the CoView page (`static/coview.html`).

@@ -169,44 +169,93 @@ async def capture(host: str, port: int, password: str, out_path: str, timeout: f
         ) from exc
 
 
+async def send_keys(
+    host: str,
+    port: int,
+    password: str,
+    events: list[tuple[int, bool]],
+    timeout: float = 15.0,
+) -> int:
+    """Connect to an RFB server and send KeyEvent messages. Returns the number of events sent."""
+    try:
+        return await asyncio.wait_for(_send_keys(host, port, password, events), timeout)
+    except TimeoutError as exc:
+        raise NtDriveError(
+            TIMEOUT,
+            f"VNC key input to {host}:{port} timed out after {timeout:.0f}s",
+            "check that RemoteDisplay.vnc is enabled in the vmx and the VM is running",
+        ) from exc
+    except (OSError, asyncio.IncompleteReadError) as exc:
+        raise NtDriveError(
+            BACKEND_ERROR,
+            f"VNC key input to {host}:{port} failed: {exc}",
+            "enable RemoteDisplay.vnc in the vmx with the VM off, then start it (con_enable_vnc)",
+        ) from exc
+
+
+async def _send_keys(host: str, port: int, password: str, events: list[tuple[int, bool]]) -> int:
+    reader, writer = await asyncio.open_connection(host, port)
+    try:
+        await _handshake(reader, writer, password)
+        for keysym, down in events:
+            # KeyEvent: message type 4, down-flag, 2 bytes padding, the keysym.
+            writer.write(struct.pack(">BBHI", 4, 1 if down else 0, 0, keysym))
+        await writer.drain()
+        # Let the server consume the events before the connection drops.
+        await asyncio.sleep(0.05)
+        return len(events)
+    finally:
+        writer.close()
+        with contextlib.suppress(BaseException):
+            await writer.wait_closed()
+
+
+async def _handshake(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, password: str
+) -> tuple[int, int]:
+    """RFB version, security, auth and ClientInit. Returns the framebuffer (width, height)."""
+    server_version = await _recv(reader, 12)
+    major_minor = server_version[4:11].decode("ascii", "replace")
+    writer.write(b"RFB 003.008\n" if major_minor >= "003.007" else b"RFB 003.003\n")
+    await writer.drain()
+
+    if major_minor >= "003.007":
+        count = (await _recv(reader, 1))[0]
+        if count == 0:
+            raise NtDriveError(BACKEND_ERROR, "VNC server offered no security types")
+        types = await _recv(reader, count)
+        chosen = 2 if (password and 2 in types) else (1 if 1 in types else types[0])
+        writer.write(bytes([chosen]))
+        await writer.drain()
+    else:
+        chosen = struct.unpack(">I", await _recv(reader, 4))[0]
+
+    if chosen == 2:  # VNC authentication
+        challenge = await _recv(reader, 16)
+        writer.write(_vnc_response(challenge, password))
+        await writer.drain()
+    if chosen == 2 or major_minor >= "003.008":
+        result = struct.unpack(">I", await _recv(reader, 4))[0]
+        if result != 0:
+            raise NtDriveError(
+                BACKEND_ERROR,
+                "VNC authentication failed",
+                "set the VNC password to match RemoteDisplay.vnc.key, or clear it",
+            )
+
+    writer.write(b"\x01")  # ClientInit: shared
+    await writer.drain()
+    header = await _recv(reader, 24)
+    width, height = struct.unpack(">HH", header[:4])
+    name_len = struct.unpack(">I", header[20:24])[0]
+    await _recv(reader, name_len)
+    return width, height
+
+
 async def _capture(host: str, port: int, password: str, out_path: str) -> str:
     reader, writer = await asyncio.open_connection(host, port)
     try:
-        server_version = await _recv(reader, 12)
-        major_minor = server_version[4:11].decode("ascii", "replace")
-        writer.write(b"RFB 003.008\n" if major_minor >= "003.007" else b"RFB 003.003\n")
-        await writer.drain()
-
-        if major_minor >= "003.007":
-            count = (await _recv(reader, 1))[0]
-            if count == 0:
-                raise NtDriveError(BACKEND_ERROR, "VNC server offered no security types")
-            types = await _recv(reader, count)
-            chosen = 2 if (password and 2 in types) else (1 if 1 in types else types[0])
-            writer.write(bytes([chosen]))
-            await writer.drain()
-        else:
-            chosen = struct.unpack(">I", await _recv(reader, 4))[0]
-
-        if chosen == 2:  # VNC authentication
-            challenge = await _recv(reader, 16)
-            writer.write(_vnc_response(challenge, password))
-            await writer.drain()
-        if chosen == 2 or major_minor >= "003.008":
-            result = struct.unpack(">I", await _recv(reader, 4))[0]
-            if result != 0:
-                raise NtDriveError(
-                    BACKEND_ERROR,
-                    "VNC authentication failed",
-                    "set the VNC password to match RemoteDisplay.vnc.key, or clear it",
-                )
-
-        writer.write(b"\x01")  # ClientInit: shared
-        await writer.drain()
-        header = await _recv(reader, 24)
-        width, height = struct.unpack(">HH", header[:4])
-        name_len = struct.unpack(">I", header[20:24])[0]
-        await _recv(reader, name_len)
+        width, height = await _handshake(reader, writer, password)
         if not width or not height:
             raise NtDriveError(BACKEND_ERROR, "VNC server reported an empty framebuffer")
 

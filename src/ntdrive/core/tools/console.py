@@ -10,8 +10,8 @@ from pydantic import Field
 
 from ntdrive.core.registry import tool
 from ntdrive.core.tools.common import VmParams
-from ntdrive.errors import BACKEND_ERROR, NtDriveError
-from ntdrive.screen import vnc
+from ntdrive.errors import BACKEND_ERROR, INVALID_ARGS, NtDriveError
+from ntdrive.screen import keymap, vnc
 
 if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
@@ -36,6 +36,20 @@ class EnableVncParams(VmParams):
 
     port: int | None = Field(
         default=None, ge=1, le=65535, description="VNC port; a per-VM default when omitted"
+    )
+
+
+class SendKeysParams(VmParams):
+    """con_send_keys."""
+
+    keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Keys to type over the console. Each item is text or one {token}: {enter} {tab} "
+            "{esc} {backspace} {up} {ctrl+alt+delete} {win+r} {alt+f4}. {password} and "
+            "{standard_password} as a whole item type that guest account's password from "
+            "vms.yaml without it passing through the arguments or the log"
+        ),
     )
 
 
@@ -87,6 +101,49 @@ async def con_screenshot(service: NtDriveService, p: ScreenshotParams) -> dict[s
         with open(saved, "rb") as fh:
             result["png_base64"] = base64.b64encode(fh.read()).decode("ascii")
     return result
+
+
+@tool(
+    "con_send_keys",
+    "Type keys into the VM console over VNC, no guest login needed (con_enable_vnc turns VNC on). "
+    "For a lock or login screen or before the network is up: keys=['{password}', '{enter}'] logs "
+    "in without the password crossing the wire.",
+    SendKeysParams,
+    positional=("vm",),
+    touches_guest=True,
+    effect="destructive",
+)
+async def con_send_keys(service: NtDriveService, p: SendKeysParams) -> dict[str, Any]:
+    """Send console key input through the VNC framebuffer server.
+
+    {password} and {standard_password} items are expanded from vms.yaml inside the daemon and
+    typed character by character, so the secret never appears in the arguments, the result or the
+    audit log. Every other item is text or a {token} in the same vocabulary as term_send.
+    """
+    cfg = service.vm_cfg(p.vm)
+    if not p.keys:
+        raise NtDriveError(
+            INVALID_ARGS, "nothing to send", "give keys, for example ['hi', '{enter}']"
+        )
+    endpoint = service.adapter_for(cfg).vnc_endpoint(cfg)
+    if endpoint is None:
+        raise NtDriveError(
+            BACKEND_ERROR,
+            f"VNC is not enabled for {p.vm}",
+            "run con_enable_vnc with the VM off, then start it",
+        )
+    await service.ensure_running(cfg)
+    strokes: list[keymap.Stroke] = []
+    for item in p.keys:
+        if item == "{password}":
+            strokes.extend(keymap.literal_strokes(cfg.guest.resolve_password()))
+        elif item == "{standard_password}":
+            strokes.extend(keymap.literal_strokes(cfg.guest.resolve_standard_password()))
+        else:
+            strokes.extend(keymap.key_strokes([item]))
+    await vnc.send_keys(endpoint[0], endpoint[1], "", keymap.flatten(strokes))
+    service.state.record_event(p.vm, "con_send_keys", keys=len(p.keys))
+    return {"vm": p.vm, "sent": len(p.keys)}
 
 
 @tool(

@@ -242,6 +242,7 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `term_list` | read | List terminal sessions (the usable ids in open) and the CoView page that mirrors them live in a browser (#<session_id> selects one). |
 | `term_prune` | additive | Forget closed and disconnected terminal sessions (their open successors stay), so the list shows only what is usable. |
 | `con_screenshot` | read | Save a PNG of the VM console and return its path (base64 on request). method=vnc reads the console framebuffer without any guest login (con_enable_vnc turns VNC on first). |
+| `con_send_keys` | destructive | Type keys into the VM console over VNC, no guest login needed (con_enable_vnc turns VNC on). For a lock or login screen or before the network is up: keys=['{password}', '{enter}'] logs in without the password crossing the wire. |
 | `con_enable_vnc` | additive | Turn on the console VNC server in the vmx so con_screenshot method=vnc can read the screen without a guest login. Run it with the VM off, then start the VM. |
 | `file_push` | destructive | Copy a file, directory or glob from the host into the guest and verify it by SHA-256 (over SFTP, or through VMware Tools when SSH is down). |
 | `file_pull` | additive | Copy a file from the guest to the host. |
