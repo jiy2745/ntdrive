@@ -67,16 +67,19 @@ class HostConfig(BaseModel):
 
 
 def secret_from_env(name: str) -> str:
-    """The value of an environment variable, or of the User-scope variable of that name.
+    """The value of an environment variable, preferring the live User-scope variable on Windows.
 
-    The daemon only inherits the environment it was started with, and `ntdrive setup` stores
-    passwords at User scope, so on Windows the registry is read as a fallback: a secret is
-    visible the moment it is saved, with no new terminal and no daemon restart.
+    `ntdrive setup` stores passwords at User scope (the registry), which is always current. The
+    daemon's own `os.environ` is a snapshot from when it started and goes stale the moment a
+    password is changed, so on Windows the registry wins: a changed password is picked up with no
+    daemon restart, and a stale env value can never be used (that once stranded an encrypted VM
+    mid-suspend). The process environment is the fallback when the registry has nothing.
     """
-    value = os.environ.get(name, "")
-    if value or sys.platform != "win32":
-        return value
-    return _user_environment(name)
+    if sys.platform == "win32":
+        value = _user_environment(name)
+        if value:
+            return value
+    return os.environ.get(name, "")
 
 
 def _user_environment(name: str) -> str:

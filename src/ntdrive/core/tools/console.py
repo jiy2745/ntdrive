@@ -408,8 +408,17 @@ async def con_run(service: NtDriveService, p: RunParams) -> dict[str, Any]:
     }
     if state == "Running":
         result["note"] = (
-            f"the command did not finish within {p.timeout:.0f}s and was left running; "
+            f"the command did not finish within {p.timeout:.0f}s and was left running, "
             "raise timeout or check the desktop"
+        )
+    elif exit_code >= 0x41300:
+        # The task finished carrying a Task Scheduler status (0x41303 = the task never ran), not
+        # the program's own exit code. The usual cause is no interactive session: the account is
+        # not signed in on the desktop, so the interactive task had nowhere to run.
+        result["note"] = (
+            f"the scheduled task did not run the command (status 0x{exit_code:X}). The "
+            f"{p.account} account must be signed in on the interactive desktop: run con_autologon "
+            "and reboot, then retry"
         )
     if p.capture:
         result["truncated"] = len(captured) > p.max_bytes

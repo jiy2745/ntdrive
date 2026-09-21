@@ -37,7 +37,9 @@ def test_config_is_found_in_the_state_dir_not_the_working_directory(
     assert load_config(str(explicit)).path == str(explicit)
 
 
-def test_secret_from_env_falls_back_to_the_user_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_secret_from_env_prefers_the_live_registry_over_a_stale_process_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("NTDRIVE_X_PW", raising=False)
     monkeypatch.setattr(
         config_mod,
@@ -45,13 +47,23 @@ def test_secret_from_env_falls_back_to_the_user_registry(monkeypatch: pytest.Mon
         lambda name: "from-registry" if name == "NTDRIVE_X_PW" else "",
     )
     if sys.platform == "win32":
+        # The User-scope registry is where ntdrive setup writes and is always live, so it wins
+        # over the daemon's os.environ snapshot, which can be stale after a password change.
+        assert config_mod.secret_from_env("NTDRIVE_X_PW") == "from-registry"
+        monkeypatch.setenv("NTDRIVE_X_PW", "from-process")
         assert config_mod.secret_from_env("NTDRIVE_X_PW") == "from-registry"
         assert (
             GuestConfig(user="u", password_env="NTDRIVE_X_PW").resolve_password() == "from-registry"
         )
-    monkeypatch.setenv("NTDRIVE_X_PW", "from-process")
-    assert config_mod.secret_from_env("NTDRIVE_X_PW") == "from-process"
-    assert GuestConfig(user="u", password_env="NTDRIVE_X_PW").resolve_password() == "from-process"
+        # With nothing in the registry, the process environment is the fallback.
+        monkeypatch.setattr(config_mod, "_user_environment", lambda name: "")
+        assert config_mod.secret_from_env("NTDRIVE_X_PW") == "from-process"
+    else:
+        monkeypatch.setenv("NTDRIVE_X_PW", "from-process")
+        assert config_mod.secret_from_env("NTDRIVE_X_PW") == "from-process"
+        assert (
+            GuestConfig(user="u", password_env="NTDRIVE_X_PW").resolve_password() == "from-process"
+        )
 
 
 def test_guest_credentials_for_both_accounts(monkeypatch: pytest.MonkeyPatch) -> None:

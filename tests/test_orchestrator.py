@@ -80,7 +80,23 @@ async def test_snap_take_encrypted_live_needs_allow_suspend(
         {"vm": "win11-dev", "name": "live1", "confirm": True, "allow_suspend": True},
     )
     assert deleted["deleted"] == ["live1"] and deleted["via"] == "suspend-resume"
+
+
+async def test_allow_suspend_preflights_auth_and_never_suspends_on_a_bad_password(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    """A wrong or stale encryption password must abort before the suspend, not strand the VM."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_vmrun.encrypted_live_snapshot_fails = True  # snapshot_take reports the encrypted-auth text
+    fake_vmrun.auth_fails = True  # but the password genuinely does not authenticate
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("snap_take", {"vm": "win11-dev", "name": "live2", "allow_suspend": True})
+    assert "authenticate" in exc.value.message.lower()
+    assert "daemon restart" in exc.value.hint
+    # The VM was never suspended, so it is still running and recoverable.
+    assert not any("suspend" in argv for argv in fake_vmrun.calls)
     assert fake_vmrun.running and not fake_vmrun.suspended
+    assert str(service.state.vm("win11-dev").power) == "running"
 
 
 async def test_suspend_resume_survives_transient_vmx_errors(

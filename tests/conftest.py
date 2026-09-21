@@ -34,6 +34,7 @@ class FakeVmrun:
         self.saw_vp = False
         self.vp_value = ""
         self.encrypted_live_snapshot_fails = False
+        self.auth_fails = False  # when True, listSnapshots reports an encryption-auth failure
         # Number of calls right after a suspend that fail with the transient vmx error.
         self.config_unreadable_after_suspend = 0
         self.fail_start = False  # when True, `start` fails (resume after suspend cannot happen)
@@ -88,6 +89,8 @@ class FakeVmrun:
             self.snapshots.append((rest[1], 0))
             return 0, ""
         if cmd == "listSnapshots":
+            if self.auth_fails:
+                return 4294967295, "Error: Authentication for encrypted virtual machine failed"
             lines = [f"Total snapshots: {len(self.snapshots)}"]
             for name, depth in self.snapshots:
                 lines.append("\t" * depth + name)

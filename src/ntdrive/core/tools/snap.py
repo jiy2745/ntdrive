@@ -58,6 +58,22 @@ async def _suspend_run_resume(
     """
     service.ensure_not_frozen(cfg.name)
     adapter = service.adapter_for(cfg)
+    # Pre-flight the encryption password BEFORE suspending, so a wrong or stale password can never
+    # leave the VM suspended and unable to resume. "Authentication for encrypted virtual machine
+    # failed" is the same text for a refused live snapshot (password fine) and a real auth failure,
+    # so an authenticated read that is not refused on a running encrypted VM tells them apart:
+    # listSnapshots succeeds when the password works, and fails when it does not.
+    try:
+        await adapter.snapshot_list(cfg)
+    except NtDriveError as exc:
+        raise NtDriveError(
+            exc.code,
+            f"cannot authenticate to the encrypted VM {cfg.name}, so it was not suspended: "
+            f"{exc.message}",
+            "check the encryption password (encryption_password_env in vms.yaml) and run "
+            "`ntdrive daemon restart`, then retry. The VM is untouched and still running.",
+            **({"reason": exc.reason} if exc.reason else {}),
+        ) from exc
     released = await service.release_guest(cfg.name)
     await adapter.suspend(cfg)
     failure: BaseException | None = None

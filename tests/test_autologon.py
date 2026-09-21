@@ -90,6 +90,20 @@ async def test_con_run_reports_a_command_that_did_not_finish(
     assert result["state"] == "Running" and "did not finish" in result["note"]
 
 
+async def test_con_run_points_at_autologon_when_there_is_no_interactive_session(
+    service: NtDriveService, fake_transport: FakeTransport, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    # The interactive task finished carrying a scheduler status (0x41303 = never ran), not a
+    # program exit code, because no one is signed in on the desktop.
+    fake_transport.exec_responses["$ErrorActionPreference='Stop'"] = (
+        "NTDRIVE_RC=267011 STATE=Ready\nNTDRIVE_OUT_BEGIN\n"
+    )
+    result = await service.call("con_run", {"vm": "win11-dev", "cmd": "whoami", "account": "admin"})
+    assert result["state"] == "Ready"
+    assert "con_autologon" in result["note"] and "interactive desktop" in result["note"]
+
+
 async def test_con_run_standard_without_an_account_is_an_error(
     service: NtDriveService, fake_vmrun: FakeVmrun
 ) -> None:

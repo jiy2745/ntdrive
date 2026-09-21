@@ -179,6 +179,14 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   `vm_start discard_saved_state=true` drops the lines and boots fresh. The suspend path retries
   the resume once and, when it still fails, records the snapshot and fails with the facts
   (`error.completed`, `error.power`, `error.resume_error`) instead of a raw vmrun error.
+- A stale encryption password once stranded a VM: the daemon read the password from its own
+  `os.environ` snapshot, which is fixed at start, so a password changed later never reached it and
+  the resume failed. On Windows `secret_from_env` now reads the live User-scope registry first
+  (where `ntdrive setup` writes) and only falls back to the process env. Before suspending, the
+  snapshot tools pre-flight the password with `listSnapshots`: it authenticates but is not refused
+  on a running encrypted VM, so it tells a real auth failure apart from a refused live snapshot
+  (both say "Authentication for encrypted virtual machine failed"). A bad password aborts with the
+  VM untouched, never suspended.
 - KDNET needs an inbound firewall allow for `kd.exe`, and Windows often has a leftover Block rule
   that wins. `kd_setup_host` (net) reads the rules without privilege and repairs them through one
   UAC prompt (`ntdrive.kd.firewall`). KDNET is the default. The serial pipe transport avoids
