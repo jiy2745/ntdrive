@@ -220,7 +220,9 @@ class SshPtyTransport(TermTransport):
                 lambda: _guarded(
                     f"ssh connect to {self.host}:{self.port}",
                     "the guest may still be booting (retry term_open in 30 s), or OpenSSH Server "
-                    "is not running in the guest, or the credentials are wrong",
+                    "is not running in the guest, or its firewall rule does not cover the guest's "
+                    "network profile (a Public profile blocks the Private/Domain OpenSSH rule and "
+                    "the connection resets), or the credentials are wrong",
                     _connect,
                 ),
             )

@@ -331,9 +331,15 @@ try {
   if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
   New-ItemProperty -Path $regPath -Name DefaultShell `
     -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -PropertyType String -Force | Out-Null
-  if (-not (Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue)) {
+  # The rule must apply to every network profile. Windows scopes its own OpenSSH rule to
+  # Private/Domain, and a debug VM often sits on a Public profile, where that rule does not apply
+  # and the host's SSH connection is reset (10054). -Profile Any makes the profile not matter.
+  $sshRule = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
+  if ($sshRule) {
+    Set-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -Enabled True -Profile Any
+  } else {
     New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -DisplayName "OpenSSH Server (sshd)" `
-      -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+      -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -Profile Any | Out-Null
   }
   $sshdPath = (Get-CimInstance Win32_Service -Filter "Name='sshd'").PathName
   Ok "sshd" "running ($sshdPath), default shell PowerShell, port 22 open"
