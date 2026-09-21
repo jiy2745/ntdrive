@@ -64,10 +64,28 @@ async def test_vm_delete_removes_the_vm_and_its_config(
     assert Path(clone["vmx"]).is_file()
 
     result = await service.call("vm_delete", {"vm": "agent4", "confirm": True})
-    assert result["deleted"] is True
+    assert result["deleted"] is True and result["files_removed"] is True
     assert "agent4" not in service.config.vms
     assert not Path(clone["vmx"]).exists()
     assert any("deleteVM" in argv for argv in fake_vmrun.calls)
+
+
+async def test_vm_delete_drops_a_stale_entry_whose_files_are_gone(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    await service.call("snap_take", {"vm": "win11-dev", "name": "base"})
+    clone = await service.call(
+        "vm_clone", {"vm": "win11-dev", "name": "agent6", "snapshot": "base"}
+    )
+    # The VM's files vanish (deleted in VMware, or moved), leaving only the vms.yaml entry.
+    Path(clone["vmx"]).unlink()
+    fake_vmrun.calls.clear()
+    result = await service.call("vm_delete", {"vm": "agent6", "confirm": True})
+    assert result["deleted"] is True and result["files_removed"] is False
+    assert "agent6" not in service.config.vms
+    # vmrun cannot act on missing files, so deleteVM is not attempted.
+    assert not any("deleteVM" in argv for argv in fake_vmrun.calls)
 
 
 async def test_vm_delete_needs_confirm(service: NtDriveService, fake_vmrun: FakeVmrun) -> None:

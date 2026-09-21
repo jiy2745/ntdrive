@@ -329,20 +329,34 @@ async def vm_clone(service: NtDriveService, p: CloneParams) -> dict[str, Any]:
 
 @tool(
     "vm_delete",
-    "Delete a VM and its files (a clone, usually). Powers it off first. Needs confirm=true. A "
-    "base VM with linked clones cannot be deleted until the clones are gone.",
+    "Delete a VM and its files (a clone, usually), and drop its vms.yaml entry. Powers it off "
+    "first. Needs confirm=true. When the VM's files are already gone (moved or deleted by hand) "
+    "it just removes the stale entry. A base VM with linked clones cannot be deleted until the "
+    "clones are gone.",
     DeleteParams,
     destructive=True,
     effect="destructive",
 )
 async def vm_delete(service: NtDriveService, p: DeleteParams) -> dict[str, Any]:
-    """Detach the debugger, drop terminals, power off, delete the VM, drop its config entry."""
+    """Detach the debugger, drop terminals, power off, delete the VM, drop its config entry.
+
+    A stale entry whose vmx is already gone is just deregistered: vmrun cannot act on files that
+    do not exist, so the config entry would otherwise be stuck (seen live after a VM was deleted
+    in VMware but left in vms.yaml).
+    """
     cfg = service.vm_cfg(p.vm)
     adapter = service.adapter_for(cfg)
     released = await service.release_guest(p.vm)
-    if await service.refresh_power(cfg) != PowerState.OFF:
-        await adapter.stop(cfg, hard=True)
-    await adapter.delete_vm(cfg)
+    files_present = bool(cfg.vmx) and Path(cfg.vmx).is_file()
+    if files_present:
+        if await service.refresh_power(cfg) != PowerState.OFF:
+            await adapter.stop(cfg, hard=True)
+        await adapter.delete_vm(cfg)
     remove_vm_config(service.config, p.vm)
-    service.state.record_event(p.vm, "vm_delete")
-    return {"vm": p.vm, "deleted": True, "terms_dropped": released["terms_dropped"]}
+    service.state.record_event(p.vm, "vm_delete", files_removed=files_present)
+    return {
+        "vm": p.vm,
+        "deleted": True,
+        "files_removed": files_present,
+        "terms_dropped": released["terms_dropped"],
+    }

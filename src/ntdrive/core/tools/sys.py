@@ -97,7 +97,10 @@ def config_issues(cfg: VmConfig, backends: set[str]) -> list[str]:
     if not cfg.vmx:
         issues.append("vmx path missing (the .vmx file of the VM, see vms.example.yaml)")
     elif not vmx_ok:
-        issues.append("vmx path does not exist")
+        issues.append(
+            "vmx path does not exist (the VM was moved or deleted, vm_delete confirm=true drops "
+            "this stale entry)"
+        )
     settings = vmx_settings(cfg.vmx) if vmx_ok else {}
     if settings.get("uefi.secureboot.enabled", "").lower() == "true":
         issues.append(
