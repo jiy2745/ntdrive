@@ -180,12 +180,19 @@ function Install-OpenSshCapability {
   try {
     Running "capability" "Add-WindowsCapability $($cap.Name), this asks Windows Update"
     Add-WindowsCapability -Online -Name $cap.Name | Out-Null
-    Ok "capability" "$($cap.Name) installed"
-    return $true
   } catch {
+    # Common on Insider builds and machines pointed at WSUS: Windows Update has no package for
+    # this capability (0x800f0954 and friends). Fall back to the zip.
     Warn "capability" "Add-WindowsCapability failed: $($_.Exception.Message)"
     return $false
   }
+  if (Get-Service sshd -ErrorAction SilentlyContinue) {
+    Ok "capability" "$($cap.Name) installed"
+    return $true
+  }
+  # The capability call can report success without the service appearing. Use the zip instead.
+  Warn "capability" "$($cap.Name) reported installed but no sshd service appeared"
+  return $false
 }
 
 function Install-OpenSshZip([string]$Source) {
@@ -202,10 +209,25 @@ function Install-OpenSshZip([string]$Source) {
     if ($Source -match "^https?://") {
       Running "zip" "downloading $Source"
       [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-      Invoke-WebRequest -Uri $Source -OutFile $zip -UseBasicParsing
-    } else {
+      $downloaded = $false
+      foreach ($attempt in 1..3) {
+        try {
+          Invoke-WebRequest -Uri $Source -OutFile $zip -UseBasicParsing
+          $downloaded = $true
+          break
+        } catch {
+          Warn "zip" "download attempt $attempt of 3 failed: $($_.Exception.Message)"
+          Start-Sleep -Seconds 2
+        }
+      }
+      if (-not $downloaded) {
+        throw "could not download OpenSSH from $Source. If this guest has no internet, copy OpenSSH-Win64.zip in and run: setup-guest.cmd -OpenSshZip <path to that zip>"
+      }
+    } elseif (Test-Path $Source) {
       Info "zip" "using $Source"
       Copy-Item $Source $zip
+    } else {
+      throw "OpenSSH zip not found at $Source (pass -OpenSshZip a local OpenSSH-Win64.zip or an https URL)"
     }
     Unblock-File $zip
     Expand-Archive -Path $zip -DestinationPath $work -Force
@@ -296,8 +318,15 @@ try {
     Info "fallback" "the Win32-OpenSSH zip"
     Install-OpenSshZip $OpenSshZip
   }
+  if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {
+    throw "OpenSSH Server was not installed: neither the Windows capability nor the zip produced an sshd service (see the warnings above). On a guest without internet, pass -OpenSshZip a local OpenSSH-Win64.zip."
+  }
   Set-Service -Name sshd -StartupType Automatic
-  Start-Service sshd
+  try {
+    Start-Service sshd
+  } catch {
+    throw "sshd is installed but would not start: $($_.Exception.Message). Run 'Get-Service sshd' and check the Application event log (host key generation can fail on a read-only or odd profile)."
+  }
   $regPath = "HKLM:\SOFTWARE\OpenSSH"
   if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
   New-ItemProperty -Path $regPath -Name DefaultShell `
