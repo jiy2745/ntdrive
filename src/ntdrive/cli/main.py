@@ -128,17 +128,27 @@ def _click_type(annotation: Any) -> tuple[Any, bool]:
     return click.STRING, False
 
 
-def _greedy_positional(spec: ToolSpec) -> str | None:
-    """The last positional when it is free text after another positional, else None.
+# Only a genuine free-text command should swallow the rest of the line. A path or a name must not,
+# or a mistyped trailing token (a stray `grant_users_rx=true`, an unquoted extra path) is silently
+# absorbed instead of erroring. These are the only positionals that are a whole typed command.
+_FREE_TEXT_POSITIONALS = {"cmd", "text"}
 
-    `ntdrive kd exec win11 !process 0 0 p.exe` then means one command, not extra arguments.
-    Single-positional tools (`vm state win11`) keep strict parsing so a typo still fails.
+
+def _greedy_positional(spec: ToolSpec) -> str | None:
+    """The last positional when it is a free-text command after another positional, else None.
+
+    `ntdrive kd exec win11 !process 0 0 p.exe` then means one command, not extra arguments. A path
+    or name positional (`file push ... REMOTE`, `snap take ... NAME`) stays strict: it takes one
+    argument, so a stray extra token is an error, not swallowed. Single-positional tools
+    (`vm state win11`) keep strict parsing so a typo still fails.
     """
     fields: dict[str, FieldInfo] = spec.params.model_fields
     ordered = [name for name in fields if name in spec.positional]
     if len(ordered) < 2:
         return None
     last = ordered[-1]
+    if last not in _FREE_TEXT_POSITIONALS:
+        return None
     annotation, _ = _unwrap_optional(fields[last].annotation)
     return last if annotation is str else None
 

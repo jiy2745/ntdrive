@@ -39,6 +39,23 @@ def test_last_free_text_positional_is_one_argument(monkeypatch: pytest.MonkeyPat
     # Single-positional tools stay strict: a typo is still an error, not a mangled VM name.
     result = runner.invoke(cli, ["--json", "vm", "state", "win11-dev", "extra"])
     assert result.exit_code != 0 and "extra" in result.output.lower()
+    # A path positional (file push REMOTE) is strict too: a flag written as a stray positional
+    # (grant_users_rx=true instead of --grant-users-rx) errors instead of being swallowed as
+    # another remote path. This misparse happened live.
+    result = runner.invoke(
+        cli,
+        ["--json", "file", "push", "win11-dev", "C:\\a.exe", "C:\\b.exe", "grant_users_rx=true"],
+    )
+    assert result.exit_code != 0 and "grant_users_rx=true" in result.output
+    # Spelled as the flag, it is accepted.
+    result = runner.invoke(
+        cli, ["--json", "file", "push", "win11-dev", "C:\\a.exe", "C:\\b.exe", "--grant-users-rx"]
+    )
+    assert result.exit_code == 0, result.output
+    assert calls[-1] == (
+        "file_push",
+        {"vm": "win11-dev", "local": "C:\\a.exe", "remote": "C:\\b.exe", "grant_users_rx": True},
+    )
 
 
 def test_status_is_an_alias_of_sys_state() -> None:
