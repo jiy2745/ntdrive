@@ -235,6 +235,14 @@ async def con_screenshot(service: NtDriveService, p: ScreenshotParams) -> dict[s
                 raise
             saved, via = await by_vnc()  # auto: fall back to the login-free path
     result: dict[str, Any] = {"vm": p.vm, "png_path": saved, "via": via}
+    if via == "guest":
+        # vmrun captureScreen returns a valid but all-black PNG when there is no interactive
+        # session (pre-login, WinRE, early boot) and reports success, which reads as a real frame.
+        result["note"] = (
+            "if the image is black the guest likely has no interactive session yet (pre-login, "
+            "WinRE or booting): con_enable_vnc (VM off) then con_screenshot method=vnc reads the "
+            "framebuffer without a login"
+        )
     if p.base64:
         with open(saved, "rb") as fh:
             result["png_base64"] = base64.b64encode(fh.read()).decode("ascii")

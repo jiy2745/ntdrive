@@ -458,10 +458,11 @@ class VmwareAdapter(HypervisorAdapter):
             raise NtDriveError(
                 TIMEOUT,
                 f"VMware Tools in {vm.name} reported no IP address within {timeout:.0f}s",
-                "the guest is still booting or VMware Tools is not running: wait and retry, or "
-                "con_screenshot method=vnc to see whether it sits at a login screen or a BSOD. "
-                "vm_stop mode=kill is only for a VM whose vm_stop or vm_reboot mode=hard time "
-                "out as well",
+                "the guest is still booting or VMware Tools is not running. After an unclean "
+                "shutdown (a bugcheck) the first boot can run chkdsk and take minutes: use "
+                "vm_wait_ready with a larger timeout instead of failing fast. con_screenshot "
+                "method=vnc shows whether it sits at a login screen, chkdsk or a BSOD. vm_stop "
+                "mode=kill is only for a VM whose vm_stop or vm_reboot mode=hard time out as well",
             ) from None
         ip = out.strip().splitlines()[-1].strip() if out.strip() else ""
         if not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip):

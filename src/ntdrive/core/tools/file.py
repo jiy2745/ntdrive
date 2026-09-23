@@ -50,6 +50,13 @@ class PushParams(VmParams):
     local: str = Field(description="Host file, directory or glob (absolute path)")
     remote: str = Field(description="Guest path; a directory when local is several files")
     verify: bool = Field(default=True, description="Compare SHA-256 after the copy")
+    grant_users_rx: bool = Field(
+        default=False,
+        description=(
+            "After copying, grant BUILTIN\\Users read and execute on each file. Pushed files "
+            "inherit admin-only ACLs, so a standard account cannot read or run them without this"
+        ),
+    )
 
 
 class PullParams(VmParams):
@@ -189,6 +196,25 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
         notes.append(
             f"sha256 verification failed for {hash_failures} file(s), see copied[].verify_error"
         )
+    users_rx: list[str] = []
+    if p.grant_users_rx and copied:
+        # BUILTIN\Users is *S-1-5-32-545, language-independent. icacls needs a guest shell, so
+        # this rides SSH; without it (guest-tools copy) the ACL cannot be set here.
+        try:
+            shell = await service.transport(cfg)
+            if not hasattr(shell, "exec_once"):
+                raise NtDriveError(INVALID_ARGS, "the transport cannot run commands")
+            for entry in copied:
+                target = entry["remote"]
+                code, out = await shell.exec_once(
+                    f'icacls "{target}" /grant "*S-1-5-32-545:(RX)"', timeout=30
+                )
+                if code == 0:
+                    users_rx.append(target)
+                else:
+                    notes.append(f"could not grant Users:RX on {target}: {out.strip()[:120]}")
+        except NtDriveError as exc:
+            notes.append(f"could not grant Users:RX (needs SSH to the guest): {exc.message}")
     # Top-level `verified` is a bool (or null), the same type as each copied[].verified, so a
     # caller never has to tell "verified: 3" (a count) from "verified: true". It is true only when
     # every file was checked and matched, false on any mismatch or unreadable hash, null when
@@ -210,6 +236,8 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
         "via": via,
         "copied": copied,
     }
+    if p.grant_users_rx:
+        result["users_rx"] = users_rx
     if notes:
         result["note"] = "; ".join(notes)
     return result

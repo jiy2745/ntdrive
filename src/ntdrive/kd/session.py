@@ -319,9 +319,11 @@ class KdSession:
         status = self.status()
         if wait_for_target and self.state == KdState.WAITING:
             status["note"] = (
-                f"the target did not connect within {timeout:.0f}s. A KDNET target connects "
-                "while it boots: vm_reboot mode=soft (kd.exe stays attached and waits for it), "
-                "or kd_break to confirm [no_debuggee]"
+                f"the target has not announced itself within {timeout:.0f}s (it may already be "
+                "connected: KDNET does not always reprint the banner after a reconnect). Run "
+                "kd_break to confirm, it returns broken at once if the target is there. If it "
+                "sits at [no_debuggee] the target is really absent: vm_reboot mode=soft so it "
+                "reconnects while it boots"
             )
         return status
 

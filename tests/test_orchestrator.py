@@ -392,6 +392,27 @@ async def test_file_push_and_pull(
     assert Path(pulled["local"]).name == "mydrv.sys"
 
 
+async def test_file_push_grant_users_rx_runs_icacls(
+    service: NtDriveService, fake_transport: FakeTransport, tmp_path: Path
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    src = tmp_path / "probe.ps1"
+    src.write_text("Write-Output hi", encoding="utf-8")
+    pushed = await service.call(
+        "file_push",
+        {
+            "vm": "win11-dev",
+            "local": str(src),
+            "remote": "C:\\drv\\probe.ps1",
+            "grant_users_rx": True,
+        },
+    )
+    assert pushed["users_rx"] == ["C:\\drv\\probe.ps1"]
+    # BUILTIN\Users (*S-1-5-32-545) was granted read+execute so a standard account can run it.
+    icacls = [c for c in fake_transport.exec_log if c.startswith("icacls")]
+    assert icacls == ['icacls "C:\\drv\\probe.ps1" /grant "*S-1-5-32-545:(RX)"']
+
+
 async def test_file_tools_reject_relative_host_paths(service: NtDriveService) -> None:
     await service.call("vm_start", {"vm": "win11-dev"})
     with pytest.raises(NtDriveError) as exc:

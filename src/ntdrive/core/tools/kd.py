@@ -376,10 +376,20 @@ async def kd_detach(service: NtDriveService, p: DetachParams) -> dict[str, Any]:
     """Detach."""
     cfg = service.vm_cfg(p.vm)
     session = service.kd_session(cfg)
+    was_connected = session.transport == "net" and bool(session.target_info)
     status = await session.detach(force=p.force)
     service.runtime(p.vm)
     service.state.record_event(p.vm, "kd_detach")
-    return {"vm": p.vm, **status}
+    result = {"vm": p.vm, **status}
+    if was_connected:
+        # Quitting kd.exe while a KDNET target is live makes kd print transport chatter, sometimes
+        # "A fatal system error has occurred". That is kd.exe reacting to the dropped link, not a
+        # guest crash: the guest keeps running. Say so, since it has scared callers.
+        result["note"] = (
+            "detaching from a live KDNET target can print a transport error such as 'A fatal "
+            "system error has occurred'. That is kd.exe, not the guest: the guest keeps running"
+        )
+    return result
 
 
 @tool(

@@ -255,6 +255,9 @@ async def test_kd_lifecycle(service: NtDriveService, kd_procs: list[FakeKdProces
 
     detached = await service.call("kd_detach", {"vm": "win11-dev"})
     assert detached["state"] == "detached"
+    # Detaching from a live KDNET target is explained, so kd.exe transport chatter is not mistaken
+    # for a guest crash.
+    assert "guest keeps running" in detached["note"]
     assert proc.commands[-2:] == ["g", "q"]
     await settle()
     assert not service.runtime("win11-dev").guest_frozen

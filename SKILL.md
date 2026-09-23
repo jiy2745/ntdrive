@@ -143,14 +143,27 @@ snap_revert vm=win11-dev name=base-kd      -> steps: kd_detach, term_drop, snaps
                                               kd_attach, guest_ip, term_reopen, and term: [{old, new}]
 ```
 
+On a bugcheck the code and its arguments ride the `kd_wait_event` result (`bugcheck: {code,
+arguments}`), so a crash is caught and identified without polling `r rip` or a second `!analyze`.
+After the crash reboots itself the first boot may run chkdsk and take minutes, so wait with
+`vm_wait_ready vm=... timeout=300` (it long-polls SSH) before `term_open`, rather than reading a
+60s "no IP" as failure.
+
 A crashed guest answers neither SSH nor VMware Tools, so `file_pull` cannot fetch its logs until it
 is back: the debugger is the post-mortem tool, and `C:\\Windows\\MEMORY.DMP` can be pulled after the
-reboot. When KDNET dropped during the crash (`kd_state` shows no target, `kd_break` times out with
+reboot. Booting into WinRE (`reagentc /boottore`) while KDNET is attached can NMI the guest into a
+`NMI_HARDWARE_FAILURE` (0x80) bugcheck: `bcdedit /debug off` and `kd_detach` first, then reboot to
+WinRE cleanly. Detaching from a live KDNET target can print a transport error such as "A fatal
+system error has occurred" from kd.exe itself, and the guest is unaffected. When KDNET dropped during
+the crash (`kd_state` shows no target, `kd_break` times out with
 [no_debuggee]) `vm_reboot mode=kd` cannot work: use `vm_reboot mode=hard confirm=true`. When vmrun
 itself stops answering for the VM (timeouts on stop, reset or list after a crash), `vm_stop
 mode=kill confirm=true` ends its vmware-vmx process on the host and clears the `.lck` files, then
 `vm_start` boots it again. `mode=hard` and `kill` discard whatever the guest had not flushed, so
-`mode=soft` is the clean way down while the guest still answers.
+`mode=soft` is the clean way down while the guest still answers. `vm_reboot` waits for kd to
+reattach and terminals to reopen, which can outlast a tool-call timeout and go to the background. To
+return as soon as the boot is triggered, pass `reattach_kd=false reopen_term=false`, then drive the
+reconnect yourself: `vm_wait_ready`, `kd_attach wait_for_target=false`, `term_open`.
 
 ### Watch a streaming command
 
@@ -214,6 +227,10 @@ the disk, and the snapshot keeps the memory state. `sys_health` reports such a l
   the question is what a normal user sees: UAC, access denied, per-user settings. `file_push`,
   `file_pull` and `kd_setup_guest` always use the administrator account. Without a standard
   account configured the call fails with `invalid_args` and says how to add one.
+- `file_push` writes files with admin-only ACLs, so a `term_exec`/`con_run account=standard` run of
+  a pushed `.ps1` or `.exe` gets "access denied" or "not recognized". Pass
+  `file_push grant_users_rx=true` to grant BUILTIN\\Users read and execute on each copied file (it
+  needs SSH). Its arguments are positional: `file_push VM LOCAL REMOTE`, not `--local/--remote`.
 - `term_read mode=screen` shows exactly what a person sees on the terminal (rows x cols). Use it
   for menus, progress bars and anything that redraws the screen.
 - `kd_exec` accepts a list in `cmds` so that several debugger commands cost one tool call.
