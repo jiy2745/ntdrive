@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -92,12 +93,89 @@ async def vm_list(service: NtDriveService, _: NoParams) -> dict[str, Any]:
     return {"vms": vms}
 
 
-@tool("vm_state", "Power, debugger and terminal state of one VM.", VmParams, effect="read")
-async def vm_state(service: NtDriveService, p: VmParams) -> dict[str, Any]:
-    """Refresh and return one VM."""
-    service.vm_cfg(p.vm)  # an unknown or unsupported VM is an error here, not a power_error
+class StateParams(VmParams):
+    """vm_state."""
+
+    probe: bool = Field(
+        default=False,
+        description=(
+            "Also probe the guest and add guest_reachable: whether SSH answers now. Off by "
+            "default because it costs a connection attempt; the kd block already tells running "
+            "from broken/bugcheck without a probe"
+        ),
+    )
+
+
+@tool("vm_state", "Power, debugger and terminal state of one VM.", StateParams, effect="read")
+async def vm_state(service: NtDriveService, p: StateParams) -> dict[str, Any]:
+    """Refresh and return one VM.
+
+    power tells on from off; the kd block tells a running kernel from one halted at the debugger
+    (state broken, last_event.event bugcheck with the code). probe=true adds guest_reachable for
+    "is the desktop actually up" after a reboot, which power alone cannot answer.
+    """
+    cfg = service.vm_cfg(p.vm)  # an unknown or unsupported VM is an error here, not a power_error
     power = (await service.refresh_powers([p.vm]))[p.vm]
-    return _summary(service, p.vm, power)
+    summary = _summary(service, p.vm, power)
+    if p.probe:
+        if power == PowerState.RUNNING:
+            try:
+                reachable, _ = await service.ssh_reachable(cfg, timeout=10)
+            except NtDriveError:
+                reachable = False  # Tools reported no IP in time: not reachable yet
+            summary["guest_reachable"] = reachable
+        else:
+            summary["guest_reachable"] = False
+    return summary
+
+
+class WaitReadyParams(VmParams):
+    """vm_wait_ready."""
+
+    timeout: float = Field(
+        default=180, ge=1, description="Seconds to wait for the guest to answer SSH"
+    )
+
+
+@tool(
+    "vm_wait_ready",
+    "Wait until the guest is back up: block until SSH answers, or the timeout passes. For after a "
+    "reboot or a bugcheck's auto-restart, so no manual polling loop is needed.",
+    WaitReadyParams,
+    long_poll=True,
+    effect="read",
+)
+async def vm_wait_ready(service: NtDriveService, p: WaitReadyParams) -> dict[str, Any]:
+    """Long-poll SSH reachability. Returns ready=false at the timeout rather than raising."""
+    cfg = service.vm_cfg(p.vm)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + p.timeout
+    ip = ""
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        try:
+            # A short per-attempt bound so a guest that is still down (Tools report no IP) does
+            # not eat the whole timeout in one blocking lookup: we retry until the deadline.
+            reachable, ip = await service.ssh_reachable(cfg, timeout=min(remaining, 15))
+        except NtDriveError:
+            reachable = False  # no IP yet: still booting
+        if reachable:
+            service.state.record_event(p.vm, "wait_ready", ready=True)
+            waited = round(p.timeout - remaining, 1)
+            return {"vm": p.vm, "ready": True, "ip": ip, "waited_s": waited}
+        await asyncio.sleep(min(2.0, max(0.1, deadline - loop.time())))
+    return {
+        "vm": p.vm,
+        "ready": False,
+        "ip": ip,
+        "waited_s": round(p.timeout, 1),
+        "note": (
+            "SSH did not answer in time. The guest may still be booting, sitting at a login or "
+            "BSOD (con_screenshot method=vnc), or SSH may be off (sys_health)"
+        ),
+    }
 
 
 @tool(
@@ -300,6 +378,15 @@ async def vm_clone(service: NtDriveService, p: CloneParams) -> dict[str, Any]:
             SNAPSHOT_NOT_FOUND,
             f"{p.vm} has no snapshot named {snapshot}",
             f"known snapshots: {', '.join(tree.names()) or '(none)'}",
+        )
+    if p.linked and src.resolve_encryption_password():
+        # vmrun cannot make a linked clone of an encrypted VM and misreports it as "already
+        # running" (seen live). A full clone works because it copies and re-encrypts the disk.
+        raise NtDriveError(
+            INVALID_ARGS,
+            f"{p.vm} is encrypted, and vmrun cannot make a linked clone of an encrypted VM",
+            "pass linked=false for a full clone (it copies the whole disk, so it is slower and "
+            "uses its own space)",
         )
     dst_vmx = str(Path(src.vmx).parent / "ntdrive-clones" / p.name / f"{p.name}.vmx")
     await adapter.clone(src, dst_vmx, p.name, snapshot, p.linked)

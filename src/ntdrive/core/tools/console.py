@@ -109,6 +109,14 @@ class RunParams(VmParams):
     max_bytes: int = Field(
         default=65536, ge=256, le=1 << 20, description="Cap on the returned output (truncated says)"
     )
+    detach: bool = Field(
+        default=False,
+        description=(
+            "Start the command and return at once, leaving it running in the guest session (for a "
+            "long-lived provider or server). timeout and capture are ignored; stdout goes to a log "
+            "file whose path is returned, read it later with file_pull"
+        ),
+    )
 
 
 def _run_script(task: str, log: str, user: str, run_level: str, cmd: str, timeout: float) -> str:
@@ -145,6 +153,40 @@ def _run_script(task: str, log: str, user: str, run_level: str, cmd: str, timeou
             "if (Test-Path -LiteralPath $log) { Get-Content -Raw -LiteralPath $log; "
             "Remove-Item -LiteralPath $log -Force }"
         ),
+    ]
+    return "; ".join(lines)
+
+
+def _detach_script(task: str, log: str, user: str, run_level: str, cmd: str) -> str:
+    """PowerShell that starts `cmd` in the user's session and returns without waiting for it.
+
+    The task keeps no time limit so a long-lived provider is not killed, and it is left registered
+    so unregistering it does not stop the running process. The command's output goes to a
+    world-readable log the caller can file_pull. The started process outlives this SSH call.
+    """
+    argument = _ps_literal(f'/c ({cmd}) > "{log}" 2>&1')
+    lines = [
+        "$ErrorActionPreference='Stop'",
+        f"$t='{task}'",
+        f"$log='{log}'",
+        "if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }",
+        f"$a=New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '{argument}'",
+        (
+            f"$pr=New-ScheduledTaskPrincipal -UserId '{_ps_literal(user)}' -LogonType Interactive "
+            f"-RunLevel {run_level}"
+        ),
+        (
+            "$s=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) "
+            "-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries"
+        ),
+        (
+            "Register-ScheduledTask -TaskName $t -Action $a -Principal $pr -Settings $s -Force "
+            "| Out-Null"
+        ),
+        "Start-ScheduledTask -TaskName $t",
+        "Start-Sleep -Milliseconds 600",
+        "$st=(Get-ScheduledTask -TaskName $t).State",
+        "Write-Output ('NTDRIVE_RC=0 STATE=' + $st)",
     ]
     return "; ".join(lines)
 
@@ -357,11 +399,54 @@ async def con_autologon(service: NtDriveService, p: AutologonParams) -> dict[str
     }
 
 
+async def _con_run_detached(
+    service: NtDriveService,
+    p: RunParams,
+    transport: Any,
+    task: str,
+    log: str,
+    user: str,
+    run_level: str,
+) -> dict[str, Any]:
+    """Start the command and return at once, leaving it running in the guest session."""
+    script = _detach_script(task, log, user, run_level, p.cmd)
+    _, out = await transport.exec_once(script, timeout=60)
+    match = re.search(r"NTDRIVE_RC=(-?\d+) STATE=(\w+)", out)
+    if match is None:
+        raise NtDriveError(
+            BACKEND_ERROR,
+            f"could not start the detached command in {p.vm}: {out.strip()[:300]}",
+            "the account must be logged in on the interactive desktop (con_autologon), and the "
+            "SSH account needs administrator rights to schedule the task",
+        )
+    state = match.group(2)
+    service.state.record_event(p.vm, "con_run", account=p.account, detached=True)
+    result: dict[str, Any] = {
+        "vm": p.vm,
+        "account": p.account,
+        "detached": True,
+        "task": task,
+        "log": log,
+        "state": state,
+        "note": (
+            f"started and left running; its output goes to {log} (file_pull to read it). The "
+            "scheduled task stays registered so the process is not stopped"
+        ),
+    }
+    if state != "Running":
+        result["note"] = (
+            f"the task state is {state}, not Running: the command may have exited already or not "
+            "started (no interactive session: con_autologon). Check the log with file_pull"
+        )
+    return result
+
+
 @tool(
     "con_run",
     "Run a command on the guest's interactive desktop (session 1) and return its output, for GUI "
     "or session-bound programs that SSH in session 0 cannot open. It runs through a scheduled "
-    "task in the logged-on user's session, so the account must be logged in (con_autologon).",
+    "task in the logged-on user's session, so the account must be logged in (con_autologon). "
+    "detach=true starts it and returns at once, leaving it running.",
     RunParams,
     positional=("vm", "cmd"),
     touches_guest=True,
@@ -387,6 +472,8 @@ async def con_run(service: NtDriveService, p: RunParams) -> dict[str, Any]:
     task = f"ntdrive_run_{secrets.token_hex(4)}"
     log = f"C:\\Users\\Public\\{task}.log"  # world-readable, so admin SSH reads what the user ran
     run_level = "Highest" if p.account == "admin" else "Limited"
+    if p.detach:
+        return await _con_run_detached(service, p, transport, task, log, user, run_level)
     script = _run_script(task, log, user, run_level, p.cmd, p.timeout)
     _, out = await transport.exec_once(script, timeout=p.timeout + 30)
     match = re.search(r"NTDRIVE_RC=(-?\d+) STATE=(\w+)", out)

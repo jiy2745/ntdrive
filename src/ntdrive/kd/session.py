@@ -57,6 +57,39 @@ def generate_kdnet_key() -> str:
     return ".".join(words)
 
 
+BUGCHECK_CODE_RE = re.compile(
+    r"(?:bugcheck code|fatal system error:)\s*0?x?([0-9a-f]{1,8})", re.IGNORECASE
+)
+# The argument block follows as `Arguments a`b c`d ...` (KDNET) or `(0x..,0x..,..)` after the code.
+BUGCHECK_ARGS_RE = re.compile(r"(?:arguments\s+|\()\s*([0-9a-fx`, ]+)", re.IGNORECASE)
+_HEX_TOKEN_RE = re.compile(r"(?:0x)?[0-9a-f]+", re.IGNORECASE)
+
+
+def _hex_arg(token: str) -> str:
+    """One bugcheck argument, always 0x-prefixed and lower case."""
+    token = token.lower()
+    return token if token.startswith("0x") else "0x" + token
+
+
+def parse_bugcheck(text: str) -> dict[str, Any] | None:
+    """The bugcheck code (0x-prefixed, 8 digits) and up to four arguments, from a break banner.
+
+    kd prints either `Bugcheck code 0000003B` / `Arguments a`b ...` or `*** Fatal System Error:
+    0x0000003b` followed by `(0x..,0x..,..)`. Both forms are read so a bugcheck event carries the
+    code and parameters `!analyze -v` would show, with no second command needed.
+    """
+    m = BUGCHECK_CODE_RE.search(text)
+    if not m:
+        return None
+    code = "0x" + m.group(1).lower().zfill(8)
+    args: list[str] = []
+    am = BUGCHECK_ARGS_RE.search(text[m.end() :])
+    if am:
+        tokens = re.split(r"[,\s]+", am.group(1).replace("`", "").strip())
+        args = [_hex_arg(tok) for tok in tokens if _HEX_TOKEN_RE.fullmatch(tok)]
+    return {"code": code, "arguments": args[:4]}
+
+
 def classify_break(text: str) -> str:
     """Name the event that brought the target to a prompt."""
     lowered = text.lower()
@@ -332,11 +365,12 @@ class KdSession:
             if self.state in (KdState.RUNNING, KdState.WAITING):
                 tail = self._buf[-4096:].decode("utf-8", errors="replace")
                 kind = classify_break(tail)
-                self.last_event = {
-                    "event": kind,
-                    "at": time.time(),
-                    "output": tail[-2000:],
-                }
+                event: dict[str, Any] = {"event": kind, "at": time.time(), "output": tail[-2000:]}
+                if kind == "bugcheck":
+                    bugcheck = parse_bugcheck(tail)
+                    if bugcheck is not None:
+                        event["bugcheck"] = bugcheck
+                self.last_event = event
             self.state = KdState.BROKEN
         self._loop.create_task(self._notify())
 

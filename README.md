@@ -215,6 +215,7 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 |---|---|---|
 | `vm_list` | read | List registered VMs with power, debugger and terminal state. |
 | `vm_state` | read | Power, debugger and terminal state of one VM. |
+| `vm_wait_ready` | read | Wait until the guest is back up: block until SSH answers, or the timeout passes. For after a reboot or a bugcheck's auto-restart, so no manual polling loop is needed. |
 | `vm_start` | additive | Power on (or resume) a VM without the GUI by default. discard_saved_state boots fresh when a stale saved state blocks the resume. |
 | `vm_stop` | destructive | Stop the VM: mode soft, hard or kill. hard and kill need confirm=true. |
 | `vm_reboot` | destructive | Reboot the guest (soft, hard or from the debugger) and bring kd and terminals back, the terminals under new session ids. hard needs confirm=true. |
@@ -249,7 +250,7 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `con_send_keys` | destructive | Type keys into the VM console over VNC, no guest login needed (con_enable_vnc turns VNC on). For a lock or login screen or before the network is up: keys=['{password}', '{enter}'] logs in without the password crossing the wire. |
 | `con_click` | destructive | Click the VM console at a framebuffer pixel over VNC, no guest login needed. Read the coordinate off con_screenshot method=vnc (same pixels), for example to pick a user tile on the lock screen, then con_send_keys for the password. |
 | `con_autologon` | additive | Configure Windows automatic logon in the guest so a reboot lands on an unlocked interactive desktop (session 1), which term_* over SSH (session 0) cannot open. enabled=false clears it. needs_reboot: run vm_reboot mode=soft next. |
-| `con_run` | destructive | Run a command on the guest's interactive desktop (session 1) and return its output, for GUI or session-bound programs that SSH in session 0 cannot open. It runs through a scheduled task in the logged-on user's session, so the account must be logged in (con_autologon). |
+| `con_run` | destructive | Run a command on the guest's interactive desktop (session 1) and return its output, for GUI or session-bound programs that SSH in session 0 cannot open. It runs through a scheduled task in the logged-on user's session, so the account must be logged in (con_autologon). detach=true starts it and returns at once, leaving it running. |
 | `con_enable_vnc` | additive | Turn on the console VNC server in the vmx so con_screenshot method=vnc can read the screen without a guest login. Run it with the VM off, then start the VM. |
 | `file_push` | destructive | Copy a file, directory or glob from the host into the guest and verify it by SHA-256 (over SFTP, or through VMware Tools when SSH is down). |
 | `file_pull` | additive | Copy a file from the guest to the host. |

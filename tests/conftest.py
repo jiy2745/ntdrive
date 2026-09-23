@@ -403,7 +403,9 @@ class FakeKdProcess:
     def bugcheck(self) -> None:
         self.broken = True
         self.inject(
-            b"*** Fatal System Error: 0x0000007e\r\nA fatal system error has occurred.\r\nBugCheck 7E, {...}\r\nkd> "
+            b"*** Fatal System Error: 0x0000007e\r\n"
+            b"(0xffffffffc0000005,0xfffff80012345678,0x0,0x0)\r\n"
+            b"A fatal system error has occurred.\r\nBugCheck 7E, {...}\r\nkd> "
         )
 
     def poll(self) -> int | None:

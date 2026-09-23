@@ -99,6 +99,37 @@ async def test_allow_suspend_preflights_auth_and_never_suspends_on_a_bad_passwor
     assert str(service.state.vm("win11-dev").power) == "running"
 
 
+async def test_vm_wait_ready_returns_when_ssh_answers(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    result = await service.call("vm_wait_ready", {"vm": "win11-dev", "timeout": 5})
+    assert result["ready"] is True and result["ip"]
+
+
+async def test_vm_wait_ready_times_out_without_ssh(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    service.ssh_probe = never_reachable
+    result = await service.call("vm_wait_ready", {"vm": "win11-dev", "timeout": 1})
+    assert result["ready"] is False and "note" in result
+
+
+async def test_vm_state_probe_reports_guest_reachable(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    up = await service.call("vm_state", {"vm": "win11-dev", "probe": True})
+    assert up["guest_reachable"] is True
+    # Without a probe the field is absent, so a plain state query pays no connection cost.
+    plain = await service.call("vm_state", {"vm": "win11-dev"})
+    assert "guest_reachable" not in plain
+    service.ssh_probe = never_reachable
+    down = await service.call("vm_state", {"vm": "win11-dev", "probe": True})
+    assert down["guest_reachable"] is False
+
+
 async def test_suspend_resume_survives_transient_vmx_errors(
     service: NtDriveService, fake_vmrun: FakeVmrun
 ) -> None:
@@ -350,7 +381,8 @@ async def test_file_push_and_pull(
     pushed = await service.call(
         "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\drv"}
     )
-    assert pushed["files"] == 2 and pushed["verified"] == 2 and pushed["via"] == "ssh"
+    assert pushed["files"] == 2 and pushed["via"] == "ssh"
+    assert pushed["verified"] is True and pushed["verified_count"] == 2
     assert fake_transport.files["C:\\drv\\mydrv.sys"] == b"MZ driver"
     pulled = await service.call(
         "file_pull",
@@ -402,7 +434,7 @@ async def test_file_push_falls_back_to_guest_tools_without_ssh(
     )
     assert pushed["via"] == "guest_tools"
     # The fallback copy is hashed too: Get-FileHash ran in the guest and matched the host file.
-    assert pushed["files"] == 1 and pushed["verified"] == 1
+    assert pushed["files"] == 1 and pushed["verified"] is True and pushed["verified_count"] == 1
     assert pushed["copied"][0]["verified"] is True
     assert "guest tools" in pushed["note"]
     assert any("copyFileFromHostToGuest" in c for c in fake_vmrun.calls)
@@ -440,7 +472,7 @@ async def test_file_push_reports_verification_failure(
     pushed = await service.call(
         "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\a.bin"}
     )
-    assert pushed["via"] == "ssh" and pushed["verified"] == 0
+    assert pushed["via"] == "ssh" and pushed["verified"] is False and pushed["verified_count"] == 0
     assert pushed["copied"][0]["verified"] is None
     assert "permission denied" in pushed["copied"][0]["verify_error"]
     assert "verification failed" in pushed["note"]

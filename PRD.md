@@ -373,7 +373,8 @@ messages are written in English (ST-9).
 | Tool | Arguments | Returns |
 |---|---|---|
 | `vm_list` | - | `{vms:[{name, backend, power, kd, current_snapshot, term_open:[ids], term_disconnected:[{session_id, successor}], guest_frozen, last_event, power_error?}]}` |
-| `vm_state` | `vm` | detail of one item above |
+| `vm_state` | `vm, probe=false` | detail of one item above. `probe=true` adds `guest_reachable` (whether SSH answers now). The `kd` block already tells a running kernel from one halted at the debugger (state `broken`, `last_event.event` `bugcheck`) |
+| `vm_wait_ready` | `vm, timeout=180` | `{ready, ip, waited_s, note?}`. Long-polls until the guest answers SSH, for after a reboot or a bugcheck's auto-restart. Returns `ready=false` at the timeout instead of erroring |
 | `vm_start` | `vm, gui=false, discard_saved_state=false` | `{power, saved_state_dropped?: {saved_state, removed}}` |
 | `vm_stop` | `vm, mode=soft\|hard\|kill, confirm?` | `{power, terms_dropped, killed?, locks_removed?, power_error?}` |
 | `vm_reboot` | `vm, mode=soft\|hard\|kd, confirm? (hard), reattach_kd=true, reopen_term=true, timeout=180` | `{steps:[...], kd, term:[{old, new}]}`. On a failure `error.steps` lists what ran |
@@ -397,7 +398,7 @@ messages are written in English (ST-9).
 | `kd_break` | `vm, timeout=20` | `{state, output}`. A timeout with no target ever connected (kd at [no_debuggee]) tells the caller to reboot the guest so KDNET reconnects |
 | `kd_go` | `vm` | `{state}` |
 | `kd_exec` | `vm, cmd | cmds[], timeout=60, max_bytes=65536` | `{outputs:[{cmd, output, truncated, elapsed_ms}]}` |
-| `kd_wait_event` | `vm, timeout=300` | `{event: bugcheck\|breakpoint\|module_load\|user_break\|timeout, output, state}` |
+| `kd_wait_event` | `vm, timeout=300` | `{event: bugcheck\|breakpoint\|module_load\|user_break\|timeout, output, state, bugcheck?:{code, arguments}}`. On a bugcheck the code (`0x0000003b`) and up to four arguments are parsed from the banner, so `!analyze -v` is not needed just to see them |
 | `kd_state` | `vm` | `{attached, state, transport, port, serial_pipe, target_info, last_event, log_path, pid, previous_session?, note?}`. `attached` and `state` come from the live kd.exe process: when it is gone the state is `detached` and what the previous session saw sits under `previous_session`, never mixed into the present |
 | `kd_log_tail` | `vm, bytes=16384` | `{text}` |
 
@@ -422,9 +423,9 @@ messages are written in English (ST-9).
 | `con_enable_vnc` | `vm, port?` | `{changed, port, note}` (VM off) |
 | `con_send_keys` | `vm, keys[]` | `{sent}` (the count of items, not characters, so a password's length does not leak). VNC must be on (`con_enable_vnc`). `{password}`/`{standard_password}` items type that account's password from `vms.yaml` |
 | `con_click` | `vm, x, y, button=left\|right\|middle, double=false` | `{clicked:[x, y], button, double}`. VNC must be on. Pixels are the ones `con_screenshot method=vnc` captures |
-| `con_run` | `vm, cmd, account=standard\|admin, timeout=60, capture=true, max_bytes=65536` | `{exit_code, state, output?, truncated?, note?}`. Runs `cmd` in the account's interactive session (session 1) through a scheduled task, so the account must be logged in (con_autologon) |
+| `con_run` | `vm, cmd, account=standard\|admin, timeout=60, capture=true, max_bytes=65536, detach=false` | `{exit_code, state, output?, truncated?, note?}`, or with `detach=true` `{detached, task, log, state, note}`. Runs `cmd` in the account's interactive session (session 1) through a scheduled task, so the account must be logged in (con_autologon). `detach=true` starts it and returns at once, leaving a long-lived process running with no time limit and its output going to `log` (read later with `file_pull`). A Task Scheduler status in `exit_code` (>= 0x41300) means the task never ran, usually no interactive session |
 | `con_autologon` | `vm, enabled=true, account=standard\|admin` | `{enabled, account, user, needs_reboot}`. Sets or clears the Winlogon autologon keys over SSH so a reboot lands on an unlocked interactive desktop. The password comes from `vms.yaml` server-side, never in the arguments, result or log |
-| `file_push` | `vm, local, remote, verify=true` (`local` is an absolute host path, the CLI and SDK absolutize) | `{files, bytes, verified, via: sftp\|guest_tools, copied:[{local, remote, bytes, verified, verify_error?}], note?}`. `verified` is true or false for SFTP and guest-tools copies alike. It is null with `verify_error` when the hash could not be read |
+| `file_push` | `vm, local, remote, verify=true` (`local` is an absolute host path, the CLI and SDK absolutize) | `{files, bytes, verified, verified_count, via: sftp\|guest_tools, copied:[{local, remote, bytes, verified, verify_error?}], note?}`. Top-level `verified` is a bool like each `copied[].verified` (true when every file matched, false on any mismatch or unreadable hash, null when verify is off). `verified_count` is how many matched |
 | `file_pull` | `vm, remote, local` (a trailing separator on `local` means directory) | `{bytes, via, note?}` |
 | `file_stat` | `vm, remote` | `{exists, size?, modified?, is_dir?, via}` |
 | `file_ls` | `vm, remote` | `{exists, entries:[{name, size, modified, is_dir}], via}` |

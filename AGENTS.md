@@ -192,6 +192,14 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   UAC prompt (`ntdrive.kd.firewall`). KDNET is the default. The serial pipe transport avoids
   all of that for hosts where nobody can approve a prompt.
 - Win32-OpenSSH resolves `C:/x` relative to the home directory over SFTP. Paths must be `/C:/x`.
+- `vmrun clone` cannot make a *linked* clone of an encrypted VM and misreports it as "already
+  running". `vm_clone` refuses a linked clone of an encrypted source up front and points at
+  `linked=false` (a full clone copies and re-encrypts the disk, which works).
+- A bugcheck breaks a KDNET-attached target into `kd>`, so `kd_wait_event` returns `bugcheck` with
+  the code and arguments parsed from the banner (`parse_bugcheck` in `kd/session.py`), with no
+  `r rip` polling. `vm_wait_ready` long-polls SSH for the guest coming back after the auto-restart,
+  and
+  `con_run detach=true` starts a long-lived provider without the tool's timeout killing it.
 - `Add-WindowsCapability` for OpenSSH fails on Insider builds (no Feature-on-Demand package for
   them). The Win32-OpenSSH zip works, and `scripts/setup-guest.ps1` falls back to it on its own.
 - PSReadLine redraws the input line on every keystroke and floods terminal reads. The terminal

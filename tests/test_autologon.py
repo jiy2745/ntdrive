@@ -104,6 +104,22 @@ async def test_con_run_points_at_autologon_when_there_is_no_interactive_session(
     assert "con_autologon" in result["note"] and "interactive desktop" in result["note"]
 
 
+async def test_con_run_detach_starts_and_returns_at_once(
+    service: NtDriveService, fake_transport: FakeTransport, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_transport.exec_responses["$ErrorActionPreference='Stop'"] = "NTDRIVE_RC=0 STATE=Running\n"
+    result = await service.call(
+        "con_run", {"vm": "win11-dev", "cmd": "provider.exe", "account": "admin", "detach": True}
+    )
+    assert result["detached"] is True and result["state"] == "Running"
+    assert result["task"].startswith("ntdrive_run_") and result["log"].endswith(".log")
+    # A detached task must not have the time limit that would kill a long-lived provider.
+    script = fake_transport.exec_log[-1]
+    assert "ExecutionTimeLimit ([TimeSpan]::Zero)" in script
+    assert "Unregister-ScheduledTask" not in script  # left registered so the process is not stopped
+
+
 async def test_con_run_standard_without_an_account_is_an_error(
     service: NtDriveService, fake_vmrun: FakeVmrun
 ) -> None:

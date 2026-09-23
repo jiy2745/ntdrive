@@ -5,6 +5,7 @@ from ntdrive.core.registry import load_builtin_tools
 EXPECTED = {
     "vm_list",
     "vm_state",
+    "vm_wait_ready",
     "vm_start",
     "vm_stop",
     "vm_reboot",
@@ -77,6 +78,7 @@ def test_destructive_tools_have_confirm() -> None:
 READ_ONLY = {
     "vm_list",
     "vm_state",
+    "vm_wait_ready",
     "snap_list",
     "kd_wait_event",
     "kd_state",

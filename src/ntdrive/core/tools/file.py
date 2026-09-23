@@ -189,11 +189,24 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
         notes.append(
             f"sha256 verification failed for {hash_failures} file(s), see copied[].verify_error"
         )
+    # Top-level `verified` is a bool (or null), the same type as each copied[].verified, so a
+    # caller never has to tell "verified: 3" (a count) from "verified: true". It is true only when
+    # every file was checked and matched, false on any mismatch or unreadable hash, null when
+    # verification was off. `verified_count` keeps the number.
+    if not p.verify:
+        overall: bool | None = None
+    elif hash_failures or any(entry.get("verified") is False for entry in copied):
+        overall = False
+    elif copied and all(entry.get("verified") is True for entry in copied):
+        overall = True
+    else:
+        overall = None
     result: dict[str, Any] = {
         "vm": p.vm,
         "files": len(files),
         "bytes": total,
-        "verified": verified,
+        "verified": overall,
+        "verified_count": verified,
         "via": via,
         "copied": copied,
     }

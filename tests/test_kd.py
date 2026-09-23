@@ -6,7 +6,7 @@ import pytest
 
 from ntdrive.core.service import NtDriveService
 from ntdrive.errors import KD_NOT_ATTACHED, KD_NOT_BROKEN, TIMEOUT, NtDriveError
-from ntdrive.kd.session import classify_break, generate_kdnet_key
+from ntdrive.kd.session import classify_break, generate_kdnet_key, parse_bugcheck
 
 from .conftest import FakeKdProcess, FakeVmrun, settle
 
@@ -185,6 +185,20 @@ async def test_serial_attach_marks_running_and_captures_target_info(
     assert exc.value.code == "kd_already_attached"
 
 
+def test_parse_bugcheck_reads_both_kd_formats() -> None:
+    paren = parse_bugcheck(
+        "*** Fatal System Error: 0x0000003b\n(0xc0000005,0xfffff800`0011,0x2,0x0)"
+    )
+    assert paren == {
+        "code": "0x0000003b",
+        "arguments": ["0xc0000005", "0xfffff8000011", "0x2", "0x0"],
+    }
+    kdnet = parse_bugcheck("Bugcheck code 0000007E\nArguments ffffffff`c0000005 00000000`00000000")
+    assert kdnet["code"] == "0x0000007e"
+    assert kdnet["arguments"][0] == "0xffffffffc0000005"
+    assert parse_bugcheck("Breakpoint 0 hit") is None
+
+
 def test_classify_break() -> None:
     assert classify_break("*** Fatal System Error: 0x7e") == "bugcheck"
     assert classify_break("Breakpoint 0 hit\nkd>") == "breakpoint"
@@ -232,6 +246,9 @@ async def test_kd_lifecycle(service: NtDriveService, kd_procs: list[FakeKdProces
     event = await service.call("kd_wait_event", {"vm": "win11-dev", "timeout": 5})
     assert event["event"] == "bugcheck"
     assert "Fatal System Error" in event["output"]
+    # The bugcheck code and arguments ride the event, so no second command is needed to see them.
+    assert event["bugcheck"]["code"] == "0x0000007e"
+    assert event["bugcheck"]["arguments"][0] == "0xffffffffc0000005"
 
     tail = await service.call("kd_log_tail", {"vm": "win11-dev", "bytes": 4000})
     assert "Fatal System Error" in tail["text"]
