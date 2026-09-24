@@ -364,6 +364,20 @@ async def vm_clone(service: NtDriveService, p: CloneParams) -> dict[str, Any]:
         )
     if p.name in service.config.vms:
         raise NtDriveError(INVALID_ARGS, f"a VM named {p.name} is already registered")
+    if src.resolve_encryption_password():
+        # vmrun cannot clone an encrypted VM at all, linked or full. A linked clone is refused
+        # outright; a full clone dies deep in vmrun reading the encrypted config, surfaced as a
+        # chain of misleading errors ("A password is required", "Cannot read the virtual machine
+        # configuration file", or "should not be powered on" when the source snapshot has memory).
+        # Only the VMware GUI can clone an encrypted VM (it prompts and re-encrypts). Fail fast.
+        raise NtDriveError(
+            INVALID_ARGS,
+            f"{p.vm} is encrypted, and vmrun cannot clone an encrypted VM (neither linked nor "
+            "full)",
+            "clone it in the VMware GUI, which prompts for the password and re-encrypts. To run "
+            "without a clone, snap_take a snapshot of the base, run on the base VM, then "
+            "snap_revert to restore it (safe when no other agent is using that VM).",
+        )
     adapter = service.adapter_for(src)
     tree = await adapter.snapshot_list(src)
     snapshot = p.snapshot or tree.current
@@ -378,15 +392,6 @@ async def vm_clone(service: NtDriveService, p: CloneParams) -> dict[str, Any]:
             SNAPSHOT_NOT_FOUND,
             f"{p.vm} has no snapshot named {snapshot}",
             f"known snapshots: {', '.join(tree.names()) or '(none)'}",
-        )
-    if p.linked and src.resolve_encryption_password():
-        # vmrun cannot make a linked clone of an encrypted VM and misreports it as "already
-        # running" (seen live). A full clone works because it copies and re-encrypts the disk.
-        raise NtDriveError(
-            INVALID_ARGS,
-            f"{p.vm} is encrypted, and vmrun cannot make a linked clone of an encrypted VM",
-            "pass linked=false for a full clone (it copies the whole disk, so it is slower and "
-            "uses its own space)",
         )
     dst_vmx = str(Path(src.vmx).parent / "ntdrive-clones" / p.name / f"{p.name}.vmx")
     await adapter.clone(src, dst_vmx, p.name, snapshot, p.linked)

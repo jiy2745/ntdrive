@@ -380,7 +380,7 @@ messages are written in English (ST-9).
 | `vm_reboot` | `vm, mode=soft\|hard\|kd, confirm? (hard), reattach_kd=true, reopen_term=true, timeout=180` | `{steps:[...], kd, term:[{old, new}]}`. On a failure `error.steps` lists what ran |
 | `vm_suspend` / `vm_resume` | `vm` | `{power}` |
 | `vm_config` | `vm, cpus?, memory_mb?, nic=e1000e\|e1000\|vmxnet3?` | `{hardware:{cpus, cores_per_socket, memory_mb, nic}, before?, changed:[vmx keys]}` (a change needs the VM off) |
-| `vm_clone` | `vm, name, snapshot?, linked=true` | `{vm, source, vmx, linked, snapshot, kd_transport, kdnet_port?, note}`. Registers a new VM in vms.yaml. Linked shares the base disk |
+| `vm_clone` | `vm, name, snapshot?, linked=true` | `{vm, source, vmx, linked, snapshot, kd_transport, kdnet_port?, note}`. Registers a new VM in vms.yaml. Linked shares the base disk. An encrypted source is refused fast (`invalid_args`): vmrun cannot clone an encrypted VM, linked or full, so use the GUI or a snapshot/revert workflow on the base |
 | `vm_delete` | `vm, confirm` | `{deleted, terms_dropped}`. Powers off, deletes the files, drops the vms.yaml entry. A base with linked clones cannot be deleted until they are gone |
 | `snap_list` | `vm` | `{tree:[{name, children:[...]}], current}` |
 | `snap_take` | `vm, name, description?, allow_suspend=false` | `{name, taken_at, kd_state_at_snapshot, via, memory_included, snapshots, current, terms_dropped?, kd?}`. A failed resume after `allow_suspend` is a `backend_error` with `completed`, `power` and `resume_error` |

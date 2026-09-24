@@ -46,23 +46,26 @@ async def test_vm_clone_rejects_a_duplicate_name(
     assert exc.value.code == "invalid_args"
 
 
-async def test_vm_clone_rejects_a_linked_clone_of_an_encrypted_vm(
+async def test_vm_clone_rejects_any_clone_of_an_encrypted_vm(
     service: NtDriveService, fake_vmrun: FakeVmrun
 ) -> None:
     await service.call("vm_start", {"vm": "win11-dev"})
     await service.call("snap_take", {"vm": "win11-dev", "name": "base"})
     service.config.vms["win11-dev"].encryption_password = "vmpw"  # now an encrypted source
     fake_vmrun.calls.clear()
-    with pytest.raises(NtDriveError) as exc:
-        await service.call("vm_clone", {"vm": "win11-dev", "name": "enc1", "snapshot": "base"})
-    # A clear error naming linked=false, not vmrun's misleading "already running", and no clone ran.
-    assert exc.value.code == "invalid_args" and "linked=false" in exc.value.hint
+    # Neither a linked nor a full clone: vmrun cannot clone an encrypted VM either way. A clear,
+    # fast error, not vmrun's misleading "already running" / "cannot read config" chain.
+    for linked in (True, False):
+        with pytest.raises(NtDriveError) as exc:
+            await service.call(
+                "vm_clone",
+                {"vm": "win11-dev", "name": "enc", "snapshot": "base", "linked": linked},
+            )
+        assert exc.value.code == "invalid_args" and "encrypted" in exc.value.message
+        assert "GUI" in exc.value.hint and "snap_revert" in exc.value.hint
+    # It failed fast: no clone was attempted and no VM was registered.
     assert not any("clone" in argv for argv in fake_vmrun.calls)
-    # A full clone of the same encrypted VM is allowed.
-    full = await service.call(
-        "vm_clone", {"vm": "win11-dev", "name": "enc2", "snapshot": "base", "linked": False}
-    )
-    assert full["linked"] is False and "enc2" in service.config.vms
+    assert "enc" not in service.config.vms
 
 
 async def test_vm_clone_needs_a_snapshot(service: NtDriveService, fake_vmrun: FakeVmrun) -> None:
