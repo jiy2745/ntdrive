@@ -36,7 +36,14 @@ from aiohttp import WSMsgType, web
 from ntdrive import __version__
 from ntdrive.config import load_config
 from ntdrive.core.service import NtDriveService
-from ntdrive.daemon.lifecycle import DaemonInfo, new_token, remove_info, write_info
+from ntdrive.daemon.lifecycle import (
+    DaemonInfo,
+    new_token,
+    probe_health,
+    read_info,
+    remove_info,
+    write_info,
+)
 from ntdrive.errors import SESSION_DISCONNECTED, UNAUTHORIZED, NtDriveError
 from ntdrive.hostproc import force_utf8_stdio
 
@@ -284,7 +291,22 @@ async def serve(config_path: str | None = None, bind: str | None = None) -> None
     try:
         await site.start()
     except OSError:
-        # Port taken: move to the next one and record it in daemon.json.
+        # The port is taken. If a healthy ntdrived already owns it, this process must NOT start a
+        # second daemon on port+1: that one would overwrite daemon.json and claim to be "the"
+        # daemon, and the loser of the race lingers with no port. Several MCP servers autostarting
+        # at once left four such orphans alive (measured). Exit and let the existing one serve.
+        existing = read_info()
+        if existing is not None and existing.port == port and probe_health(existing) is not None:
+            log.info(
+                "ntdrived already serves %s:%s (pid %s), so this process is not needed",
+                host,
+                port,
+                existing.pid,
+            )
+            await service.shutdown()
+            await runner.cleanup()
+            return
+        # Nothing healthy is there, so the port is merely stuck. Take the next one.
         port += 1
         site = web.TCPSite(runner, host, port, shutdown_timeout=SHUTDOWN_TIMEOUT)
         await site.start()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import secrets
 import subprocess
@@ -24,6 +25,8 @@ import psutil
 from ntdrive import __version__
 from ntdrive.config import find_config_path, state_dir
 from ntdrive.errors import DAEMON_UNAVAILABLE, INVALID_ARGS, VERSION_MISMATCH, NtDriveError
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -255,7 +258,13 @@ def stop_daemon(info: DaemonInfo, timeout: float = 15.0) -> bool:
             remove_info()
             return True
         time.sleep(0.3)
-    with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+    # The shutdown request did not end it in time, so kill it. A swallowed failure here is how a
+    # daemon lingers with no port while a new one takes over, so it is logged rather than ignored.
+    try:
         psutil.Process(info.pid).kill()
+    except psutil.NoSuchProcess:
+        pass
+    except (psutil.AccessDenied, OSError) as exc:
+        log.warning("could not kill ntdrived pid %s: %s", info.pid, exc)
     remove_info()
     return not pid_alive(info.pid)
