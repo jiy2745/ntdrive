@@ -361,6 +361,10 @@ class FakeKdProcess:
         self._exit: int | None = None
         self.commands: list[str] = []
         self.broken = False
+        self.break_on_go = False  # when True a `g` is followed by a breakpoint hit
+        self.eval_value = 1  # what `? <expr>` evaluates to, for condition tests
+        self.bps: list[str] = []
+        self._next_bp = 0
         threading.Timer(
             0.05,
             self.inject,
@@ -374,6 +378,28 @@ class FakeKdProcess:
         self.commands.append(line)
         if line.strip() == "g":
             self.broken = False
+            if self.break_on_go:
+                threading.Timer(0.02, self.inject, args=(b"Breakpoint 0 hit\r\nkd> ",)).start()
+            return
+        if line.startswith("bp "):
+            self.bps.append(str(self._next_bp))
+            self._next_bp += 1
+            self.inject(b"kd> ")  # bp itself prints nothing
+            return
+        if line.strip() == "bl":
+            listing = "".join(
+                f" {bp} e Disable Clear  fffff800`00001000  mod!Sym\r\n" for bp in self.bps
+            )
+            self.inject(listing.encode() + b"kd> ")
+            return
+        if line.startswith("bc "):
+            for token in line[3:].split():
+                if token in self.bps:
+                    self.bps.remove(token)
+            self.inject(b"kd> ")
+            return
+        if line.startswith("? "):
+            self.inject(f"Evaluate expression: {self.eval_value} = 0x1\r\nkd> ".encode())
             return
         if line.strip() == "q":
             self.stop(0)

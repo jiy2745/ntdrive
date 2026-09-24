@@ -263,6 +263,73 @@ async def test_kd_lifecycle(service: NtDriveService, kd_procs: list[FakeKdProces
     assert not service.runtime("win11-dev").guest_frozen
 
 
+async def test_kd_sample_collects_rows_and_clears_only_its_breakpoint(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    proc = kd_procs[-1]
+    proc.break_on_go = True
+    # A breakpoint the caller already had must survive the sample.
+    await service.call("kd_exec", {"vm": "win11-dev", "cmd": "bp mod!Existing"})
+
+    result = await service.call(
+        "kd_sample",
+        {
+            "vm": "win11-dev",
+            "symbol": "win32kfull!RFONTOBJ::vDeleteRFONT",
+            "n": 3,
+            "exprs": ["poi(@rcx)", "du poi(@rdx)"],
+        },
+    )
+    assert result["hits"] == 3 and result["stopped_because"] == "n"
+    assert [row["hit"] for row in result["rows"]] == [1, 2, 3]
+    assert set(result["rows"][0]["values"]) == {"poi(@rcx)", "du poi(@rdx)"}
+    # The breakpoint is plain: no condition is ever compiled into it (that is what NMIs a guest).
+    bp_cmds = [c for c in proc.commands if c.startswith("bp ")]
+    assert bp_cmds == ["bp mod!Existing", "bp win32kfull!RFONTOBJ::vDeleteRFONT"]
+    assert not any(".if" in c or "gc" in c for c in proc.commands)
+    # It cleared its own breakpoint and left the caller's alone.
+    assert proc.bps == ["0"]
+
+
+async def test_kd_sample_skips_hits_whose_condition_is_zero(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    proc = kd_procs[-1]
+    proc.break_on_go = True
+    proc.eval_value = 0  # the condition is false at every hit
+    result = await service.call(
+        "kd_sample",
+        {
+            "vm": "win11-dev",
+            "symbol": "mod!Hot",
+            "n": 2,
+            "condition": "@rcx == 0x41",
+            "max_seconds": 2,
+        },
+    )
+    # The wall-clock cap ends it rather than looping forever on a hot symbol.
+    assert result["hits"] == 0 and result["skipped_by_condition"] > 0
+    assert result["stopped_because"] == "max_seconds"
+    assert any(c.startswith("? ") for c in proc.commands)
+
+
+async def test_kd_exec_says_when_a_command_printed_nothing(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    """`.reload /f mod.sys` returns empty; the caller must be able to tell that from a swallow."""
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    kd_procs[-1].bps.clear()
+    result = await service.call("kd_exec", {"vm": "win11-dev", "cmd": "bl"})
+    assert result["outputs"][0]["printed_nothing"] is True
+    loud = await service.call("kd_exec", {"vm": "win11-dev", "cmd": "r"})
+    assert loud["outputs"][0]["printed_nothing"] is False
+
+
 async def test_kd_setup_guest_writes_config(service: NtDriveService, fake_transport) -> None:  # type: ignore[no-untyped-def]
     await service.call("vm_start", {"vm": "win11-dev"})
     result = await service.call("kd_setup_guest", {"vm": "win11-dev", "port": 50005})

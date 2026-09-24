@@ -26,6 +26,7 @@ from ntdrive.cli.verify import verify_command
 from ntdrive.core.registry import ToolRegistry, ToolSpec, load_builtin_tools
 from ntdrive.daemon.client import DaemonClient, connect
 from ntdrive.daemon.lifecycle import (
+    DaemonInfo,
     daemon_log_path,
     ensure_daemon,
     read_info,
@@ -295,6 +296,51 @@ def _attach_command() -> click.Command:
     return attach
 
 
+def _attached_kd_vms(info: DaemonInfo) -> list[str]:
+    """VMs whose debugger is live right now. Empty when the daemon cannot be asked."""
+    try:
+        state = DaemonClient(info, caller="cli").call("sys_state", {})
+    except NtDriveError:
+        return []
+    attached: list[str] = []
+    for vm in state.get("vms", []):
+        kd = vm.get("kd") or {}
+        if kd.get("state") not in (None, "detached"):
+            attached.append(str(vm.get("name", "?")))
+    return attached
+
+
+def _refuse_while_kd_attached(
+    ctx: click.Context, info: DaemonInfo, action: str, force: bool
+) -> bool:
+    """True when the caller should stop. Stopping the daemon kills its kd.exe children.
+
+    A KDNET target only handshakes at boot, so re-attaching after a restart costs a guest reboot.
+    Silently dropping a live session mid-experiment is expensive, so it has to be deliberate.
+    """
+    attached = _attached_kd_vms(info)
+    if not attached or force:
+        return False
+    names = ", ".join(attached)
+    emit(
+        ctx,
+        {
+            "stopped": False,
+            "refused": True,
+            "kd_attached": attached,
+            "error": (
+                f"not going to {action} the daemon: a debugger is attached to {names}, and "
+                "stopping the daemon kills kd.exe with it"
+            ),
+            "hint": (
+                "over KDNET the target only handshakes at boot, so re-attaching costs a guest "
+                f"reboot. Run kd_detach on {names} first, or pass --force to {action} anyway"
+            ),
+        },
+    )
+    return True
+
+
 def _daemon_group() -> click.Group:
     @click.group("daemon", help="Manage ntdrived")
     def daemon() -> None:
@@ -325,17 +371,24 @@ def _daemon_group() -> click.Group:
         emit(ctx, {"running": True, "pid": info.pid, "url": info.base_url, **health})
 
     @daemon.command("stop")
+    @click.option("--force", is_flag=True, help="Stop even while a debugger is attached")
     @click.pass_context
-    def stop(ctx: click.Context) -> None:
+    def stop(ctx: click.Context, force: bool) -> None:
         info = read_info()
         if info is None:
             emit(ctx, {"running": False})
             return
+        if _refuse_while_kd_attached(ctx, info, "stop", force):
+            return
         emit(ctx, {"stopped": stop_daemon(info)})
 
     @daemon.command("restart")
+    @click.option("--force", is_flag=True, help="Restart even while a debugger is attached")
     @click.pass_context
-    def restart(ctx: click.Context) -> None:
+    def restart(ctx: click.Context, force: bool) -> None:
+        info = read_info()
+        if info is not None and _refuse_while_kd_attached(ctx, info, "restart", force):
+            return
         try:
             info = restart_daemon(ctx.obj.get("config"))
         except NtDriveError as exc:

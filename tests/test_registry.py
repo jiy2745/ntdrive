@@ -24,6 +24,7 @@ EXPECTED = {
     "kd_break",
     "kd_go",
     "kd_exec",
+    "kd_sample",
     "kd_wait_event",
     "kd_state",
     "kd_log_tail",

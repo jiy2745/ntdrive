@@ -548,6 +548,10 @@ class KdSession:
                     {
                         "cmd": cmd,
                         "output": text,
+                        # The sentinel was matched, so the command definitely ran. Say so when it
+                        # printed nothing: `.reload /f mod.sys` returns empty, and a caller could
+                        # not tell that from output the framing had swallowed.
+                        "printed_nothing": not text,
                         "truncated": truncated,
                         "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
                     }

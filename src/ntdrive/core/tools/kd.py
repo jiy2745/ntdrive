@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import re
+import time
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
@@ -91,6 +92,30 @@ class ExecParams(VmParams):
     max_bytes: int = Field(
         default=65536, ge=256, le=1 << 20, description="Cap on each command's output"
     )
+
+
+class SampleParams(VmParams):
+    """kd_sample."""
+
+    symbol: str = Field(description="Symbol or address to break on, for example mod!Class::Method")
+    exprs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Debugger commands to run at each hit, for example ['poi(@rcx)', 'du poi(@rdx)']"
+        ),
+    )
+    n: int = Field(default=8, ge=1, le=200, description="How many hits to collect before stopping")
+    condition: str | None = Field(
+        default=None,
+        description=(
+            "Expression evaluated by the daemon at each hit (with `?`). A hit whose value is zero "
+            "is skipped and not returned. It is never compiled into the breakpoint"
+        ),
+    )
+    max_seconds: float = Field(
+        default=120, ge=1, description="Wall-clock cap, so a hot symbol cannot run forever"
+    )
+    timeout: float = Field(default=60, ge=1, description="Seconds to wait for each hit")
 
 
 class WaitParams(VmParams):
@@ -437,6 +462,99 @@ async def kd_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     session = service.kd_session(cfg)
     outputs = await session.exec(cmds, timeout=p.timeout, max_bytes=p.max_bytes)
     return {"vm": p.vm, "outputs": outputs, "state": str(session.state)}
+
+
+def _breakpoint_ids(listing: str) -> set[str]:
+    """Breakpoint ids from `bl` output, whose first field is the id."""
+    ids: set[str] = set()
+    for line in listing.splitlines():
+        m = re.match(r"\s*(\d+)\s", line)
+        if m:
+            ids.add(m.group(1))
+    return ids
+
+
+def _is_zero(text: str) -> bool:
+    """True when a `?` evaluation printed zero, so the caller's condition is false."""
+    m = re.search(r"Evaluate expression:\s*(-?\d+)", text)
+    if m:
+        return int(m.group(1)) == 0
+    # `? <expr>` can print only the hex form, for example `00000000`00000000`.
+    hexes = re.findall(r"\b[0-9a-fA-F`]+\b", text.replace("`", ""))
+    return bool(hexes) and all(int(h, 16) == 0 for h in hexes if h)
+
+
+@tool(
+    "kd_sample",
+    "Break on a symbol, let the target run, and collect the value of one or more expressions at "
+    "each of the next n hits, then clear the breakpoint. Replaces a manual bp/g/eval round trip "
+    "per hit. The breakpoint is plain and conditions are evaluated by the daemon, never compiled "
+    "into the breakpoint, because a conditional breakpoint with gc on a hot function NMIs the "
+    "guest.",
+    SampleParams,
+    positional=("vm", "symbol"),
+    long_poll=True,
+    effect="destructive",
+)
+async def kd_sample(service: NtDriveService, p: SampleParams) -> dict[str, Any]:
+    """Sample a symbol n times. Needs a broken-in target, and leaves it broken in."""
+    cfg = service.vm_cfg(p.vm)
+    session = service.kd_session(cfg)
+    started = time.monotonic()
+    deadline = started + p.max_seconds
+
+    def left() -> float:
+        return deadline - time.monotonic()
+
+    before = _breakpoint_ids((await session.exec(["bl"], timeout=p.timeout))[0]["output"])
+    await session.exec([f"bp {p.symbol}"], timeout=p.timeout)
+    after = _breakpoint_ids((await session.exec(["bl"], timeout=p.timeout))[0]["output"])
+    mine = sorted(after - before)
+    rows: list[dict[str, Any]] = []
+    stopped = "n"
+    skipped = 0
+    try:
+        while len(rows) < p.n:
+            if left() <= 0:
+                stopped = "max_seconds"
+                break
+            await session.go()
+            event = await session.wait_event(timeout=min(p.timeout, max(left(), 1.0)))
+            if event.get("event") == "timeout":
+                stopped = "timeout"
+                break
+            if event.get("event") == "bugcheck":
+                # The guest crashed under us. Report it with the code rather than looping.
+                rows.append({"hit": len(rows) + 1, "bugcheck": event.get("bugcheck"), "values": {}})
+                stopped = "bugcheck"
+                break
+            if p.condition:
+                check = await session.exec([f"? {p.condition}"], timeout=p.timeout)
+                if _is_zero(check[0]["output"]):
+                    skipped += 1
+                    continue
+            values: dict[str, str] = {}
+            if p.exprs:
+                for out in await session.exec(list(p.exprs), timeout=p.timeout):
+                    values[str(out["cmd"])] = str(out["output"])
+            rows.append({"hit": len(rows) + 1, "values": values})
+    finally:
+        # Clear only the breakpoint this call set, so other breakpoints survive.
+        with contextlib.suppress(NtDriveError):
+            if mine:
+                await session.exec([f"bc {' '.join(mine)}"], timeout=p.timeout)
+    service.runtime(p.vm)
+    service.state.record_event(p.vm, "kd_sample", symbol=p.symbol, hits=len(rows))
+    return {
+        "vm": p.vm,
+        "symbol": p.symbol,
+        "hits": len(rows),
+        "rows": rows,
+        "skipped_by_condition": skipped,
+        "stopped_because": stopped,
+        "elapsed_s": round(time.monotonic() - started, 1),
+        "state": str(session.state),
+    }
 
 
 @tool(

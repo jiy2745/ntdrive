@@ -170,6 +170,10 @@ reconnect yourself: `vm_wait_ready`, `kd_attach wait_for_target=false`, `term_op
 These all bite through ntdrive but come from kd and the guest, so they are worth knowing before a
 long session:
 
+- **Use `kd_sample` instead of hand-rolling bp/g/eval.** `kd_sample vm=... symbol=mod!Fn n=8
+  exprs=["poi(@rcx)","du poi(@rdx)"]` breaks, resumes with a plain `g`, evaluates the expressions at
+  each of the next 8 hits, and clears only the breakpoint it set. A `condition` is evaluated by the
+  daemon, never compiled into the breakpoint, and `n` plus `max_seconds` bound a hot symbol.
 - **A conditional breakpoint with `gc` on a hot function NMIs the guest.** `bp <hot> ".if (...) {...}
   .else { gc }"` on something that fires thousands of times a second wedges the vCPU and the host
   watchdog answers with bugcheck `0x80 NMI_HARDWARE_FAILURE`. Prefer a plain breakpoint you step
