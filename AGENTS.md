@@ -197,8 +197,11 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   encrypted config, surfaced as a chain of misleading errors ("A password is required", "Cannot
   read the virtual machine configuration file", or "should not be powered on" when the source
   snapshot has memory). Only the VMware GUI can clone an encrypted VM. `vm_clone` detects an
-  encrypted source (`resolve_encryption_password()`) and fails fast, pointing at the GUI or a
-  snapshot/revert-on-the-base workflow instead.
+  encrypted source (`resolve_encryption_password()`) and fails fast. No CLI can clone an encrypted
+  VM (vmrun, vmcli which has no clone command, and ovftool which cannot export an encrypted VM all
+  refuse), so the supported path is a GUI clone followed by `vm_register` (adds the existing vmx to
+  vms.yaml with the template's config and a fresh KDNET port), or a snapshot/revert workflow on the
+  base for serial work.
 - A bugcheck breaks a KDNET-attached target into `kd>`, so `kd_wait_event` returns `bugcheck` with
   the code and arguments parsed from the banner (`parse_bugcheck` in `kd/session.py`), with no
   `r rip` polling. `vm_wait_ready` long-polls SSH for the guest coming back after the auto-restart,

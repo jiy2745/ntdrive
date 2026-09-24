@@ -12,6 +12,7 @@ EXPECTED = {
     "vm_suspend",
     "vm_resume",
     "vm_config",
+    "vm_register",
     "snap_list",
     "snap_take",
     "snap_revert",

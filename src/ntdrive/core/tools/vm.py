@@ -374,9 +374,10 @@ async def vm_clone(service: NtDriveService, p: CloneParams) -> dict[str, Any]:
             INVALID_ARGS,
             f"{p.vm} is encrypted, and vmrun cannot clone an encrypted VM (neither linked nor "
             "full)",
-            "clone it in the VMware GUI, which prompts for the password and re-encrypts. To run "
-            "without a clone, snap_take a snapshot of the base, run on the base VM, then "
-            "snap_revert to restore it (safe when no other agent is using that VM).",
+            "no CLI can clone an encrypted VM (vmrun, vmcli and ovftool all refuse). Clone it once "
+            "in the VMware GUI (it prompts for the password and re-encrypts), then register the "
+            f"copy with vm_register vmx=<new vmx> name=<name> template={p.vm}. Or to run without a "
+            "clone, snap_take a snapshot of the base, run on it, then snap_revert.",
         )
     adapter = service.adapter_for(src)
     tree = await adapter.snapshot_list(src)
@@ -415,6 +416,60 @@ async def vm_clone(service: NtDriveService, p: CloneParams) -> dict[str, Any]:
             "the clone shares the base guest, so its accounts and disk match. It has its own KDNET "
             "port (net) or pipe (serial), but the guest still points at the base's, so run "
             "kd_setup_guest on the clone then vm_reboot mode=soft before kd_attach"
+        ),
+    }
+
+
+class RegisterParams(VmParams):
+    """vm_register. `vm` is the template to inherit config from."""
+
+    name: str = Field(description="Name for the registered VM (its config key)")
+    vmx: str = Field(description="Absolute host path to the existing VM's .vmx file")
+
+
+@tool(
+    "vm_register",
+    "Register an existing VM (a manual or GUI clone) as a new ntdrive VM, inheriting the template "
+    "VM's guest, debugger and encryption config with its own fresh KDNET port. For encrypted VMs, "
+    "which no CLI can clone: clone once in the VMware GUI, then register the copy here.",
+    RegisterParams,
+    positional=("vm", "name", "vmx"),
+    effect="additive",
+)
+async def vm_register(service: NtDriveService, p: RegisterParams) -> dict[str, Any]:
+    """Add a vms.yaml entry for an already-existing vmx, copying the template VM's settings."""
+    template = service.vm_cfg(p.vm)
+    if not _CLONE_NAME.match(p.name):
+        raise NtDriveError(
+            INVALID_ARGS, "name may use letters, digits, dot, dash and underscore only"
+        )
+    if p.name in service.config.vms:
+        raise NtDriveError(INVALID_ARGS, f"a VM named {p.name} is already registered")
+    if not Path(p.vmx).is_file():
+        raise NtDriveError(
+            INVALID_ARGS,
+            f"no vmx at {p.vmx}",
+            "pass the absolute host path to the cloned VM's .vmx file",
+        )
+    entry = template.model_copy(deep=True)
+    entry.name = p.name
+    entry.vmx = str(Path(p.vmx))
+    entry.serial_pipe = ""  # re-derives from the new name
+    if entry.kd_transport == "net":
+        entry.kdnet = KdnetConfig(port=next_kdnet_port(service.config), key=entry.kdnet.key)
+    add_vm_config(service.config, entry)
+    service.state.record_event(p.name, "vm_register", template=p.vm)
+    return {
+        "vm": p.name,
+        "template": p.vm,
+        "vmx": entry.vmx,
+        "kd_transport": entry.kd_transport,
+        "kdnet_port": entry.kdnet.port if entry.kd_transport == "net" else None,
+        "note": (
+            f"registered with {p.vm}'s guest accounts and encryption_password_env. If the GUI "
+            "clone used a different encryption password, set this VM's own env var in vms.yaml. It "
+            "has its own KDNET port, so run kd_setup_guest then vm_reboot mode=soft before "
+            "kd_attach"
         ),
     }
 

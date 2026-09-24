@@ -75,6 +75,41 @@ async def test_vm_clone_needs_a_snapshot(service: NtDriveService, fake_vmrun: Fa
     assert exc.value.code == "snapshot_not_found"
 
 
+async def test_vm_register_adds_an_existing_vmx_with_a_fresh_kdnet_port(
+    service: NtDriveService, fake_vmrun: FakeVmrun, tmp_path: Path
+) -> None:
+    # A VM cloned by hand or in the GUI (the only way for an encrypted VM): its vmx already exists.
+    cloned = tmp_path / "gui-clone" / "gui-clone.vmx"
+    cloned.parent.mkdir()
+    cloned.write_text('displayName = "gui-clone"\n', encoding="utf-8")
+    result = await service.call(
+        "vm_register", {"vm": "win11-dev", "name": "agent7", "vmx": str(cloned)}
+    )
+    assert result["template"] == "win11-dev" and result["vmx"] == str(cloned)
+    assert "agent7" in service.config.vms
+    reg = service.config.vms["agent7"]
+    # Inherits the template's guest and encryption config, gets its own KDNET port, no clone ran.
+    assert reg.guest.user == service.config.vms["win11-dev"].guest.user
+    assert reg.kdnet.port != service.config.vms["win11-dev"].kdnet.port
+    assert not any("clone" in argv for argv in fake_vmrun.calls)
+    # Persisted, so a reload sees it.
+    from ntdrive.config import load_config
+
+    assert "agent7" in load_config(service.config.path).vms
+
+
+async def test_vm_register_rejects_a_missing_vmx(
+    service: NtDriveService, fake_vmrun: FakeVmrun, tmp_path: Path
+) -> None:
+    with pytest.raises(NtDriveError) as exc:
+        await service.call(
+            "vm_register",
+            {"vm": "win11-dev", "name": "agent8", "vmx": str(tmp_path / "nope.vmx")},
+        )
+    assert exc.value.code == "invalid_args" and "no vmx" in exc.value.message
+    assert "agent8" not in service.config.vms
+
+
 async def test_vm_delete_removes_the_vm_and_its_config(
     service: NtDriveService, fake_vmrun: FakeVmrun
 ) -> None:
