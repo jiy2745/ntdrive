@@ -28,6 +28,53 @@ from ntdrive.errors import DAEMON_UNAVAILABLE, INVALID_ARGS, VERSION_MISMATCH, N
 
 log = logging.getLogger(__name__)
 
+# A daemon still binding its port owns none for a moment, so only an older one counts as a leak.
+_ORPHAN_MIN_AGE = 10.0
+
+
+def orphaned_daemons(live_pid: int | None = None) -> list[int]:
+    """Pids of ntdrived processes that own no listening port, so they serve nobody.
+
+    A daemon that lost a port race used to linger instead of exiting (fixed in serve(), but existing
+    ones stay until they are ended). A daemon that does listen somewhere is left alone, because a
+    second config on another port is legitimate, and so is one younger than _ORPHAN_MIN_AGE.
+    """
+    orphans: list[int] = []
+    now = time.time()
+    for proc in psutil.process_iter(["pid", "cmdline", "create_time"]):
+        try:
+            if "ntdrive.daemon.app" not in " ".join(proc.info["cmdline"] or []):
+                continue
+            if live_pid is not None and proc.info["pid"] == live_pid:
+                continue
+            if now - (proc.info["create_time"] or 0.0) < _ORPHAN_MIN_AGE:
+                continue
+            if not any(
+                conn.status == psutil.CONN_LISTEN for conn in proc.net_connections(kind="tcp")
+            ):
+                orphans.append(int(proc.info["pid"]))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return orphans
+
+
+def reap_orphaned_daemons(live_pid: int | None = None) -> dict[str, list[int]]:
+    """End the ntdrived processes that own no port. Never touches the live daemon."""
+    ended: list[int] = []
+    failed: list[int] = []
+    for pid in orphaned_daemons(live_pid):
+        try:
+            proc = psutil.Process(pid)
+            proc.kill()
+            proc.wait(5)
+            ended.append(pid)
+        except psutil.NoSuchProcess:
+            ended.append(pid)
+        except (psutil.AccessDenied, psutil.TimeoutExpired, OSError) as exc:
+            log.warning("could not reap ntdrived pid %s: %s", pid, exc)
+            failed.append(pid)
+    return {"reaped": ended, "failed": failed}
+
 
 @dataclass
 class DaemonInfo:

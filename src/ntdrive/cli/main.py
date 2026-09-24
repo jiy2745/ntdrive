@@ -29,7 +29,9 @@ from ntdrive.daemon.lifecycle import (
     DaemonInfo,
     daemon_log_path,
     ensure_daemon,
+    orphaned_daemons,
     read_info,
+    reap_orphaned_daemons,
     restart_daemon,
     stop_daemon,
 )
@@ -361,14 +363,36 @@ def _daemon_group() -> click.Group:
     def status(ctx: click.Context) -> None:
         info = read_info()
         if info is None:
-            emit(ctx, {"running": False})
+            emit(ctx, {"running": False, "orphans": orphaned_daemons()})
             return
         try:
             health = DaemonClient(info, caller="cli").health()
         except NtDriveError:
-            emit(ctx, {"running": False, "stale_pid": info.pid})
+            emit(ctx, {"running": False, "stale_pid": info.pid, "orphans": orphaned_daemons()})
             return
-        emit(ctx, {"running": True, "pid": info.pid, "url": info.base_url, **health})
+        out: dict[str, Any] = {
+            "running": True,
+            "pid": info.pid,
+            "url": info.base_url,
+            **health,
+        }
+        # A daemon that serves nobody is invisible otherwise, and two daemons claiming to be "the"
+        # daemon is how a client ends up talking to a build it did not expect.
+        orphans = orphaned_daemons(info.pid)
+        if orphans:
+            out["orphans"] = orphans
+            out["orphans_note"] = (
+                f"{len(orphans)} other ntdrived process(es) are alive with no port and serve "
+                "nobody: `ntdrive daemon reap` ends them. The live daemon is not touched"
+            )
+        emit(ctx, out)
+
+    @daemon.command("reap")
+    @click.pass_context
+    def reap(ctx: click.Context) -> None:
+        """End ntdrived processes that own no port, leaving the live daemon alone."""
+        info = read_info()
+        emit(ctx, reap_orphaned_daemons(info.pid if info is not None else None))
 
     @daemon.command("stop")
     @click.option("--force", is_flag=True, help="Stop even while a debugger is attached")
