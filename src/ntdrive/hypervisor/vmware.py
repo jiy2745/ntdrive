@@ -628,16 +628,53 @@ class VmwareAdapter(HypervisorAdapter):
         """
         procs = find_vmx_processes(vm.vmx)
         killed: list[int] = []
+        denied: list[int] = []
         for proc in procs:
-            with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
-                proc.kill()
+            with contextlib.suppress(psutil.NoSuchProcess):
+                try:
+                    proc.kill()
+                except psutil.AccessDenied:
+                    # vmware-vmx runs at a level an unelevated daemon cannot end. Swallowing this
+                    # made the documented escape hatch report success while killing nothing.
+                    denied.append(proc.pid)
+                    continue
                 killed.append(proc.pid)
         for proc in procs:
             with contextlib.suppress(psutil.NoSuchProcess, psutil.TimeoutExpired):
                 await asyncio.to_thread(proc.wait, 10)
+        if denied and not killed:
+            # Last resort before giving up: ask vmrun to cut the power instead.
+            try:
+                await self.stop(vm, hard=True)
+            except NtDriveError as exc:
+                raise NtDriveError(
+                    BACKEND_ERROR,
+                    f"cannot end {vm.name}: access denied to its vmware-vmx process "
+                    f"(pid {', '.join(str(p) for p in denied)}), and vmrun stop hard also failed: "
+                    f"{exc.message}",
+                    "run the daemon elevated to use mode=kill (an administrator shell, then "
+                    "ntdrive daemon restart). Ending vmware-vmx.exe by hand in Task Manager works "
+                    "too, then vm_start.",
+                    reason="kill_access_denied",
+                ) from exc
+            removed = remove_vmx_locks(vm.vmx)
+            log.warning("kill denied for %s, fell back to vmrun stop hard", vm.name)
+            return {
+                "killed": [],
+                "access_denied": denied,
+                "locks_removed": removed,
+                "via": "vmrun_stop_hard",
+                "note": (
+                    "the daemon is not elevated, so vmware-vmx could not be ended directly. "
+                    "vmrun stop hard cut the power instead, which is equivalent here"
+                ),
+            }
         removed = remove_vmx_locks(vm.vmx)
         log.warning("killed %s for %s and removed locks %s", killed, vm.name, removed)
-        return {"killed": killed, "locks_removed": removed}
+        result: dict[str, Any] = {"killed": killed, "locks_removed": removed}
+        if denied:
+            result["access_denied"] = denied
+        return result
 
     async def guest_capture(self, vm: VmConfig, produce: str, timeout: float = 120.0) -> str:
         """Run a PowerShell pipeline in the guest and return its text output.

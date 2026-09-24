@@ -219,14 +219,16 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
     # caller never has to tell "verified: 3" (a count) from "verified: true". It is true only when
     # every file was checked and matched, false on any mismatch or unreadable hash, null when
     # verification was off. `verified_count` keeps the number.
+    # `false` means a real mismatch, never "the hash could not be read". Under guest load hashing
+    # fails while the copy is fine, and reporting that as false read as data corruption.
     if not p.verify:
         overall: bool | None = None
-    elif hash_failures or any(entry.get("verified") is False for entry in copied):
+    elif any(entry.get("verified") is False for entry in copied):
         overall = False
     elif copied and all(entry.get("verified") is True for entry in copied):
         overall = True
     else:
-        overall = None
+        overall = None  # some file could not be hashed: unknown, not failed
     result: dict[str, Any] = {
         "vm": p.vm,
         "files": len(files),

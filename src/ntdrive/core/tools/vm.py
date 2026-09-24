@@ -14,7 +14,7 @@ from ntdrive.core.orchestrator import reboot_flow
 from ntdrive.core.registry import tool
 from ntdrive.core.state import PowerState
 from ntdrive.core.tools.common import ConfirmMixin, NoParams, VmParams
-from ntdrive.errors import INVALID_ARGS, SNAPSHOT_NOT_FOUND, NtDriveError
+from ntdrive.errors import INVALID_ARGS, SNAPSHOT_NOT_FOUND, VM_NOT_RUNNING, NtDriveError
 
 if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
@@ -155,6 +155,15 @@ async def vm_wait_ready(service: NtDriveService, p: WaitReadyParams) -> dict[str
         remaining = deadline - loop.time()
         if remaining <= 0:
             break
+        # Never wait for SSH on a VM that is not even on. Burning the whole timeout against a
+        # powered-off guest is what made an unnoticed power-off cost 700 seconds.
+        if await service.refresh_power(cfg) != PowerState.RUNNING:
+            raise NtDriveError(
+                VM_NOT_RUNNING,
+                f"{p.vm} is not powered on, so it will never answer SSH",
+                "vm_start it (a vm_reboot mode=hard can leave a VM off), then vm_wait_ready again",
+                reason="powered_off",
+            )
         try:
             # A short per-attempt bound so a guest that is still down (Tools report no IP) does
             # not eat the whole timeout in one blocking lookup: we retry until the deadline.

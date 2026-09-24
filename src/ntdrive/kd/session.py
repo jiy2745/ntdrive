@@ -475,6 +475,41 @@ class KdSession:
                 "call kd_break (or kd_wait_event) first",
             )
 
+    async def _interrupt_wedged_command(
+        self, cmd: str, sentinel: str, start: int, timeout: float, original: NtDriveError
+    ) -> NtDriveError:
+        """Break into kd.exe to end a command that never returned. Returns the error to raise.
+
+        The break is delivered to kd.exe's console, so it interrupts the debugger's own command
+        loop rather than the target. When it works the prompt comes back and the session is still
+        usable for the next command; when it does not, say plainly that kd_detach is the way out.
+        """
+        proc = self._proc
+        if proc is None:
+            return original
+        loop = asyncio.get_running_loop()
+        with contextlib.suppress(Exception):
+            await loop.run_in_executor(None, self._break, proc)
+        recovered = await self._wait_state({KdState.BROKEN}, min(timeout, 15.0), allow_timeout=True)
+        if recovered:
+            return NtDriveError(
+                TIMEOUT,
+                f"kd command {cmd!r} did not finish in {timeout:.0f}s and was interrupted",
+                "the debugger is back at a prompt, so the next kd_exec works. That command wedges "
+                "kd over this transport: avoid it, or raise timeout. `!process 0 0 <name>` is a "
+                "known offender over KDNET.",
+                reason="kd_command_wedged",
+                interrupted=True,
+            )
+        return NtDriveError(
+            TIMEOUT,
+            f"kd command {cmd!r} wedged the debugger and the break did not recover it",
+            "kd.exe is stuck, not the guest: kd_detach then kd_attach to get a usable prompt "
+            "again. The guest itself keeps running (vm_state probe=true confirms).",
+            reason="kd_wedged",
+            interrupted=False,
+        )
+
     async def exec(
         self, cmds: list[str], timeout: float = 60.0, max_bytes: int = 65536
     ) -> list[dict[str, Any]]:
@@ -490,7 +525,19 @@ class KdSession:
                 # command (`.sympath`, `.reload`, ...) consumes to end of line and would swallow
                 # `.echo` and the sentinel with it. On a separate line every command is framed.
                 self._write(f"{cmd}\n.echo {sentinel}\n")
-                idx = await self._wait_for_bytes(sentinel.encode(), start, timeout)
+                try:
+                    idx = await self._wait_for_bytes(sentinel.encode(), start, timeout)
+                except NtDriveError as exc:
+                    if exc.code != TIMEOUT:
+                        raise
+                    # Some extensions (`!process 0 0 <name>` over KDNET) never return and leave the
+                    # prompt dead, so every later command timed out and only kd_detach recovered.
+                    # CTRL_BREAK goes to kd.exe, not the target, which is how WinDbg interrupts a
+                    # running extension. Try it once so the session stays usable.
+                    recovery = await self._interrupt_wedged_command(
+                        cmd, sentinel, start, timeout, exc
+                    )
+                    raise recovery from exc
                 raw = bytes(self._buf[start - self._base : idx - self._base])
                 text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
                 text = re.sub(r"(?m)^(?:\d+: )?kd> ?$", "", text).strip("\n")

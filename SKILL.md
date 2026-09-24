@@ -165,6 +165,31 @@ reattach and terminals to reopen, which can outlast a tool-call timeout and go t
 return as soon as the boot is triggered, pass `reattach_kd=false reopen_term=false`, then drive the
 reconnect yourself: `vm_wait_ready`, `kd_attach wait_for_target=false`, `term_open`.
 
+### Kernel debugging traps that cost a guest
+
+These all bite through ntdrive but come from kd and the guest, so they are worth knowing before a
+long session:
+
+- **A conditional breakpoint with `gc` on a hot function NMIs the guest.** `bp <hot> ".if (...) {...}
+  .else { gc }"` on something that fires thousands of times a second wedges the vCPU and the host
+  watchdog answers with bugcheck `0x80 NMI_HARDWARE_FAILURE`. Prefer a plain breakpoint you step
+  manually, or a one-shot (`bp /1`), and keep conditions off hot paths.
+- **A tight user-mode spin does the same.** Always `SwitchToThread()` in a spin loop.
+- **KDNET attaching during boot often bugchecks the guest** (seen on 4 of 6 `vm_reboot
+  reattach_kd=true` attempts, also `0x80`). A second reboot comes up fine, so reboot again rather
+  than digging into the first crash.
+- **`!process 0 0 <name>` never returns over KDNET** and wedges kd. `kd_exec` now interrupts a
+  command that overruns its timeout and tells you whether the prompt came back, but avoid that
+  extension over the net transport. If the prompt is dead, `kd_detach` then `kd_attach`.
+- **Session-space symbols need a process in the right session.** Because `!process` is unusable,
+  give kd the context another way: touch GDI from a user-mode helper and execute an `int 3` in it,
+  which hands kd that process context, and then `lm m win32kfull` resolves.
+- **`!pool` cannot read session pool** and reports "not valid pool". To confirm special pool, read
+  the page bytes directly: the allocation sits at the page end, `%`-fill on either side, and the
+  next page is unmapped.
+- **The kd banner's `MP (1 procs)` during early boot is not the final CPU count.** Check
+  `Win32_ComputerSystem.NumberOfLogicalProcessors` in the guest, or `vm_config`.
+
 ### Watch a streaming command
 
 ```

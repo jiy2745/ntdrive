@@ -38,6 +38,7 @@ class FakeVmrun:
         # Number of calls right after a suspend that fail with the transient vmx error.
         self.config_unreadable_after_suspend = 0
         self.fail_start = False  # when True, `start` fails (resume after suspend cannot happen)
+        self.reset_powers_off = False  # when True, `reset` leaves the VM off instead of resetting
         self.guest_files: dict[str, bytes] = {}  # what guest-tools copies put into the guest
 
     async def __call__(self, args: list[str], timeout: float) -> tuple[int, str]:
@@ -76,6 +77,9 @@ class FakeVmrun:
             self.running = False
             return 0, ""
         if cmd == "reset":
+            if self.reset_powers_off:
+                # Seen live: `vmrun reset hard` can leave the VM off instead of resetting it.
+                self.running = False
             return 0, ""
         if cmd == "suspend":
             self.running, self.suspended = False, True

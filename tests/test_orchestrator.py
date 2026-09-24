@@ -99,6 +99,32 @@ async def test_allow_suspend_preflights_auth_and_never_suspends_on_a_bad_passwor
     assert str(service.state.vm("win11-dev").power) == "running"
 
 
+async def test_hard_reboot_that_powers_off_is_noticed_and_started(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    """A reset that leaves the VM off must be caught, not reported as running."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_vmrun.reset_powers_off = True
+    result = await service.call(
+        "vm_reboot", {"vm": "win11-dev", "mode": "hard", "confirm": True, "reattach_kd": False}
+    )
+    # The power-off was detected and recovered, and the reported power is the truth.
+    steps = {s["step"]: s for s in result["steps"]}
+    assert steps["reset_verify"]["ok"] is False
+    assert steps["start"]["ok"] is True
+    assert result["power"] == "running" and fake_vmrun.running
+
+
+async def test_vm_wait_ready_fails_fast_when_the_vm_is_off(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    """Waiting for SSH on a powered-off VM must not burn the whole timeout."""
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("vm_wait_ready", {"vm": "win11-dev", "timeout": 300})
+    assert exc.value.code == "vm_not_running" and exc.value.extra.get("reason") == "powered_off"
+    assert "vm_start" in exc.value.hint
+
+
 async def test_vm_wait_ready_returns_when_ssh_answers(
     service: NtDriveService, fake_vmrun: FakeVmrun
 ) -> None:
@@ -493,8 +519,10 @@ async def test_file_push_reports_verification_failure(
     pushed = await service.call(
         "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\a.bin"}
     )
-    assert pushed["via"] == "ssh" and pushed["verified"] is False and pushed["verified_count"] == 0
+    # The hash could not be READ, which is unknown, not a mismatch: false would read as corruption.
+    assert pushed["via"] == "ssh" and pushed["verified"] is None and pushed["verified_count"] == 0
     assert pushed["copied"][0]["verified"] is None
+    assert pushed["copied"][0]["verify_error"]
     assert "permission denied" in pushed["copied"][0]["verify_error"]
     assert "verification failed" in pushed["note"]
 

@@ -485,7 +485,17 @@ async def kd_state(service: NtDriveService, p: VmParams) -> dict[str, Any]:
         }
     status = session.status()
     if status["attached"]:
-        return {"vm": p.vm, **status}
+        result = {"vm": p.vm, **status}
+        if status["state"] == "broken":
+            # `broken` is inferred from a kd> prompt in the transcript. If the target rebooted
+            # underneath the debugger the prompt is stale, and commands then time out instead of
+            # saying the target is gone. Say where the truth is rather than implying certainty.
+            result["note"] = (
+                "state broken is read from the last kd> prompt, so it can be stale if the target "
+                "rebooted underneath the debugger. kd_go resyncs it, and vm_state probe=true says "
+                "whether the guest is actually alive"
+            )
+        return result
     # kd.exe is gone. What the previous session saw (its target banner, its last break) must
     # not read as the present, so it moves under previous_session and the live fields go blank.
     previous = {"target_info": status["target_info"], "last_event": status["last_event"]}

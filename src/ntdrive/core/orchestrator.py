@@ -245,6 +245,17 @@ async def reboot_flow(
             await steps.run("reset", adapter.reset(vm, hard=True), via="hard_fallback")
     elif mode == "hard":
         await steps.run("reset", adapter.reset(vm, hard=True))
+        # `vmrun reset hard` can leave the VM POWERED OFF instead of resetting it (seen live on a
+        # wedged guest). Verify instead of assuming: an unnoticed power-off sent the caller into a
+        # full vm_wait_ready timeout against a dead VM.
+        if await service.refresh_power(vm) != PowerState.RUNNING:
+            steps.add(
+                "reset_verify",
+                False,
+                reason="the reset left the VM powered off instead of resetting it",
+                fallback="start",
+            )
+            await steps.run("start", adapter.start(vm), via="reset_fallback")
     else:
         assert kd is not None
         kd._write(".reboot\n")  # noqa: SLF001 - orchestrator drives the session directly
@@ -261,6 +272,9 @@ async def reboot_flow(
         term_info = await _reopen_terms(service, vm, dropped, steps, timeout)
     else:
         steps.add("term_reopen", True, skipped="not requested")
-    service.state.vm(vm.name).power = PowerState.RUNNING
+    # Record the power state that is actually true, not an assumption. This used to be a blind
+    # `power = RUNNING`, so a reboot that ended with the VM off was reported as running and nothing
+    # noticed until a later tool failed with "the virtual machine is not powered on".
+    power = await service.refresh_power(vm)
     service.state.record_event(vm.name, "reboot", mode=mode)
-    return {"steps": steps.items, "kd": kd_status, "term": term_info}
+    return {"steps": steps.items, "kd": kd_status, "term": term_info, "power": str(power)}
