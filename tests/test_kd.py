@@ -1,5 +1,7 @@
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -260,6 +262,30 @@ async def test_kd_lifecycle(service: NtDriveService, kd_procs: list[FakeKdProces
     assert "guest keeps running" in detached["note"]
     assert proc.commands[-2:] == ["g", "q"]
     await settle()
+    assert not service.runtime("win11-dev").guest_frozen
+
+
+async def test_attach_probes_instead_of_waiting_for_a_banner(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    """A reconnected KDNET target is silent, so attach must ask, not wait out the timeout."""
+    import ntdrive.kd.session as session_mod
+
+    monkey = session_mod.CONNECTED_RE
+    try:
+        # Make the banner unmatchable: the target is there but never announces itself, which is
+        # exactly what KDNET does after a reconnect.
+        session_mod.CONNECTED_RE = re.compile(rb"THIS_NEVER_MATCHES")
+        started = time.monotonic()
+        attached = await service.call("kd_attach", {"vm": "win11-dev", "timeout": 120})
+    finally:
+        session_mod.CONNECTED_RE = monkey
+    elapsed = time.monotonic() - started
+    # It found the target by breaking in, and resumed it, so it is running and not frozen.
+    assert attached["state"] == "running"
+    assert "note" not in attached
+    # The whole point: it returned in seconds, not after the 120 s timeout.
+    assert elapsed < 30, f"attach waited {elapsed:.0f}s instead of probing"
     assert not service.runtime("win11-dev").guest_frozen
 
 

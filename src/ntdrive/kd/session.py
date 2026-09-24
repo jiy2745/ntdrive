@@ -39,6 +39,10 @@ from ntdrive.errors import (
 )
 from ntdrive.hostproc import no_window_kwargs
 
+# How long to hope for the "Connected to" banner before asking the target directly. The banner is
+# not reprinted after a reconnect, so this is a courtesy window, not the actual detection path.
+_BANNER_GRACE = 5.0
+
 PROMPT_RE = re.compile(rb"(?:^|\r?\n)(?:\d+: )?kd> ?\Z")
 CONNECTED_RE = re.compile(rb"Connected to (Windows[^\r\n]*)")
 BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -315,17 +319,60 @@ class KdSession:
                 self.state = KdState.RUNNING
                 await self._notify()
         elif wait_for_target:
-            await self._wait_state({KdState.RUNNING, KdState.BROKEN}, timeout, allow_timeout=True)
+            await self._find_target(timeout)
         status = self.status()
         if wait_for_target and self.state == KdState.WAITING:
+            # The banner did not come AND a break got no answer, so the target really is absent.
             status["note"] = (
-                f"the target has not announced itself within {timeout:.0f}s (it may already be "
-                "connected: KDNET does not always reprint the banner after a reconnect). Run "
-                "kd_break to confirm, it returns broken at once if the target is there. If it "
-                "sits at [no_debuggee] the target is really absent: vm_reboot mode=soft so it "
-                "reconnects while it boots"
+                f"no target within {timeout:.0f}s: the banner never came and a break got no "
+                "answer either, so kd is at [no_debuggee] and nothing is connected. A KDNET target "
+                "connects while it boots, so vm_reboot mode=soft with kd.exe left attached is what "
+                "brings it in"
             )
         return status
+
+    async def _probe_target(self, timeout: float) -> bool:
+        """Ask whether a target is connected by breaking in, then resume it. True when it answered.
+
+        KDNET only prints "Connected to" when it first syncs, so a target that reconnected (after a
+        reboot or a snapshot revert) is already there and silent. Waiting for the banner then costs
+        the whole timeout and still reports `waiting`. A break gets an answer immediately when the
+        target is live, and the target is resumed straight away so attach never leaves it frozen.
+        """
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return False
+        loop = asyncio.get_running_loop()
+        with contextlib.suppress(Exception):
+            await loop.run_in_executor(None, self._break, proc)
+        if not await self._wait_state({KdState.BROKEN}, min(timeout, 5.0), allow_timeout=True):
+            return False
+        with contextlib.suppress(OSError, NtDriveError):
+            self._write("g\n")
+            self.state = KdState.RUNNING
+            await self._notify()
+        return True
+
+    async def _find_target(self, timeout: float) -> bool:
+        """Settle whether a target is connected, by banner or by probe, as fast as either answers.
+
+        The banner is a side channel the protocol does not promise, so it is only worth a short
+        grace period. After that the question is asked directly, and asking is what returns in
+        milliseconds on a target that was connected all along.
+        """
+        deadline = self._loop.time() + timeout
+        while True:
+            remaining = deadline - self._loop.time()
+            if remaining <= 0:
+                return False
+            grace = min(remaining, _BANNER_GRACE)
+            if await self._wait_state({KdState.RUNNING, KdState.BROKEN}, grace, allow_timeout=True):
+                return True
+            remaining = deadline - self._loop.time()
+            if remaining <= 0:
+                return False
+            if await self._probe_target(remaining):
+                return True
 
     def _read_loop(self, proc: KdProcess) -> None:
         assert proc.stdout is not None

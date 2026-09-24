@@ -165,6 +165,28 @@ reattach and terminals to reopen, which can outlast a tool-call timeout and go t
 return as soon as the boot is triggered, pass `reattach_kd=false reopen_term=false`, then drive the
 reconnect yourself: `vm_wait_ready`, `kd_attach wait_for_target=false`, `term_open`.
 
+### Timeouts are backstops, not expected durations
+
+Every waiting call checks its condition first and returns the moment it is true, so a `timeout` is
+the worst case, not the cost. Pass a generous one: `kd_attach`, `kd_wait_event`, `vm_wait_ready`,
+`vm_reboot`, `snap_revert` and `term_read until=` all come back as soon as the thing happens.
+`kd_attach` and the reattach inside `vm_reboot` and `snap_revert` do not wait for the KDNET banner,
+which is never reprinted after a reconnect: they break in to ask whether a target is there and
+resume it immediately, so a reconnected target is found in seconds.
+
+Two waits still cost real time and cannot be shortened: a guest that is genuinely booting
+(`vm_wait_ready`, minutes after an unclean shutdown because of chkdsk) and a breakpoint that has not
+been hit yet (`kd_wait_event`). Both return instantly once the condition holds.
+
+### Avoid booting at all: snapshot the ready state
+
+On some guests attaching kd across a boot bugchecks it (`0x80 NMI`) about two thirds of the time,
+and attaching first so kd is already listening does not help. The reliable pattern is to stop
+rebooting: get the guest to the state you want once (booted, verifier on, kd attached), `snap_take`
+it with memory included, and `snap_revert` to that snapshot instead of rebooting. A revert takes
+seconds, reattaches the debugger and reopens terminals for you. Remember the revert restores the
+**disk** too, so re-push anything built since that snapshot.
+
 ### Kernel debugging traps that cost a guest
 
 These all bite through ntdrive but come from kd and the guest, so they are worth knowing before a

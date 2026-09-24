@@ -202,6 +202,14 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   refuse), so the supported path is a GUI clone followed by `vm_register` (adds the existing vmx to
   vms.yaml with the template's config and a fresh KDNET port), or a snapshot/revert workflow on the
   base for serial work.
+- **Never wait for the KDNET banner as the way to detect a target.** kd prints "Connected to" only
+  on its first sync, so a target that reconnected after a reboot or a revert is there and silent.
+  Waiting for the banner cost the full timeout (240 s measured live) while a `kd_break` answered
+  instantly. `KdSession._find_target` hopes for the banner for `_BANNER_GRACE` seconds, then
+  `_probe_target` breaks in to ask and resumes the target at once. `attach` and the reattach in
+  `reboot_flow`/`revert_flow` all go through it. The general rule: a wait must check its condition
+  first and return the moment it is true, with the timeout only as a backstop. If an error message
+  ever tells the caller to run a command to find out, the code should run it instead.
 - A bugcheck breaks a KDNET-attached target into `kd>`, so `kd_wait_event` returns `bugcheck` with
   the code and arguments parsed from the banner (`parse_bugcheck` in `kd/session.py`), with no
   `r rip` polling. `vm_wait_ready` long-polls SSH for the guest coming back after the auto-restart,

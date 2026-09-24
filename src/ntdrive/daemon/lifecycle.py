@@ -207,11 +207,14 @@ def ensure_daemon(
     remove_info()
     spawn_daemon(wanted)
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        time.sleep(0.4)
+    while True:
+        # Check before sleeping, so a daemon that is already answering costs nothing.
         info = read_info()
         if info is not None and probe_health(info) is not None:
             return info
+        if time.time() >= deadline:
+            break
+        time.sleep(0.4)
     raise NtDriveError(
         DAEMON_UNAVAILABLE,
         f"ntdrived did not come up within {timeout:.0f}s",

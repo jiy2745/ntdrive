@@ -121,7 +121,16 @@ async def revert_flow(
     else:
         steps.add("term_reopen", True, skipped="not requested")
     service.state.record_event(vm.name, "snapshot_revert", snapshot=name)
-    return {"steps": steps.items, "kd": kd_status, "term": term_info, "power": str(runtime.power)}
+    return {
+        "steps": steps.items,
+        "kd": kd_status,
+        "term": term_info,
+        "power": str(runtime.power),
+        "note": (
+            f"the disk went back to {name} too, so anything written to the guest after that "
+            "snapshot is gone: re-push tools and test files built since then (file_push)"
+        ),
+    }
 
 
 async def _soft_shutdown(
@@ -179,12 +188,12 @@ async def _kd_after_reboot(
 ) -> dict[str, Any] | None:
     kd = service.kd_sessions.get(vm.name)
     if kd_alive and kd is not None:
-        # The target looks for the debugger again early in boot. Keep kd.exe and wait for it to
-        # announce the new connection (both KDNET and the serial pipe reconnect on their own).
+        # The target looks for the debugger again early in boot. Keep kd.exe and settle whether it
+        # came back. This must PROBE, not wait for the banner: KDNET does not reprint "Connected
+        # to" after a reconnect, so waiting for it burned the whole timeout (240 s live) on a target
+        # that had been connected within seconds. _find_target asks the target directly.
         kd.state = KdState.WAITING
-        reached = await kd._wait_state(  # noqa: SLF001
-            {KdState.RUNNING, KdState.BROKEN}, timeout, allow_timeout=True
-        )
+        reached = await kd._find_target(timeout)  # noqa: SLF001
         if reached:
             steps.add("kd_reconnect", True, state=str(kd.state))
             return kd.status()
