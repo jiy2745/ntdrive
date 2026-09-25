@@ -24,5 +24,13 @@ update when a tool changes. Read `AGENTS.md` and follow it.
 - `uv run --no-sync ntdrive daemon restart` after editing daemon-side code, or the running daemon
   keeps serving the old code. The open MCP connection survives the restart: the client re-reads
   `daemon.json` on its next call. Live kd and terminal sessions do not survive it.
+- A **new tool, or a changed parameter schema, is invisible to an MCP client that already
+  connected**: it cached the tool list when its session started, and a healthy connector cannot be
+  re-dialled ("only a failed server can be reconnected"). A restart of the daemon is not enough, so
+  when shipping a tool for another session to use, say that it lands in their *next* session. Behaviour
+  changes inside an existing tool do take effect at once, because those live in the daemon.
+- Before restarting the daemon, check `ntdrive --json sys state` for a VM whose `kd.state` is not
+  `detached`: a restart kills kd.exe, and over KDNET re-attaching costs a guest reboot. `daemon
+  stop`/`restart` refuse in that case unless given `--force`.
 - Before committing run the two commands under Commands in `AGENTS.md`. Never stage `vms.yaml`:
   it holds real credentials.

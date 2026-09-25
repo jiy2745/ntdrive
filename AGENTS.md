@@ -207,7 +207,9 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   Waiting for the banner cost the full timeout (240 s measured live) while a `kd_break` answered
   instantly. `KdSession._find_target` hopes for the banner for `_BANNER_GRACE` seconds, then
   `_probe_target` breaks in to ask and resumes the target at once. `attach` and the reattach in
-  `reboot_flow`/`revert_flow` all go through it. The general rule: a wait must check its condition
+  `reboot_flow`/`revert_flow` all go through it. **Verified live 2026-09-26:** a `snap_revert` with
+  `reattach_kd` on an encrypted VM went from 240 s to 15.8 s end to end (revert 2.6 s, start 7.7 s,
+  `kd_attach` 5.5 s), repeatable over four reverts. The general rule: a wait must check its condition
   first and return the moment it is true, with the timeout only as a backstop. If an error message
   ever tells the caller to run a command to find out, the code should run it instead.
 - A bugcheck breaks a KDNET-attached target into `kd>`, so `kd_wait_event` returns `bugcheck` with

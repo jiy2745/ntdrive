@@ -207,7 +207,19 @@ long session:
 - **Some commands wedge kd over KDNET.** Known: `!process 0 0 <name>`, `.reload /f <module>.sys`,
   and a conditional breakpoint with `gc` on a hot function. `kd_exec` interrupts a command that
   overruns its timeout and tells you whether the prompt came back, but avoid these over the net
-  transport. If the prompt is dead, `kd_detach` then `kd_attach`.
+  transport. If the prompt is dead, `kd_detach` then `kd_attach`. A **plain `.reload`** is safe
+  (about 2 s, no wedge) and is the fix below, so only the `/f <module>.sys` form is the trap.
+- **After a guest REBOOT, session modules are absent, not just unresolved.** `lm m win32k*` prints
+  only its header, so symbols cannot resolve at all. A plain `.reload` brings them back, and
+  `lm m win32k*` then reports the session bases, which you need anyway because a reboot re-randomizes
+  them. The sequence that works: run something that touches GDI and traps into the debugger, then
+  plain `.reload`, then `lm m win32k*`, then set breakpoints by symbol. A `snap_revert` does not need
+  this, because the snapshot restores the module list with the rest of memory.
+- **A breakpoint on a session symbol can fire even when reading that address fails.** `bp
+  win32kfull!X` succeeds because kd defers it, while `u win32kfull!X` in the same `kd_exec` answers
+  "Memory access error" without a session process context. So set breakpoints by symbol and read
+  memory at the hit, where you are in a session process by construction, rather than concluding the
+  breakpoint did not take.
 - **Classify a crash with `kd_bugcheck`, not `!analyze -v`.** `kd_bugcheck` runs `.bugcheck` and
   returns the code, its arguments and the faulting instruction in two lines. `!analyze -v` takes
   tens of seconds and prints tens of kilobytes, most of it `chkimg` differences that are false on a
