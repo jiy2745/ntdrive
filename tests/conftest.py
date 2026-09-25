@@ -398,6 +398,13 @@ class FakeKdProcess:
                     self.bps.remove(token)
             self.inject(b"kd> ")
             return
+        if line.strip() == ".bugcheck":
+            self.inject(
+                b"Bugcheck code 0000003B\r\n"
+                b"Arguments 00000000`c0000005 fffff800`11223344 ffffd000`aabbccdd 00000000`00000000"
+                b"\r\nkd> "
+            )
+            return
         if line.startswith("? "):
             self.inject(f"Evaluate expression: {self.eval_value} = 0x1\r\nkd> ".encode())
             return

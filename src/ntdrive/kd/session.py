@@ -44,6 +44,9 @@ from ntdrive.hostproc import no_window_kwargs
 _BANNER_GRACE = 5.0
 
 PROMPT_RE = re.compile(rb"(?:^|\r?\n)(?:\d+: )?kd> ?\Z")
+# On a multiprocessor target the prompt is `2: kd>`, naming the processor the break landed on. A
+# later command runs wherever kd is focused, so the caller needs to know which one that was.
+PROC_PROMPT_RE = re.compile(rb"(?:^|\r?\n)(\d+): kd> ?\Z")
 CONNECTED_RE = re.compile(rb"Connected to (Windows[^\r\n]*)")
 BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
@@ -415,6 +418,9 @@ class KdSession:
                 tail = self._buf[-4096:].decode("utf-8", errors="replace")
                 kind = classify_break(tail)
                 event: dict[str, Any] = {"event": kind, "at": time.time(), "output": tail[-2000:]}
+                proc_match = PROC_PROMPT_RE.search(self._buf[-64:])
+                if proc_match is not None:
+                    event["processor"] = int(proc_match.group(1))
                 if kind == "bugcheck":
                     bugcheck = parse_bugcheck(tail)
                     if bugcheck is not None:

@@ -15,7 +15,7 @@ from ntdrive.core.registry import tool
 from ntdrive.core.tools.common import VmParams
 from ntdrive.errors import BACKEND_ERROR, INVALID_ARGS, NtDriveError
 from ntdrive.kd.firewall import MANUAL_FIREWALL_HINT
-from ntdrive.kd.session import generate_kdnet_key
+from ntdrive.kd.session import generate_kdnet_key, parse_bugcheck
 
 if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
@@ -90,7 +90,24 @@ class ExecParams(VmParams):
     cmds: list[str] | None = Field(default=None, description="Several commands, run in order")
     timeout: float = Field(default=60, ge=1, description="Seconds per command")
     max_bytes: int = Field(
-        default=65536, ge=256, le=1 << 20, description="Cap on each command's output"
+        default=16384,
+        ge=256,
+        le=1 << 20,
+        description=(
+            "Cap on each command's output. Raise it when truncated says so. The default is "
+            "deliberately small because commands like !analyze -v print tens of kilobytes of "
+            "chkimg noise"
+        ),
+    )
+    processor: int | None = Field(
+        default=None,
+        ge=0,
+        le=1023,
+        description=(
+            "Switch to this processor (~Ns) before the commands. A break lands on whichever "
+            "processor hit it, and kd_state's last_event reports which one, so pass it to run "
+            "where the break happened"
+        ),
     )
 
 
@@ -458,10 +475,46 @@ async def kd_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
         cmds.insert(0, p.cmd)
     if not cmds:
         raise NtDriveError(INVALID_ARGS, "kd_exec needs cmd or cmds")
+    if p.processor is not None:
+        # Run where the caller asked. kd resets the implicit process and processor at every break,
+        # so anything that needs a context (`.process /r /p` for session space) must set it in the
+        # same call as the commands that use it.
+        cmds.insert(0, f"~{p.processor}s")
     cfg = service.vm_cfg(p.vm)
     session = service.kd_session(cfg)
     outputs = await session.exec(cmds, timeout=p.timeout, max_bytes=p.max_bytes)
     return {"vm": p.vm, "outputs": outputs, "state": str(session.state)}
+
+
+@tool(
+    "kd_bugcheck",
+    "Classify the current bugcheck cheaply: runs .bugcheck (two lines) and returns the code, its "
+    "arguments and the faulting instruction. Use this before !analyze -v, which takes tens of "
+    "seconds and prints tens of kilobytes of chkimg noise that is false on a patched kernel.",
+    VmParams,
+    effect="read",
+)
+async def kd_bugcheck(service: NtDriveService, p: VmParams) -> dict[str, Any]:
+    """The bugcheck code and arguments, without paying for !analyze -v."""
+    cfg = service.vm_cfg(p.vm)
+    session = service.kd_session(cfg)
+    outputs = await session.exec([".bugcheck", "r rip", "u rip L1"], timeout=30, max_bytes=4096)
+    by_cmd = {str(o["cmd"]): str(o["output"]) for o in outputs}
+    parsed = parse_bugcheck(by_cmd.get(".bugcheck", ""))
+    result: dict[str, Any] = {
+        "vm": p.vm,
+        "bugcheck": parsed,
+        "raw": by_cmd.get(".bugcheck", "").strip(),
+        "rip": by_cmd.get("r rip", "").strip(),
+        "faulting_instruction": by_cmd.get("u rip L1", "").strip(),
+        "state": str(session.state),
+    }
+    if parsed is None:
+        result["note"] = (
+            ".bugcheck reported no code, so the target is probably not in a bugcheck. "
+            "kd_wait_event returns the code and arguments directly when it catches one"
+        )
+    return result
 
 
 def _breakpoint_ids(listing: str) -> set[str]:

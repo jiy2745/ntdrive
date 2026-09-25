@@ -236,6 +236,7 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `kd_break` | additive | Break into the running target and wait for the kd> prompt. |
 | `kd_go` | additive | Resume the target (g). |
 | `kd_exec` | destructive | Run one or more debugger commands at the kd> prompt and return each command's output. |
+| `kd_bugcheck` | read | Classify the current bugcheck cheaply: runs .bugcheck (two lines) and returns the code, its arguments and the faulting instruction. Use this before !analyze -v, which takes tens of seconds and prints tens of kilobytes of chkimg noise that is false on a patched kernel. |
 | `kd_sample` | destructive | Break on a symbol, let the target run, and collect the value of one or more expressions at each of the next n hits, then clear the breakpoint. Replaces a manual bp/g/eval round trip per hit. The breakpoint is plain and conditions are evaluated by the daemon, never compiled into the breakpoint, because a conditional breakpoint with gc on a hot function NMIs the guest. |
 | `kd_wait_event` | read | Wait until the running target stops (bugcheck, breakpoint, ...) or the timeout expires. |
 | `kd_state` | read | Debugger state: attached (kd.exe alive), state (detached, waiting, running, broken), transport, target info, last event and log path. |

@@ -343,6 +343,33 @@ async def test_kd_sample_skips_hits_whose_condition_is_zero(
     assert any(c.startswith("? ") for c in proc.commands)
 
 
+async def test_kd_bugcheck_classifies_without_analyze(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    """.bugcheck is two lines; !analyze -v is 20k tokens of chkimg noise on a patched kernel."""
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    result = await service.call("kd_bugcheck", {"vm": "win11-dev"})
+    assert result["bugcheck"]["code"] == "0x0000003b"
+    # kd splits a 64-bit argument with a backtick, so the halves are joined into one value.
+    assert result["bugcheck"]["arguments"][0] == "0x00000000c0000005"
+    assert len(result["bugcheck"]["arguments"]) == 4
+    assert "note" not in result  # a real bugcheck was parsed
+    # It never runs the expensive extension.
+    assert not any("analyze" in c for c in kd_procs[-1].commands)
+
+
+async def test_kd_exec_pins_the_processor_when_asked(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    """kd resets the processor at every break, so the caller must be able to say where to run."""
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    await service.call("kd_exec", {"vm": "win11-dev", "cmd": "r", "processor": 2})
+    cmds = kd_procs[-1].commands
+    assert "~2s" in cmds and cmds.index("~2s") < cmds.index("r")
+
+
 async def test_kd_exec_says_when_a_command_printed_nothing(
     service: NtDriveService, kd_procs: list[FakeKdProcess]
 ) -> None:

@@ -117,6 +117,10 @@ async def test_term_tools_end_to_end(
     quiet = await service.call("term_exec", {"session_id": sid, "cmd": "Get-Date"})
     assert quiet["exit_code"] is None and quiet["state"] == "open"
     assert "LASTEXITCODE" in quiet["note"]
+    # $LASTEXITCODE keeps the last EXTERNAL program's code, so it must be cleared before the
+    # command or a cmdlet-only command reports a stale number (seen live: exit_code 1 on success).
+    sent = b"".join(fake_transport.channels[-1].written).decode("utf-8", errors="replace")
+    assert "$global:LASTEXITCODE = $null; Get-Date" in sent
     await service.call("term_close", {"session_id": sid})
     assert service.state.term(sid).state == "closed"
 

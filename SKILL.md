@@ -204,15 +204,30 @@ long session:
 - **KDNET attaching during boot often bugchecks the guest** (seen on 4 of 6 `vm_reboot
   reattach_kd=true` attempts, also `0x80`). A second reboot comes up fine, so reboot again rather
   than digging into the first crash.
-- **`!process 0 0 <name>` never returns over KDNET** and wedges kd. `kd_exec` now interrupts a
-  command that overruns its timeout and tells you whether the prompt came back, but avoid that
-  extension over the net transport. If the prompt is dead, `kd_detach` then `kd_attach`.
+- **Some commands wedge kd over KDNET.** Known: `!process 0 0 <name>`, `.reload /f <module>.sys`,
+  and a conditional breakpoint with `gc` on a hot function. `kd_exec` interrupts a command that
+  overruns its timeout and tells you whether the prompt came back, but avoid these over the net
+  transport. If the prompt is dead, `kd_detach` then `kd_attach`.
+- **Classify a crash with `kd_bugcheck`, not `!analyze -v`.** `kd_bugcheck` runs `.bugcheck` and
+  returns the code, its arguments and the faulting instruction in two lines. `!analyze -v` takes
+  tens of seconds and prints tens of kilobytes, most of it `chkimg` differences that are false on a
+  running kernel because it compares patched memory against the symbol image. `kd_exec` caps each
+  command at `max_bytes` (16 KB by default) and says `truncated` when it clipped.
+- **kd resets the context at every break.** The implicit process and the processor come from
+  whatever the new break was, so a `.process /r /p <EPROCESS>` set before a `g` is gone at the next
+  stop. This is what makes session-space work (`u`, `bp` on `win32kfull!...`) fail with "Memory
+  access error" after a revert or a resume. Two ways to keep it:
+  put the context command and the commands that need it in ONE `kd_exec cmds` array, and pass
+  `kd_exec processor=N` to run where the break landed (`kd_state`'s `last_event.processor` reports
+  it, since the prompt `2: kd>` names the processor). For repeated hits, `kd_sample exprs=[...]` can
+  start with the `.process` command, because `exprs` runs at every hit.
 - **Session-space symbols need a process in the right session.** Because `!process` is unusable,
   give kd the context another way: touch GDI from a user-mode helper and execute an `int 3` in it,
   which hands kd that process context, and then `lm m win32kfull` resolves.
-- **`!pool` cannot read session pool** and reports "not valid pool". To confirm special pool, read
-  the page bytes directly: the allocation sits at the page end, `%`-fill on either side, and the
-  next page is unmapped.
+- **`!pool` cannot read session pool** and reports "not valid pool" or "Unable to read large session
+  pool table". Read the page directly instead: `dc (<addr> & ~0xfff)` shows the special-pool page
+  header with the tag and size, the allocation sits at the page end with `%`-fill on either side,
+  and the next page is unmapped.
 - **The kd banner's `MP (1 procs)` during early boot is not the final CPU count.** Check
   `Win32_ComputerSystem.NumberOfLogicalProcessors` in the guest, or `vm_config`.
 
@@ -278,6 +293,9 @@ the disk, and the snapshot keeps the memory state. `sys_health` reports such a l
   the question is what a normal user sees: UAC, access denied, per-user settings. `file_push`,
   `file_pull` and `kd_setup_guest` always use the administrator account. Without a standard
   account configured the call fails with `invalid_args` and says how to add one.
+- `file_push local=` takes a **directory or a glob**, not just one file, and pushes the tree in one
+  call (`file_push VM C:\rig C:\zd\` re-pushes a whole rig after a `snap_revert`, which restores the
+  disk). No need for one call per file.
 - `file_push` writes files with admin-only ACLs, so a `term_exec`/`con_run account=standard` run of
   a pushed `.ps1` or `.exe` gets "access denied" or "not recognized". Pass
   `file_push grant_users_rx=true` to grant BUILTIN\\Users read and execute on each copied file (it

@@ -246,7 +246,12 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
         line = f"{p.cmd} & echo {typed} %ERRORLEVEL%\r"
     else:
         typed = f'"__NT" + "{marker[4:]}'
-        line = f'{p.cmd}; Write-Output ({typed} $LASTEXITCODE")\r'
+        # $LASTEXITCODE keeps the code of the last EXTERNAL program in the session, so a command
+        # that runs none would report a stale number from something earlier (seen live: exit_code 1
+        # for a cmdlet-only command that succeeded). Clearing it first makes the marker carry an
+        # empty value, which the completion regex allows and which is reported as exit_code null
+        # with the note that no external program ran.
+        line = f'$global:LASTEXITCODE = $null; {p.cmd}; Write-Output ({typed} $LASTEXITCODE")\r'
     start_cursor = session.ring.end
     started = time.monotonic()
     session.send(line.encode("utf-8"), source="agent")
