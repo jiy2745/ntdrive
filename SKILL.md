@@ -178,6 +178,10 @@ Two waits still cost real time and cannot be shortened: a guest that is genuinel
 (`vm_wait_ready`, minutes after an unclean shutdown because of chkdsk) and a breakpoint that has not
 been hit yet (`kd_wait_event`). Both return instantly once the condition holds.
 
+After a bugcheck the first boot can run chkdsk for minutes, and the default 60 s wait for the
+guest's IP then reads as a failure. Either wait first with `vm_wait_ready timeout=300`, or open the
+terminal directly with `term_open boot_timeout=300`.
+
 ### Avoid booting at all: snapshot the ready state
 
 On some guests attaching kd across a boot bugchecks it (`0x80 NMI`) about two thirds of the time,

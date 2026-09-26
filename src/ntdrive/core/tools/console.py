@@ -14,6 +14,7 @@ from ntdrive.core.registry import tool
 from ntdrive.core.tools.common import VmParams
 from ntdrive.errors import BACKEND_ERROR, INVALID_ARGS, NtDriveError
 from ntdrive.screen import keymap, vnc
+from ntdrive.screen.png import is_blank_png
 
 if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
@@ -234,14 +235,18 @@ async def con_screenshot(service: NtDriveService, p: ScreenshotParams) -> dict[s
             if p.method == "guest" or endpoint is None:
                 raise
             saved, via = await by_vnc()  # auto: fall back to the login-free path
+        else:
+            # vmrun reports success for an all-black frame when the guest has no interactive
+            # session, so `auto` must treat that as a failed capture too, not just an exception.
+            if p.method == "auto" and endpoint is not None and is_blank_png(saved):
+                saved, via = await by_vnc()
     result: dict[str, Any] = {"vm": p.vm, "png_path": saved, "via": via}
-    if via == "guest":
-        # vmrun captureScreen returns a valid but all-black PNG when there is no interactive
-        # session (pre-login, WinRE, early boot) and reports success, which reads as a real frame.
+    if is_blank_png(saved):
+        result["blank"] = True
         result["note"] = (
-            "if the image is black the guest likely has no interactive session yet (pre-login, "
-            "WinRE or booting): con_enable_vnc (VM off) then con_screenshot method=vnc reads the "
-            "framebuffer without a login"
+            "the image is entirely black, so this is not a usable frame. The guest has no "
+            "interactive session (pre-login, WinRE or still booting). con_enable_vnc with the VM "
+            "off, then con_screenshot method=vnc, reads the framebuffer without a guest login"
         )
     if p.base64:
         with open(saved, "rb") as fh:

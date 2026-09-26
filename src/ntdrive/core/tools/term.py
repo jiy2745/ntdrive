@@ -38,6 +38,14 @@ class OpenParams(VmParams):
     )
     cols: int = Field(default=120, ge=20, le=500, description="Terminal width in columns")
     rows: int = Field(default=40, ge=5, le=200, description="Terminal height in rows")
+    boot_timeout: float = Field(
+        default=60,
+        ge=1,
+        description=(
+            "Seconds to wait for the guest to report an IP. Raise it for a guest that is still "
+            "booting: the first boot after a bugcheck can run chkdsk for minutes"
+        ),
+    )
 
 
 class SessionParams(BaseModel):
@@ -141,7 +149,7 @@ async def term_open(service: NtDriveService, p: OpenParams) -> dict[str, Any]:
         )
     service.ensure_not_frozen(p.vm)
     await service.ensure_running(cfg)
-    ip = await service.guest_ip(cfg)
+    ip = await service.guest_ip(cfg, timeout=p.boot_timeout)
     shell = p.shell or cfg.guest.shell
     session = await service.term.open(
         cfg, ip, shell, p.cols, p.rows, p.transport, account=p.account

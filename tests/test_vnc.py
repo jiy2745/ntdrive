@@ -20,6 +20,22 @@ from .conftest import FakeVmrun
 PIXELS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)]
 
 
+def _black_png(width: int, height: int) -> bytes:
+    """A valid all-black PNG, which is what vmrun captures with no interactive session."""
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        crc = zlib.crc32(kind + body) & 0xFFFFFFFF
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", crc)
+
+    scanlines = b"".join(b"\x00" + b"\x00" * (width * 3) for _ in range(height))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(scanlines))
+        + chunk(b"IEND", b"")
+    )
+
+
 def test_des_matches_the_classic_vector() -> None:
     # The standard DES test vector proves the block cipher used by VNC auth is correct.
     key = bytes.fromhex("133457799BBCDFF1")
@@ -140,6 +156,20 @@ async def test_con_screenshot_vnc_reads_the_framebuffer_without_a_guest_login(
         monkeypatch.setattr(service.adapter_for(vm), "screenshot", bad_guest)
         auto = await service.call("con_screenshot", {"vm": "win11-dev", "method": "auto"})
         assert auto["via"] == "vnc"
+
+        # auto also falls back when the guest capture SUCCEEDS but returns an all-black frame,
+        # which is what vmrun does pre-login and used to be reported as a real screenshot.
+        async def blank_guest(vm_cfg, out_path):  # type: ignore[no-untyped-def]
+            Path(out_path).write_bytes(_black_png(4, 4))
+            return str(out_path)
+
+        monkeypatch.setattr(service.adapter_for(vm), "screenshot", blank_guest)
+        blanked = await service.call("con_screenshot", {"vm": "win11-dev", "method": "auto"})
+        assert blanked["via"] == "vnc" and "blank" not in blanked
+        # method=guest keeps the caller's choice but says the frame is unusable.
+        only_guest = await service.call("con_screenshot", {"vm": "win11-dev", "method": "guest"})
+        assert only_guest["via"] == "guest" and only_guest["blank"] is True
+        assert "method=vnc" in only_guest["note"]
 
 
 async def _fake_rfb_input_server() -> tuple[
