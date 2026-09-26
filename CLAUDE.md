@@ -29,13 +29,17 @@ update when a tool changes. Read `AGENTS.md` and follow it.
   re-dialled ("only a failed server can be reconnected"). A restart of the daemon is not enough, so
   when shipping a tool for another session to use, say that it lands in their *next* session. Behaviour
   changes inside an existing tool do take effect at once, because those live in the daemon.
-- **The same applies to `SKILL.md`.** A long-running agent session holds the copy it read when it
-  started, so a warning added today does not reach a session that began yesterday, even though its
-  checkout is current. Twice now a peer reported a trap that was already documented in its own
-  working tree (the WinRE plus KDNET NMI and the kd_detach transport error, both added in 1794fb6,
-  both present in the tree it was on). So committing guidance is not delivering it: when a fix is a
-  doc change, message the sessions that need it, and prefer putting anything that can destroy a
-  guest into a tool description or a tool result, which are always read fresh.
+- **`SKILL.md` text is NOT subject to that**: any session can re-read it from disk with a file tool
+  and get the current version. So the delivery gap is specifically tool schemas and parameters, not
+  documentation.
+- **But a documented warning still gets missed.** A peer session twice reported traps that were
+  already in its own checkout (the WinRE plus KDNET NMI and the kd_detach transport error, both
+  added in 1794fb6, an ancestor of the commit it was on), having cost it guests. The cause turned
+  out to be a search that could not match: `grep -E "WinRE\|boottore"` looks for a literal pipe,
+  because `\|` is alternation in BRE but an escaped literal in ERE. So do not treat committing
+  guidance as delivering it. Message the sessions that need a guidance change, and prefer putting
+  anything that can destroy a guest into a tool description or a tool result, which the caller
+  reads at the moment it acts rather than having to go looking.
 - Before restarting the daemon, check `ntdrive --json sys state` for a VM whose `kd.state` is not
   `detached`: a restart kills kd.exe, and over KDNET re-attaching costs a guest reboot. `daemon
   stop`/`restart` refuse in that case unless given `--force`.
