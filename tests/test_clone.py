@@ -75,6 +75,48 @@ async def test_vm_clone_needs_a_snapshot(service: NtDriveService, fake_vmrun: Fa
     assert exc.value.code == "snapshot_not_found"
 
 
+async def test_vm_create_makes_an_unencrypted_clonable_vm(
+    service: NtDriveService, fake_vmrun: FakeVmrun, tmp_path: Path
+) -> None:
+    """The escape from the encrypted base: a fresh VM vmrun CAN clone, because it has no key."""
+    (tmp_path / "vmcli.exe").write_bytes(b"stub")  # sits next to vmrun
+    service.config.vms["win11-dev"].encryption_password = "vmpw"  # template IS encrypted
+    iso = tmp_path / "win11.iso"
+    iso.write_bytes(b"ISO")
+    result = await service.call(
+        "vm_create",
+        {"vm": "win11-dev", "name": "runner1", "iso": str(iso), "cpus": 4, "memory_mb": 8192},
+    )
+    assert result["encrypted"] is False and "runner1" in service.config.vms
+    entry = service.config.vms["runner1"]
+    # The encryption is deliberately NOT inherited, which is what makes vm_clone work on it later.
+    assert entry.resolve_encryption_password() == ""
+    assert entry.kdnet.port != service.config.vms["win11-dev"].kdnet.port
+    assert entry.guest.user == service.config.vms["win11-dev"].guest.user
+    # The vmx vmcli left incomplete is wired up: disk attached, UEFI, KDNET-capable NIC, ISO.
+    text = Path(result["vmx"]).read_text(encoding="latin-1")
+    assert 'nvme0:0.fileName = "runner1.vmdk"' in text
+    assert 'firmware = "efi"' in text
+    assert 'ethernet0.virtualDev = "e1000e"' in text
+    assert f'sata0:0.fileName = "{iso}"' in text and 'deviceType = "cdrom-image"' in text
+    assert result["hardware"]["cpus"] == 4 and result["hardware"]["memory_mb"] == 8192
+    # A clone of THIS one is allowed, unlike the encrypted template.
+    await service.call("snap_take", {"vm": "runner1", "name": "base"})
+    clone = await service.call("vm_clone", {"vm": "runner1", "name": "runner2", "snapshot": "base"})
+    assert clone["vm"] == "runner2"
+
+
+async def test_vm_create_rejects_a_missing_iso(
+    service: NtDriveService, fake_vmrun: FakeVmrun, tmp_path: Path
+) -> None:
+    with pytest.raises(NtDriveError) as exc:
+        await service.call(
+            "vm_create", {"vm": "win11-dev", "name": "r9", "iso": str(tmp_path / "nope.iso")}
+        )
+    assert exc.value.code == "invalid_args" and "ISO" in exc.value.message
+    assert "r9" not in service.config.vms
+
+
 async def test_vm_register_adds_an_existing_vmx_with_a_fresh_kdnet_port(
     service: NtDriveService, fake_vmrun: FakeVmrun, tmp_path: Path
 ) -> None:

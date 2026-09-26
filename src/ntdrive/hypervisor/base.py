@@ -95,6 +95,16 @@ class HypervisorAdapter(ABC):
         """Create a clone at dst_vmx from the source's snapshot (linked shares the base disk)."""
 
     @abstractmethod
+    async def create_vm(
+        self,
+        dst_vmx: str,
+        guest_os: str = "windows11-64",
+        iso: str | None = None,
+        nic: str = "e1000e",
+    ) -> dict[str, Any]:
+        """Create a new, unencrypted VM with an empty disk, optionally booting an installer ISO."""
+
+    @abstractmethod
     async def delete_vm(self, vm: VmConfig) -> None:
         """Unregister the VM and delete its files (the VM must be powered off)."""
 

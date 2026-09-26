@@ -56,6 +56,22 @@ class FakeVmrun:
         if rest[:1] == ["-gu"]:
             rest = rest[4:]
         cmd, rest = rest[0], rest[1:]
+        if cmd == "VM" and rest[:1] == ["Create"]:
+            # vmcli, not vmrun: writes a minimal vmx plus a disk, and attaches neither.
+            opts = rest[1:]
+            name = opts[opts.index("-n") + 1]
+            where = Path(opts[opts.index("-d") + 1])
+            guest = opts[opts.index("-c") + 1] if "-c" in opts else "windows11-64"
+            where.mkdir(parents=True, exist_ok=True)
+            target = where / f"{name}.vmx"
+            target.write_text(
+                '.encoding = "windows-949-2000"\nconfig.version = "8"\n'
+                f'guestOS = "{guest}"\nnumvcpus = "2"\nmemsize = "4096"\n'
+                f'nvram = "{name}.nvram"\n',
+                encoding="latin-1",
+            )
+            (where / f"{name}.vmdk").write_bytes(b"# Disk DescriptorFile\n")
+            return 0, f"VMX file is created, filepath: {target}"
         if self.fail_next.get(cmd, 0) > 0:
             self.fail_next[cmd] -= 1
             return 255, "Error: The operation was temporarily unavailable"

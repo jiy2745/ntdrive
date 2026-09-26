@@ -44,6 +44,7 @@ from ntdrive.hypervisor.vmx import (
     hardware_from_settings,
     saved_state,
     saved_state_is_stale,
+    upsert_settings,
     vmx_settings,
 )
 
@@ -618,6 +619,70 @@ class VmwareAdapter(HypervisorAdapter):
         if changed:
             path.write_text(text, encoding="latin-1")
         return {"changed": changed, "hardware": await self.hardware(vm)}
+
+    async def create_vm(
+        self,
+        dst_vmx: str,
+        guest_os: str = "windows11-64",
+        iso: str | None = None,
+        nic: str = "e1000e",
+    ) -> dict[str, Any]:
+        """Create a new, UNENCRYPTED VM with `vmcli VM Create`, then wire up what it leaves out.
+
+        `vmcli` writes a minimal vmx plus a 64 GB thin disk, but does not attach the disk, add a
+        NIC, choose firmware or connect an ISO, so the VM would not boot. Those keys are written
+        here. vmrun cannot create a VM at all and cannot clone an encrypted one, so this is the way
+        to get a guest that vmrun *can* clone later: a fresh one with no encryption and no vTPM.
+        """
+        target = Path(dst_vmx)
+        name = target.stem
+        target.parent.mkdir(parents=True, exist_ok=True)
+        vmcli = Path(self.vmrun_path).with_name("vmcli.exe")
+        if not vmcli.is_file():
+            raise NtDriveError(
+                BACKEND_ERROR,
+                f"vmcli.exe is not next to vmrun ({vmcli})",
+                "it ships with VMware Workstation 17 and later",
+            )
+        code, out = await self._runner(
+            [str(vmcli), "VM", "Create", "-n", name, "-d", str(target.parent), "-c", guest_os],
+            300.0,
+        )
+        if code != 0 or not target.is_file():
+            raise NtDriveError(
+                BACKEND_ERROR,
+                f"vmcli VM Create failed: {out.strip()[:300]}",
+                "check the guest type and that the directory is writable",
+            )
+        disk = f"{name}.vmdk"
+        keys: dict[str, str] = {
+            "displayName": name,
+            # Windows 11 needs UEFI. Secure Boot and a vTPM are left off on purpose: a vTPM forces
+            # VMware to encrypt the VM, and an encrypted VM is the thing vmrun cannot clone.
+            "firmware": "efi",
+            "nvme0.present": "TRUE",
+            "nvme0:0.present": "TRUE",
+            "nvme0:0.fileName": disk,
+            "ethernet0.present": "TRUE",
+            "ethernet0.connectionType": "nat",
+            "ethernet0.virtualDev": nic,
+            "ethernet0.addressType": "generated",
+            "ethernet0.startConnected": "TRUE",
+        }
+        if iso:
+            keys.update(
+                {
+                    "sata0.present": "TRUE",
+                    "sata0:0.present": "TRUE",
+                    "sata0:0.deviceType": "cdrom-image",
+                    "sata0:0.fileName": iso,
+                    "sata0:0.startConnected": "TRUE",
+                }
+            )
+        text, _ = upsert_settings(target.read_text(encoding="latin-1"), keys)
+        target.write_text(text, encoding="latin-1")
+        log.info("created VM %s at %s", name, dst_vmx)
+        return {"vmx": str(target), "disk": str(target.parent / disk), "guest_os": guest_os}
 
     async def kill(self, vm: VmConfig) -> dict[str, Any]:
         """End the VM's vmware-vmx process on the host and clear its stale lock files.

@@ -92,6 +92,15 @@ def apply_hardware(text: str, changes: dict[str, Any]) -> tuple[str, list[str]]:
         values["memsize"] = str(changes["memory_mb"])
     if "nic" in changes:
         values["ethernet0.virtualDev"] = str(changes["nic"])
+    return upsert_settings(text, values)
+
+
+def upsert_settings(text: str, values: dict[str, str]) -> tuple[str, list[str]]:
+    """The vmx text with every key in `values` set, and the list of keys that changed.
+
+    Existing lines are rewritten in place, whatever their key casing, missing ones are appended,
+    and every other line is left byte for byte as it was. An unchanged value counts as no change.
+    """
     wanted = {key.lower(): (key, value) for key, value in values.items()}
     out: list[str] = []
     seen: set[str] = set()

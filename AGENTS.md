@@ -199,9 +199,16 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   snapshot has memory). Only the VMware GUI can clone an encrypted VM. `vm_clone` detects an
   encrypted source (`resolve_encryption_password()`) and fails fast. No CLI can clone an encrypted
   VM (vmrun, vmcli which has no clone command, and ovftool which cannot export an encrypted VM all
-  refuse), so the supported path is a GUI clone followed by `vm_register` (adds the existing vmx to
-  vms.yaml with the template's config and a fresh KDNET port), or a snapshot/revert workflow on the
-  base for serial work.
+  refuse).
+- **The way out of the encrypted base is not to clone it: `vm_create` makes a fresh UNENCRYPTED
+  VM.** `vmcli VM Create` (vmrun cannot create a VM at all) writes a vmx plus a 64 GB thin disk but
+  attaches neither the disk nor a NIC and picks no firmware, so `create_vm` in the adapter writes
+  those keys, plus the installer ISO. The new VM has no `encryption.keySafe` and no vTPM, which is
+  exactly what makes `vm_clone` work on it. A vTPM is why the base is encrypted in the first place,
+  so a fresh VM leaves it off and Windows 11 setup needs the LabConfig TPM bypass. Verified live
+  2026-09-26: created, started under vmrun and stopped, with the encrypted VM running untouched
+  beside it. The older paths remain for an existing encrypted VM: a GUI clone plus `vm_register`,
+  or a snapshot/revert workflow on the base for serial work.
 - **Never wait for the KDNET banner as the way to detect a target.** kd prints "Connected to" only
   on its first sync, so a target that reconnected after a reboot or a revert is there and silent.
   Waiting for the banner cost the full timeout (240 s measured live) while a `kd_break` answered

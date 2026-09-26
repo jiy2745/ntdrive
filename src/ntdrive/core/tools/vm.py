@@ -429,6 +429,84 @@ async def vm_clone(service: NtDriveService, p: CloneParams) -> dict[str, Any]:
     }
 
 
+class CreateParams(VmParams):
+    """vm_create. `vm` is the template to inherit guest and debugger config from."""
+
+    name: str = Field(description="Name for the new VM (its config key and folder)")
+    iso: str | None = Field(
+        default=None,
+        description="Absolute host path to an installer ISO to boot from, attached as a CD-ROM",
+    )
+    cpus: int | None = Field(default=None, ge=1, le=64, description="Virtual CPUs, default 2")
+    memory_mb: int | None = Field(
+        default=None, ge=512, le=1048576, multiple_of=4, description="Guest RAM in MB, default 4096"
+    )
+    guest_os: str = Field(default="windows11-64", description="VMware guest OS type")
+
+
+@tool(
+    "vm_create",
+    "Create a new, unencrypted VM (empty 64 GB disk, UEFI, e1000e NIC for KDNET) and register it, "
+    "optionally booting an installer ISO. This is how to get a guest that vmrun CAN clone: no "
+    "encryption and no vTPM, unlike an encrypted base. Install the OS into it once, then vm_clone "
+    "it freely.",
+    CreateParams,
+    positional=("vm", "name"),
+    effect="additive",
+)
+async def vm_create(service: NtDriveService, p: CreateParams) -> dict[str, Any]:
+    """Create the VM files with vmcli, wire up the vmx, and add a vms.yaml entry."""
+    template = service.vm_cfg(p.vm)
+    if not _CLONE_NAME.match(p.name):
+        raise NtDriveError(
+            INVALID_ARGS, "name may use letters, digits, dot, dash and underscore only"
+        )
+    if p.name in service.config.vms:
+        raise NtDriveError(INVALID_ARGS, f"a VM named {p.name} is already registered")
+    if p.iso is not None and not Path(p.iso).is_file():
+        raise NtDriveError(
+            INVALID_ARGS, f"no ISO at {p.iso}", "pass an absolute host path to the installer ISO"
+        )
+    adapter = service.adapter_for(template)
+    # Sibling of the template's own folder, so VMs stay together.
+    dst_vmx = str(Path(template.vmx).parent.parent / p.name / f"{p.name}.vmx")
+    created = await adapter.create_vm(dst_vmx, guest_os=p.guest_os, iso=p.iso)
+    entry = template.model_copy(deep=True)
+    entry.name = p.name
+    entry.vmx = created["vmx"]
+    entry.serial_pipe = ""  # re-derives from the new name
+    # The whole point: this VM is NOT encrypted, so vmrun can clone it. Never inherit the
+    # template's encryption settings, or every vmrun call would pass a password it does not need.
+    entry.encryption_password = ""
+    entry.encryption_password_env = ""
+    if entry.kd_transport == "net":
+        entry.kdnet = KdnetConfig(port=next_kdnet_port(service.config), key=entry.kdnet.key)
+    add_vm_config(service.config, entry)
+    changes = {k: v for k, v in (("cpus", p.cpus), ("memory_mb", p.memory_mb)) if v is not None}
+    hardware = None
+    if changes:
+        hardware = (await adapter.set_hardware(entry, changes))["hardware"]
+    service.state.record_event(p.name, "vm_create", template=p.vm, iso=bool(p.iso))
+    return {
+        "vm": p.name,
+        "template": p.vm,
+        "vmx": created["vmx"],
+        "disk": created["disk"],
+        "guest_os": created["guest_os"],
+        "encrypted": False,
+        "iso": p.iso,
+        "hardware": hardware,
+        "kd_transport": entry.kd_transport,
+        "kdnet_port": entry.kdnet.port if entry.kd_transport == "net" else None,
+        "next": (
+            "vm_start gui=true and install the OS from the ISO (Windows 11 setup refuses without a "
+            "TPM, so use the setup LabConfig BypassTPMCheck/BypassSecureBootCheck registry keys), "
+            "then run scripts/setup-guest.cmd in the guest for SSH and KDNET. After that this VM "
+            "is unencrypted, so vm_clone works on it."
+        ),
+    }
+
+
 class RegisterParams(VmParams):
     """vm_register. `vm` is the template to inherit config from."""
 
