@@ -657,9 +657,12 @@ class VmwareAdapter(HypervisorAdapter):
         disk = f"{name}.vmdk"
         keys: dict[str, str] = {
             "displayName": name,
-            # Windows 11 needs UEFI. Secure Boot and a vTPM are left off on purpose: a vTPM forces
-            # VMware to encrypt the VM, and an encrypted VM is the thing vmrun cannot clone.
+            # Windows 11 needs UEFI. Secure Boot and a vTPM are off on purpose: a vTPM forces
+            # VMware to encrypt the VM, and an encrypted VM is the thing vmrun cannot clone. Secure
+            # Boot is set explicitly rather than left to the VMware default, so the guest's install
+            # gates do not depend on the Workstation version.
             "firmware": "efi",
+            "uefi.secureBoot.enabled": "FALSE",
             "nvme0.present": "TRUE",
             "nvme0:0.present": "TRUE",
             "nvme0:0.fileName": disk,

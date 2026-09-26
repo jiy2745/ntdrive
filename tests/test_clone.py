@@ -97,6 +97,9 @@ async def test_vm_create_makes_an_unencrypted_clonable_vm(
     text = Path(result["vmx"]).read_text(encoding="latin-1")
     assert 'nvme0:0.fileName = "runner1.vmdk"' in text
     assert 'firmware = "efi"' in text
+    # Secure Boot is explicitly off, not left to the VMware default: there is no vTPM to back it,
+    # and it is the other gate a Windows 11 install trips over.
+    assert 'uefi.secureBoot.enabled = "FALSE"' in text
     assert 'ethernet0.virtualDev = "e1000e"' in text
     assert f'sata0:0.fileName = "{iso}"' in text and 'deviceType = "cdrom-image"' in text
     assert result["hardware"]["cpus"] == 4 and result["hardware"]["memory_mb"] == 8192
