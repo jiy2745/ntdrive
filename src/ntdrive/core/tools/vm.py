@@ -387,35 +387,41 @@ def _register_clone(
 async def _clone_encrypted(
     service: NtDriveService, src: VmConfig, adapter: Any, p: CloneParams
 ) -> dict[str, Any]:
-    """Clone an encrypted VM by copying its files. The source must be powered off."""
-    if await service.refresh_power(src) != PowerState.OFF:
-        raise NtDriveError(
-            INVALID_ARGS,
-            f"{p.vm} is encrypted, so it is cloned by copying its files, which needs it powered "
-            "off for a consistent copy, but it is not off",
-            "vm_stop it first (a shared base another agent uses cannot be copied live), or clone a "
-            "VM that is off",
-        )
+    """Clone an encrypted VM by copying its files. vmrun cannot clone an encrypted VM.
+
+    Powered off, the whole current disk state is copied. Running, only the frozen snapshot chain is
+    copied (skipping the live delta), so the clone is the most recent snapshot state and the running
+    VM, which another agent may be using, is never touched or interrupted.
+    """
     dst_vmx = str(Path(src.vmx).parent.parent / "ntdrive-clones" / p.name / f"{p.name}.vmx")
-    copied = await adapter.clone_encrypted_offline(src, dst_vmx, p.name)
+    if await service.refresh_power(src) == PowerState.RUNNING:
+        copied = await adapter.clone_encrypted_online(src, dst_vmx, p.name)
+        state_note = (
+            "cloned live from the source's most recent snapshot (the frozen disk chain), so the "
+            "running VM was not touched. The clone is that snapshot state, not the source's "
+            "in-progress writes"
+        )
+    else:
+        copied = await adapter.clone_encrypted_offline(src, dst_vmx, p.name)
+        state_note = "cloned the powered-off source's full current disk state"
     # The copy keeps the same encryption, so the clone reuses the source's encryption_password_env.
     clone = _register_clone(service, src, p.name, dst_vmx, keep_encryption=True)
-    service.state.record_event(p.name, "vm_clone", source=p.vm, via="offline-copy")
+    service.state.record_event(p.name, "vm_clone", source=p.vm, via=copied["via"])
     return {
         "vm": p.name,
         "source": p.vm,
         "vmx": dst_vmx,
-        "via": "offline-copy",
+        "via": copied["via"],
         "encrypted": True,
         "linked": False,
         "files_copied": copied["files_copied"],
         "kd_transport": clone.kd_transport,
         "kdnet_port": clone.kdnet.port if clone.kd_transport == "net" else None,
         "note": (
-            "a file copy of the encrypted VM: same disks, same vTPM, same password, new identity "
-            "(UUID and MAC). It boots at the source's powered-off disk state. Run kd_setup_guest "
-            "then vm_reboot mode=soft before kd_attach, since it has its own KDNET port. If the "
-            "guest had BitLocker bound to the TPM the new UUID may prompt for the recovery key."
+            "a file copy of the encrypted VM, keeping its disks, vTPM and password with a new "
+            f"identity (UUID and MAC): {state_note}. Run kd_setup_guest then vm_reboot mode=soft "
+            "before kd_attach, since it has its own KDNET port. If the guest had BitLocker bound "
+            "to the TPM the new UUID may prompt for the recovery key."
         ),
     }
 
@@ -424,9 +430,11 @@ async def _clone_encrypted(
     "vm_clone",
     "Clone a VM into a new registered VM, for giving each agent its own guest. An unencrypted VM "
     "is cloned from a snapshot with vmrun (linked shares the base disk, full copies it). An "
-    "ENCRYPTED VM is cloned by copying its files instead, which vmrun cannot do: this needs the "
-    "source powered off, keeps the encryption and vTPM, and reuses the same password. The clone "
-    "gets its own KDNET port, so run kd_setup_guest and reboot it before kd_attach.",
+    "ENCRYPTED VM is cloned by copying its files instead, which vmrun cannot do, keeping the "
+    "encryption and vTPM and reusing the same password: powered off it copies the whole current "
+    "state, running it copies the frozen snapshot chain (needs a snapshot) without touching the "
+    "live VM. The clone gets its own KDNET port, so run kd_setup_guest and reboot it before "
+    "kd_attach.",
     CloneParams,
     positional=("vm", "name"),
     effect="additive",

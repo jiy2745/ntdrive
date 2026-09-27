@@ -59,6 +59,32 @@ def drop_saved_state(text: str) -> tuple[str, list[str]]:
     return "\n".join(out) + "\n", removed
 
 
+# A disk chain in a vmx and its .vmdk descriptors. These are plaintext even for an encrypted VM
+# (only the disk data and the nvram are ciphertext), so the chain can be walked to find which files
+# are frozen and safe to copy while the VM runs.
+_PARENT_HINT = re.compile(r'parentFileNameHint="([^"]+)"')
+_EXTENT = re.compile(r'^\s*(?:RW|RDONLY|NOACCESS)\s+\d+\s+\S+\s+"([^"]+)"', re.MULTILINE)
+_DISK_VMDK = re.compile(
+    r'^\s*(\w+\d+:\d+\.fileName)\s*=\s*"([^"]+\.vmdk)"\s*$', re.IGNORECASE | re.MULTILINE
+)
+
+
+def parent_hint(descriptor_text: str) -> str | None:
+    """The parent disk a delta descriptor points at, or None for a base disk."""
+    m = _PARENT_HINT.search(descriptor_text)
+    return m.group(1) if m else None
+
+
+def extent_files(descriptor_text: str) -> list[str]:
+    """The extent (-sNNN) filenames a .vmdk descriptor lists."""
+    return _EXTENT.findall(descriptor_text)
+
+
+def disk_vmdks(vmx_text: str) -> list[tuple[str, str]]:
+    """(key, filename) for each virtual disk in a vmx: the .vmdk disks, not a CD-ROM ISO."""
+    return _DISK_VMDK.findall(vmx_text)
+
+
 def _new_bios_uuid() -> str:
     """A fresh SMBIOS UUID in the byte-pair form VMware writes: 8 pairs, a dash, 8 pairs."""
     pairs = [f"{b:02x}" for b in secrets.token_bytes(16)]

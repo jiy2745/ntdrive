@@ -63,14 +63,7 @@ async def test_vm_clone_encrypted_copies_files_keeping_the_password(
         'encryption.keySafe = "vmware:key/blob"\nencryption.data = "blob"\n',
         encoding="latin-1",
     )
-    # A file copy needs the source off; while it is running the clone is refused, clearly.
-    await service.call("vm_start", {"vm": "win11-dev"})
-    with pytest.raises(NtDriveError) as exc:
-        await service.call("vm_clone", {"vm": "win11-dev", "name": "enc0"})
-    assert exc.value.code == "invalid_args" and "powered" in exc.value.message
-    assert "enc0" not in service.config.vms
-
-    await service.call("vm_stop", {"vm": "win11-dev"})
+    # Powered off, the whole current disk state is copied.
     result = await service.call("vm_clone", {"vm": "win11-dev", "name": "enc1"})
     assert result["via"] == "offline-copy" and result["encrypted"] is True
     assert result["files_copied"] == 3  # two vmdk files and the nvram (vTPM state)
@@ -89,6 +82,77 @@ async def test_vm_clone_encrypted_copies_files_keeping_the_password(
     reg = service.config.vms["enc1"]
     assert reg.resolve_encryption_password() == "vmpw"
     assert reg.kdnet.port != src.kdnet.port
+
+
+def _write_encrypted_chain(src_dir: Path) -> None:
+    """A three-link disk chain (base <- snap <- live) like a running snapshotted encrypted VM."""
+
+    def descriptor(name: str, parent: str | None) -> str:
+        hint = f'parentFileNameHint="{parent}.vmdk"\n' if parent else ""
+        return f'# Disk DescriptorFile\nCID=1\n{hint}RW 100 SPARSE "{name}-s001.vmdk"\n'
+
+    (src_dir / "base.vmdk").write_text(descriptor("base", None), encoding="latin-1")
+    (src_dir / "snap.vmdk").write_text(descriptor("snap", "base"), encoding="latin-1")
+    (src_dir / "live.vmdk").write_text(descriptor("live", "snap"), encoding="latin-1")
+    for n in ("base", "snap", "live"):
+        (src_dir / f"{n}-s001.vmdk").write_bytes(f"{n}-extent".encode())
+    (src_dir / "win11-dev.nvram").write_bytes(b"vtpm-state")
+
+
+async def test_vm_clone_encrypted_running_copies_only_the_frozen_snapshot_chain(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    """A running encrypted VM is cloned live from its snapshot state, skipping the live delta."""
+    src = service.config.vms["win11-dev"]
+    src.encryption_password = "vmpw"
+    src_dir = Path(src.vmx).parent
+    _write_encrypted_chain(src_dir)
+    Path(src.vmx).write_text(
+        'displayName = "win11-dev"\nnvme0:0.fileName = "live.vmdk"\n'
+        'encryption.keySafe = "vmware:key/blob"\n',
+        encoding="latin-1",
+    )
+    await service.call("vm_start", {"vm": "win11-dev"})  # running: no vm_stop, peer not disturbed
+
+    result = await service.call("vm_clone", {"vm": "win11-dev", "name": "live1"})
+    assert result["via"] == "online-copy" and result["encrypted"] is True
+    assert not any("clone" in argv for argv in fake_vmrun.calls)  # a pure file copy
+    clone_dir = Path(result["vmx"]).parent
+    # The frozen chain (base + snap) and their extents are copied; the LIVE delta is not.
+    for present in (
+        "base.vmdk",
+        "snap.vmdk",
+        "base-s001.vmdk",
+        "snap-s001.vmdk",
+        "win11-dev.nvram",
+    ):
+        assert (clone_dir / present).exists(), present
+    assert not (clone_dir / "live.vmdk").exists()
+    assert not (clone_dir / "live-s001.vmdk").exists()
+    # The clone's disk is repointed to the frozen snapshot delta, which becomes its writable top.
+    text = Path(result["vmx"]).read_text(encoding="latin-1")
+    assert 'nvme0:0.fileName = "snap.vmdk"' in text
+    assert 'encryption.keySafe = "vmware:key/blob"' in text and 'uuid.action = "keep"' in text
+    assert service.config.vms["live1"].resolve_encryption_password() == "vmpw"
+
+
+async def test_vm_clone_encrypted_running_without_a_snapshot_is_refused(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    """A running VM with no snapshot has only a live disk, which cannot be copied consistently."""
+    src = service.config.vms["win11-dev"]
+    src.encryption_password = "vmpw"
+    src_dir = Path(src.vmx).parent
+    (src_dir / "flat.vmdk").write_text(
+        '# Disk DescriptorFile\nRW 100 SPARSE "flat-s001.vmdk"\n', encoding="latin-1"
+    )
+    (src_dir / "flat-s001.vmdk").write_bytes(b"x")
+    Path(src.vmx).write_text('nvme0:0.fileName = "flat.vmdk"\n', encoding="latin-1")
+    await service.call("vm_start", {"vm": "win11-dev"})
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("vm_clone", {"vm": "win11-dev", "name": "nope"})
+    assert exc.value.code == "invalid_args" and "no snapshot" in exc.value.message
+    assert "nope" not in service.config.vms
 
 
 async def test_vm_clone_needs_a_snapshot(service: NtDriveService, fake_vmrun: FakeVmrun) -> None:

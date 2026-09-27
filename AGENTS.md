@@ -196,16 +196,24 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   encrypted clone both ways (a linked one outright, a full one deep in reading the encrypted config,
   behind misleading errors like "A password is required" or "should not be powered on"), vmcli has
   no clone command, and ovftool cannot export an encrypted VM. So for an encrypted source `vm_clone`
-  takes the file-copy path (`_clone_encrypted` -> `clone_encrypted_offline`): with the source
-  powered off it copies the disks and the nvram (the vTPM state) byte for byte, so the encryption
-  and the password are unchanged, and copies the plaintext vmx with a rewritten identity
-  (`clone_identity`: new `uuid.bios`/`uuid.location`, a new generated MAC, `uuid.action=keep` so no
-  moved/copied prompt blocks a headless start). This is the same thing a GUI clone does minus the
-  re-encryption, and it changes identity, not encryption. The source must be off for a consistent
-  copy, so a shared running base is refused with that reason. Verified live 2026-09-26 on a
-  throwaway VM: the copy plus identity rewrite starts under vmrun with no prompt and lists as
-  running. The keySafe-copied-verbatim step is a byte copy of the same lines, to confirm on the
-  encrypted base once it can be powered off.
+  takes a file-copy path (`_clone_encrypted`), keeping the disks, the nvram (vTPM state) and the
+  plaintext vmx with a rewritten identity (`clone_identity`: new `uuid.bios`/`uuid.location`, a new
+  generated MAC, `uuid.action=keep` so no moved/copied prompt blocks a headless start). This changes
+  identity, not encryption: the copy opens with the same password, like a GUI clone minus the
+  re-encryption. There are two variants:
+  - **off:** `clone_encrypted_offline` copies every `*.vmdk` and the nvram, so the clone is the
+    source's full current disk state.
+  - **running:** `clone_encrypted_online` copies only the FROZEN disk chain. A running VM writes
+    only to the top delta named in the vmx, and once a snapshot exists every disk below it is
+    read-only, so it walks the plaintext descriptors (`parent_hint`/`extent_files`/`disk_vmdks` in
+    vmx.py) from the parent of the live delta down to the base, copies those plus the nvram, skips
+    the live delta, and repoints the clone's disk at the frozen delta. The clone is the most recent
+    snapshot state, taken with no interruption to the running VM, so a base another agent is using
+    can be cloned without touching it. It needs a snapshot to exist (a frozen delta to clone).
+  Verified live 2026-09-28 on throwaway VMs: the offline copy and the online copy each start under
+  vmrun with no prompt, and for the online one the source and the clone run at the same time. The
+  keySafe-copied-verbatim step opening with the same password is confirmed on the encrypted base
+  once it can be powered off or has a snapshot.
 - `vm_create` is the other route: a fresh UNENCRYPTED VM (`vmcli VM Create`, then `create_vm` wires
   up the disk, UEFI, an e1000e NIC and the ISO) for when there is no encrypted source to copy, or
   to avoid a vTPM entirely. `vm_register` adds an existing vmx (for a VM cloned by hand in the GUI).
