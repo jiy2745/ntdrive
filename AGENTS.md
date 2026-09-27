@@ -192,23 +192,23 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   UAC prompt (`ntdrive.kd.firewall`). KDNET is the default. The serial pipe transport avoids
   all of that for hosts where nobody can approve a prompt.
 - Win32-OpenSSH resolves `C:/x` relative to the home directory over SFTP. Paths must be `/C:/x`.
-- `vmrun clone` cannot clone an encrypted VM at all, linked or full. A linked clone is refused
-  outright ("already running", though it is off), and a full clone dies deep in vmrun reading the
-  encrypted config, surfaced as a chain of misleading errors ("A password is required", "Cannot
-  read the virtual machine configuration file", or "should not be powered on" when the source
-  snapshot has memory). Only the VMware GUI can clone an encrypted VM. `vm_clone` detects an
-  encrypted source (`resolve_encryption_password()`) and fails fast. No CLI can clone an encrypted
-  VM (vmrun, vmcli which has no clone command, and ovftool which cannot export an encrypted VM all
-  refuse).
-- **The way out of the encrypted base is not to clone it: `vm_create` makes a fresh UNENCRYPTED
-  VM.** `vmcli VM Create` (vmrun cannot create a VM at all) writes a vmx plus a 64 GB thin disk but
-  attaches neither the disk nor a NIC and picks no firmware, so `create_vm` in the adapter writes
-  those keys, plus the installer ISO. The new VM has no `encryption.keySafe` and no vTPM, which is
-  exactly what makes `vm_clone` work on it. A vTPM is why the base is encrypted in the first place,
-  so a fresh VM leaves it off and Windows 11 setup needs the LabConfig TPM bypass. Verified live
-  2026-09-26: created, started under vmrun and stopped, with the encrypted VM running untouched
-  beside it. The older paths remain for an existing encrypted VM: a GUI clone plus `vm_register`,
-  or a snapshot/revert workflow on the base for serial work.
+- **Cloning an encrypted VM: `vm_clone` copies its files, because vmrun cannot.** vmrun refuses an
+  encrypted clone both ways (a linked one outright, a full one deep in reading the encrypted config,
+  behind misleading errors like "A password is required" or "should not be powered on"), vmcli has
+  no clone command, and ovftool cannot export an encrypted VM. So for an encrypted source `vm_clone`
+  takes the file-copy path (`_clone_encrypted` -> `clone_encrypted_offline`): with the source
+  powered off it copies the disks and the nvram (the vTPM state) byte for byte, so the encryption
+  and the password are unchanged, and copies the plaintext vmx with a rewritten identity
+  (`clone_identity`: new `uuid.bios`/`uuid.location`, a new generated MAC, `uuid.action=keep` so no
+  moved/copied prompt blocks a headless start). This is the same thing a GUI clone does minus the
+  re-encryption, and it changes identity, not encryption. The source must be off for a consistent
+  copy, so a shared running base is refused with that reason. Verified live 2026-09-26 on a
+  throwaway VM: the copy plus identity rewrite starts under vmrun with no prompt and lists as
+  running. The keySafe-copied-verbatim step is a byte copy of the same lines, to confirm on the
+  encrypted base once it can be powered off.
+- `vm_create` is the other route: a fresh UNENCRYPTED VM (`vmcli VM Create`, then `create_vm` wires
+  up the disk, UEFI, an e1000e NIC and the ISO) for when there is no encrypted source to copy, or
+  to avoid a vTPM entirely. `vm_register` adds an existing vmx (for a VM cloned by hand in the GUI).
 - **Never wait for the KDNET banner as the way to detect a target.** kd prints "Connected to" only
   on its first sync, so a target that reconnected after a reboot or a revert is there and silent.
   Waiting for the banner cost the full timeout (240 s measured live) while a `kd_break` answered
