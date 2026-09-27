@@ -46,26 +46,49 @@ async def test_vm_clone_rejects_a_duplicate_name(
     assert exc.value.code == "invalid_args"
 
 
-async def test_vm_clone_rejects_any_clone_of_an_encrypted_vm(
+async def test_vm_clone_encrypted_copies_files_keeping_the_password(
     service: NtDriveService, fake_vmrun: FakeVmrun
 ) -> None:
+    """vmrun cannot clone an encrypted VM, so ntdrive copies its files while it is powered off."""
+    src = service.config.vms["win11-dev"]
+    src.encryption_password = "vmpw"  # an encrypted source
+    src_dir = Path(src.vmx).parent
+    # Give the source the disks and nvram a real encrypted VM has next to its vmx.
+    (src_dir / "win11-dev.vmdk").write_bytes(b"encrypted-disk-descriptor")
+    (src_dir / "win11-dev-s001.vmdk").write_bytes(b"encrypted-extent")
+    (src_dir / "win11-dev.nvram").write_bytes(b"vtpm-state")
+    Path(src.vmx).write_text(
+        'displayName = "win11-dev"\nuuid.bios = "56 4d aa"\n'
+        'ethernet0.generatedAddress = "00:0c:29:aa:bb:cc"\n'
+        'encryption.keySafe = "vmware:key/blob"\nencryption.data = "blob"\n',
+        encoding="latin-1",
+    )
+    # A file copy needs the source off; while it is running the clone is refused, clearly.
     await service.call("vm_start", {"vm": "win11-dev"})
-    await service.call("snap_take", {"vm": "win11-dev", "name": "base"})
-    service.config.vms["win11-dev"].encryption_password = "vmpw"  # now an encrypted source
-    fake_vmrun.calls.clear()
-    # Neither a linked nor a full clone: vmrun cannot clone an encrypted VM either way. A clear,
-    # fast error, not vmrun's misleading "already running" / "cannot read config" chain.
-    for linked in (True, False):
-        with pytest.raises(NtDriveError) as exc:
-            await service.call(
-                "vm_clone",
-                {"vm": "win11-dev", "name": "enc", "snapshot": "base", "linked": linked},
-            )
-        assert exc.value.code == "invalid_args" and "encrypted" in exc.value.message
-        assert "GUI" in exc.value.hint and "snap_revert" in exc.value.hint
-    # It failed fast: no clone was attempted and no VM was registered.
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("vm_clone", {"vm": "win11-dev", "name": "enc0"})
+    assert exc.value.code == "invalid_args" and "powered" in exc.value.message
+    assert "enc0" not in service.config.vms
+
+    await service.call("vm_stop", {"vm": "win11-dev"})
+    result = await service.call("vm_clone", {"vm": "win11-dev", "name": "enc1"})
+    assert result["via"] == "offline-copy" and result["encrypted"] is True
+    assert result["files_copied"] == 3  # two vmdk files and the nvram (vTPM state)
+    # vmrun was never asked to clone: this is a pure file copy.
     assert not any("clone" in argv for argv in fake_vmrun.calls)
-    assert "enc" not in service.config.vms
+    # The clone has the disks, the nvram (vTPM) and its own vmx, with a new identity.
+    clone_dir = Path(result["vmx"]).parent
+    assert (clone_dir / "win11-dev.vmdk").read_bytes() == b"encrypted-disk-descriptor"
+    assert (clone_dir / "win11-dev.nvram").read_bytes() == b"vtpm-state"
+    text = Path(result["vmx"]).read_text(encoding="latin-1")
+    assert 'encryption.keySafe = "vmware:key/blob"' in text  # still encrypted, same password
+    assert 'displayName = "enc1"' in text
+    assert 'uuid.bios = "56 4d aa"' not in text  # identity regenerated
+    assert 'uuid.action = "keep"' in text  # no moved/copied prompt on first boot
+    # Registered, reusing the source's encryption and with its own KDNET port.
+    reg = service.config.vms["enc1"]
+    assert reg.resolve_encryption_password() == "vmpw"
+    assert reg.kdnet.port != src.kdnet.port
 
 
 async def test_vm_clone_needs_a_snapshot(service: NtDriveService, fake_vmrun: FakeVmrun) -> None:

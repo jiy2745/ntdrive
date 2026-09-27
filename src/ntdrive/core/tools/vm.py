@@ -9,7 +9,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 
-from ntdrive.config import KdnetConfig, add_vm_config, next_kdnet_port, remove_vm_config
+from ntdrive.config import (
+    KdnetConfig,
+    VmConfig,
+    add_vm_config,
+    next_kdnet_port,
+    remove_vm_config,
+)
 from ntdrive.core.orchestrator import reboot_flow
 from ntdrive.core.registry import tool
 from ntdrive.core.state import PowerState
@@ -361,11 +367,66 @@ class CloneParams(VmParams):
     )
 
 
+def _register_clone(
+    service: NtDriveService, src: VmConfig, name: str, dst_vmx: str, keep_encryption: bool
+) -> VmConfig:
+    """Add a vms.yaml entry for a clone: the source's config, a new vmx, a fresh KDNET port."""
+    clone = src.model_copy(deep=True)
+    clone.name = name
+    clone.vmx = dst_vmx
+    clone.serial_pipe = ""  # re-derives from the new name
+    if not keep_encryption:
+        clone.encryption_password = ""
+        clone.encryption_password_env = ""
+    if clone.kd_transport == "net":
+        clone.kdnet = KdnetConfig(port=next_kdnet_port(service.config), key=clone.kdnet.key)
+    add_vm_config(service.config, clone)
+    return clone
+
+
+async def _clone_encrypted(
+    service: NtDriveService, src: VmConfig, adapter: Any, p: CloneParams
+) -> dict[str, Any]:
+    """Clone an encrypted VM by copying its files. The source must be powered off."""
+    if await service.refresh_power(src) != PowerState.OFF:
+        raise NtDriveError(
+            INVALID_ARGS,
+            f"{p.vm} is encrypted, so it is cloned by copying its files, which needs it powered "
+            "off for a consistent copy, but it is not off",
+            "vm_stop it first (a shared base another agent uses cannot be copied live), or clone a "
+            "VM that is off",
+        )
+    dst_vmx = str(Path(src.vmx).parent.parent / "ntdrive-clones" / p.name / f"{p.name}.vmx")
+    copied = await adapter.clone_encrypted_offline(src, dst_vmx, p.name)
+    # The copy keeps the same encryption, so the clone reuses the source's encryption_password_env.
+    clone = _register_clone(service, src, p.name, dst_vmx, keep_encryption=True)
+    service.state.record_event(p.name, "vm_clone", source=p.vm, via="offline-copy")
+    return {
+        "vm": p.name,
+        "source": p.vm,
+        "vmx": dst_vmx,
+        "via": "offline-copy",
+        "encrypted": True,
+        "linked": False,
+        "files_copied": copied["files_copied"],
+        "kd_transport": clone.kd_transport,
+        "kdnet_port": clone.kdnet.port if clone.kd_transport == "net" else None,
+        "note": (
+            "a file copy of the encrypted VM: same disks, same vTPM, same password, new identity "
+            "(UUID and MAC). It boots at the source's powered-off disk state. Run kd_setup_guest "
+            "then vm_reboot mode=soft before kd_attach, since it has its own KDNET port. If the "
+            "guest had BitLocker bound to the TPM the new UUID may prompt for the recovery key."
+        ),
+    }
+
+
 @tool(
     "vm_clone",
-    "Clone a VM into a new registered VM, for giving each agent its own guest. A linked clone "
-    "shares the base disk (cheap) but a running clone uses its own RAM. The clone gets its own "
-    "KDNET port, so set its debugger on the guest (kd_setup_guest, reboot) before kd_attach.",
+    "Clone a VM into a new registered VM, for giving each agent its own guest. An unencrypted VM "
+    "is cloned from a snapshot with vmrun (linked shares the base disk, full copies it). An "
+    "ENCRYPTED VM is cloned by copying its files instead, which vmrun cannot do: this needs the "
+    "source powered off, keeps the encryption and vTPM, and reuses the same password. The clone "
+    "gets its own KDNET port, so run kd_setup_guest and reboot it before kd_attach.",
     CloneParams,
     positional=("vm", "name"),
     effect="additive",
@@ -379,22 +440,12 @@ async def vm_clone(service: NtDriveService, p: CloneParams) -> dict[str, Any]:
         )
     if p.name in service.config.vms:
         raise NtDriveError(INVALID_ARGS, f"a VM named {p.name} is already registered")
-    if src.resolve_encryption_password():
-        # vmrun cannot clone an encrypted VM at all, linked or full. A linked clone is refused
-        # outright; a full clone dies deep in vmrun reading the encrypted config, surfaced as a
-        # chain of misleading errors ("A password is required", "Cannot read the virtual machine
-        # configuration file", or "should not be powered on" when the source snapshot has memory).
-        # Only the VMware GUI can clone an encrypted VM (it prompts and re-encrypts). Fail fast.
-        raise NtDriveError(
-            INVALID_ARGS,
-            f"{p.vm} is encrypted, and vmrun cannot clone an encrypted VM (neither linked nor "
-            "full)",
-            "no CLI can clone an encrypted VM (vmrun, vmcli and ovftool all refuse). Clone it once "
-            "in the VMware GUI (it prompts for the password and re-encrypts), then register the "
-            f"copy with vm_register vmx=<new vmx> name=<name> template={p.vm}. Or to run without a "
-            "clone, snap_take a snapshot of the base, run on it, then snap_revert.",
-        )
     adapter = service.adapter_for(src)
+    if src.resolve_encryption_password():
+        # vmrun cannot clone an encrypted VM, so ntdrive copies the files itself. This is a full
+        # copy of a powered-off source, keeping the encryption intact, so it needs no GUI and no
+        # reinstall. See _clone_encrypted below.
+        return await _clone_encrypted(service, src, adapter, p)
     tree = await adapter.snapshot_list(src)
     snapshot = p.snapshot or tree.current
     if not snapshot:
@@ -411,13 +462,7 @@ async def vm_clone(service: NtDriveService, p: CloneParams) -> dict[str, Any]:
         )
     dst_vmx = str(Path(src.vmx).parent / "ntdrive-clones" / p.name / f"{p.name}.vmx")
     await adapter.clone(src, dst_vmx, p.name, snapshot, p.linked)
-    clone = src.model_copy(deep=True)
-    clone.name = p.name
-    clone.vmx = dst_vmx
-    clone.serial_pipe = ""  # re-derives from the new name
-    if clone.kd_transport == "net":
-        clone.kdnet = KdnetConfig(port=next_kdnet_port(service.config), key=clone.kdnet.key)
-    add_vm_config(service.config, clone)
+    clone = _register_clone(service, src, p.name, dst_vmx, keep_encryption=True)
     service.state.record_event(p.name, "vm_clone", source=p.vm, linked=p.linked)
     return {
         "vm": p.name,

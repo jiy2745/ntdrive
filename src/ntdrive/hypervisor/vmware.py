@@ -41,6 +41,7 @@ from ntdrive.hostproc import run_hidden
 from ntdrive.hypervisor.base import HypervisorAdapter, SnapshotNode, SnapshotTree
 from ntdrive.hypervisor.vmx import (
     apply_hardware,
+    clone_identity,
     drop_saved_state,
     hardware_from_settings,
     saved_state,
@@ -430,6 +431,45 @@ class VmwareAdapter(HypervisorAdapter):
             f"-cloneName={name}",
             timeout=600,
         )
+
+    # File suffixes that carry the disk chain, the vTPM and firmware state a bootable copy needs.
+    _CLONE_COPY_SUFFIXES = frozenset({".vmdk", ".nvram"})
+
+    async def clone_encrypted_offline(
+        self, source: VmConfig, dst_vmx: str, name: str
+    ) -> dict[str, Any]:
+        """Clone an encrypted VM by copying its files, which vmrun cannot do.
+
+        The source must be powered off, so the copy is consistent. The disks and the nvram (which
+        holds the vTPM state) are copied byte for byte, so the encryption stays intact and the copy
+        opens with the same password, exactly as a VMware GUI clone does minus the re-encryption
+        step. The vmx is plaintext, so it is copied with a rewritten identity (new UUID and MAC,
+        uuid.action=keep) to make it a distinct VM. This is a full copy: `linked` does not apply.
+        """
+        src_vmx = Path(source.vmx)
+        src_dir = src_vmx.parent
+        dst = Path(dst_vmx)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+
+        def copy_payload() -> int:
+            count = 0
+            for entry in src_dir.iterdir():
+                if entry.is_file() and entry.suffix.lower() in self._CLONE_COPY_SUFFIXES:
+                    shutil.copy2(entry, dst.parent / entry.name)
+                    count += 1
+            return count
+
+        copied = await asyncio.to_thread(copy_payload)
+        if copied == 0:
+            raise NtDriveError(
+                BACKEND_ERROR,
+                f"no disk files found next to {src_vmx}",
+                "check the source vmx path",
+            )
+        rewritten = clone_identity(src_vmx.read_text(encoding="latin-1"), name)
+        dst.write_text(rewritten, encoding="latin-1")
+        log.info("offline-cloned encrypted VM %s to %s (%s disk files)", source.name, dst, copied)
+        return {"vmx": str(dst), "files_copied": copied, "via": "offline-copy"}
 
     async def delete_vm(self, vm: VmConfig) -> None:
         """`vmrun deleteVM`: unregister and delete the VM's files. The VM must be powered off."""

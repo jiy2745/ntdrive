@@ -114,6 +114,12 @@ class HypervisorAdapter(ABC):
         return None
 
     @abstractmethod
+    async def clone_encrypted_offline(
+        self, source: VmConfig, dst_vmx: str, name: str
+    ) -> dict[str, Any]:
+        """Clone an encrypted VM by copying its files (the source must be powered off)."""
+
+    @abstractmethod
     async def delete_vm(self, vm: VmConfig) -> None:
         """Unregister the VM and delete its files (the VM must be powered off)."""
 
