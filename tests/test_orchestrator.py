@@ -142,6 +142,22 @@ async def test_vm_wait_ready_times_out_without_ssh(
     assert result["ready"] is False and "note" in result
 
 
+async def test_vm_state_probe_reports_host_cpu_for_busy_vs_frozen(
+    service: NtDriveService, fake_vmrun: FakeVmrun, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wedged guest looks like a frozen one over SSH; host CPU tells them apart."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    service.ssh_probe = never_reachable  # SSH is wedged either way
+
+    async def busy(vm_cfg, interval=0.5):  # type: ignore[no-untyped-def]
+        return 180.0
+
+    monkeypatch.setattr(service.adapter_for(service.vm_cfg("win11-dev")), "host_cpu_percent", busy)
+    state = await service.call("vm_state", {"vm": "win11-dev", "probe": True})
+    # Not reachable but pinning the host CPU means busy (spinning/spraying), not frozen.
+    assert state["guest_reachable"] is False and state["host_cpu_percent"] == 180.0
+
+
 async def test_vm_state_probe_reports_guest_reachable(
     service: NtDriveService, fake_vmrun: FakeVmrun
 ) -> None:

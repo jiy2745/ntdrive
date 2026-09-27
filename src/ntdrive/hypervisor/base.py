@@ -104,6 +104,15 @@ class HypervisorAdapter(ABC):
     ) -> dict[str, Any]:
         """Create a new, unencrypted VM with an empty disk, optionally booting an installer ISO."""
 
+    async def host_cpu_percent(self, vm: VmConfig, interval: float = 0.5) -> float | None:
+        """Host CPU of the VM's hypervisor process, or None when it cannot be read.
+
+        A busy guest (spinning in kernel, spraying) keeps this high; a halted or truly frozen guest
+        keeps it near zero. That tells "busy" from "wedged" when the guest stops answering SSH.
+        Default None so a backend without process visibility simply omits the signal.
+        """
+        return None
+
     @abstractmethod
     async def delete_vm(self, vm: VmConfig) -> None:
         """Unregister the VM and delete its files (the VM must be powered off)."""

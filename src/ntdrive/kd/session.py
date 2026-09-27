@@ -345,6 +345,10 @@ class KdSession:
         proc = self._proc
         if proc is None or proc.poll() is not None:
             return False
+        # The probe's own break is a detection, not an event the caller asked for. Recording it
+        # would leave last_event showing a DbgBreakPoint while state is running (confusing after a
+        # revert reattach), so the pre-probe value is restored once the target is resumed.
+        before_event = self.last_event
         loop = asyncio.get_running_loop()
         with contextlib.suppress(Exception):
             await loop.run_in_executor(None, self._break, proc)
@@ -353,6 +357,7 @@ class KdSession:
         with contextlib.suppress(OSError, NtDriveError):
             self._write("g\n")
             self.state = KdState.RUNNING
+            self.last_event = before_event
             await self._notify()
         return True
 

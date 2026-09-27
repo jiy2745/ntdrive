@@ -12,6 +12,7 @@ from ntdrive.hostproc import force_utf8_stdio
 from ntdrive.hypervisor import vmware as vmware_mod
 from ntdrive.hypervisor.vmware import (
     VmwareAdapter,
+    classify_vmrun_error,
     parse_current_snapshot,
     parse_snapshot_tree,
     subprocess_runner,
@@ -19,6 +20,18 @@ from ntdrive.hypervisor.vmware import (
 from ntdrive.hypervisor.vmx import apply_hardware, hardware_from_settings
 
 from .conftest import FakeVmrun, never_reachable
+
+
+def test_classify_vmrun_error_names_a_locked_destination() -> None:
+    # A file_push to a running exe: the old fallback hint blamed the VMware install, which sent
+    # callers hunting in the wrong place. It must name the lock instead.
+    reason, hint = classify_vmrun_error("Error: The file is being used by another process")
+    assert reason == "guest_access_denied" and "in use" in hint
+    reason, hint = classify_vmrun_error("A file access error: insufficient access rights")
+    assert reason == "guest_access_denied"
+    # An unrelated failure still gets the generic hint, not the access one.
+    reason, hint = classify_vmrun_error("vmrun was not found")
+    assert reason == "" and "VMware Workstation is installed" in hint
 
 
 async def test_subprocess_runner_captures_output_and_exit_code() -> None:

@@ -170,7 +170,10 @@ def _detach_script(task: str, log: str, user: str, run_level: str, cmd: str) -> 
         "$ErrorActionPreference='Stop'",
         f"$t='{task}'",
         f"$log='{log}'",
-        "if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }",
+        # Create the log now, empty, so file_pull never races the task: Start-ScheduledTask returns
+        # before cmd.exe opens the redirect, and a caller pulling immediately would 404 otherwise.
+        # cmd's `>` truncates it when the process actually starts writing.
+        "New-Item -ItemType File -Path $log -Force | Out-Null",
         f"$a=New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '{argument}'",
         (
             f"$pr=New-ScheduledTaskPrincipal -UserId '{_ps_literal(user)}' -LogonType Interactive "
@@ -442,7 +445,8 @@ async def _con_run_detached(
         "log": log,
         "state": state,
         "note": (
-            f"started and left running; its output goes to {log} (file_pull to read it). The "
+            f"started and left running. {log} exists now (created empty) and fills as the process "
+            "writes, so file_pull never races it but can return empty until there is output. The "
             "scheduled task stays registered so the process is not stopped"
         ),
     }

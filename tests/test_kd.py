@@ -287,6 +287,10 @@ async def test_attach_probes_instead_of_waiting_for_a_banner(
     # The whole point: it returned in seconds, not after the 120 s timeout.
     assert elapsed < 30, f"attach waited {elapsed:.0f}s instead of probing"
     assert not service.runtime("win11-dev").guest_frozen
+    # The probe's own break must not show up as an event: state running with a DbgBreakPoint
+    # last_event was the confusing post-revert signal.
+    assert attached["last_event"] is None
+    assert (await service.call("kd_state", {"vm": "win11-dev"}))["last_event"] is None
 
 
 async def test_kd_sample_collects_rows_and_clears_only_its_breakpoint(

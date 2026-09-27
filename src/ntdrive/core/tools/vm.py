@@ -99,9 +99,10 @@ class StateParams(VmParams):
     probe: bool = Field(
         default=False,
         description=(
-            "Also probe the guest and add guest_reachable: whether SSH answers now. Off by "
-            "default because it costs a connection attempt; the kd block already tells running "
-            "from broken/bugcheck without a probe"
+            "Also probe the guest: adds guest_reachable (whether SSH answers now) and "
+            "host_cpu_percent (the vmware-vmx process's host CPU, which tells a busy guest from a "
+            "wedged one when SSH stops answering). Off by default because it costs a connection "
+            "attempt and a short CPU sample; the kd block already tells running from broken"
         ),
     )
 
@@ -124,6 +125,11 @@ async def vm_state(service: NtDriveService, p: StateParams) -> dict[str, Any]:
             except NtDriveError:
                 reachable = False  # Tools reported no IP in time: not reachable yet
             summary["guest_reachable"] = reachable
+            cpu = await service.adapter_for(cfg).host_cpu_percent(cfg)
+            if cpu is not None:
+                # High while SSH is unreachable means busy (spinning, spraying), near zero means
+                # wedged or halted, so the two are no longer indistinguishable.
+                summary["host_cpu_percent"] = round(cpu, 1)
         else:
             summary["guest_reachable"] = False
     return summary

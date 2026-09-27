@@ -118,6 +118,9 @@ async def test_con_run_detach_starts_and_returns_at_once(
     script = fake_transport.exec_log[-1]
     assert "ExecutionTimeLimit ([TimeSpan]::Zero)" in script
     assert "Unregister-ScheduledTask" not in script  # left registered so the process is not stopped
+    # The log is created up front so file_pull cannot race the task's own redirect.
+    assert "New-Item -ItemType File -Path $log -Force" in script
+    assert "exists now" in result["note"]
 
 
 async def test_con_run_standard_without_an_account_is_an_error(

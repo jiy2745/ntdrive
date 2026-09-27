@@ -182,6 +182,11 @@ After a bugcheck the first boot can run chkdsk for minutes, and the default 60 s
 guest's IP then reads as a failure. Either wait first with `vm_wait_ready timeout=300`, or open the
 terminal directly with `term_open boot_timeout=300`.
 
+When the guest stops answering SSH, `vm_state probe=true` cannot tell a wedged guest from a frozen
+one on its own, so it also returns `host_cpu_percent`, the vmware-vmx process's host CPU. High while
+SSH is unreachable means the guest is busy (spinning in kernel, spraying), near zero means it is
+halted or truly frozen.
+
 ### Avoid booting at all: snapshot the ready state
 
 On some guests attaching kd across a boot bugchecks it (`0x80 NMI`) about two thirds of the time,
@@ -200,10 +205,14 @@ long session:
   exprs=["poi(@rcx)","du poi(@rdx)"]` breaks, resumes with a plain `g`, evaluates the expressions at
   each of the next 8 hits, and clears only the breakpoint it set. A `condition` is evaluated by the
   daemon, never compiled into the breakpoint, and `n` plus `max_seconds` bound a hot symbol.
-- **A conditional breakpoint with `gc` on a hot function NMIs the guest.** `bp <hot> ".if (...) {...}
-  .else { gc }"` on something that fires thousands of times a second wedges the vCPU and the host
-  watchdog answers with bugcheck `0x80 NMI_HARDWARE_FAILURE`. Prefer a plain breakpoint you step
-  manually, or a one-shot (`bp /1`), and keep conditions off hot paths.
+- **Over KDNET, break only on cold functions.** A breakpoint on a hot or semi-hot function costs
+  the guest a reboot, and the failure mode depends on how the debugger stalls the box: a plain `bp`
+  on a high-rate allocator (`nt!ExAllocatePool2` seen live) trips the DPC watchdog into a reboot,
+  and a conditional `bp <hot> ".if (...) {...} .else { gc }"` (`afd!AfdTliIoControl` seen live)
+  wedges the vCPU into a `0x80 NMI_HARDWARE_FAILURE`. Break on a cold function on the path instead,
+  or use `kd_sample` which breaks, reads and resumes, and keep any condition out of the breakpoint.
+  `nt!ExAllocatePool2`, `nt!ExFreePool*` and anything in an allocation, DPC or interrupt path are
+  the usual traps.
 - **A tight user-mode spin does the same.** Always `SwitchToThread()` in a spin loop.
 - **KDNET attaching during boot often bugchecks the guest** (seen on 4 of 6 `vm_reboot
   reattach_kd=true` attempts, also `0x80`). A second reboot comes up fine, so reboot again rather

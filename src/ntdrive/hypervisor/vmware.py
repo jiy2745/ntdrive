@@ -29,6 +29,7 @@ from ntdrive.errors import (
     INVALID_ARGS,
     REASON_CONFIG_UNREADABLE,
     REASON_ENCRYPTED_LIVE,
+    REASON_GUEST_ACCESS,
     REASON_PASSWORD_REQUIRED,
     REASON_SAVED_STATE_STALE,
     REASON_SNAPSHOT_MISSING,
@@ -100,6 +101,19 @@ def classify_vmrun_error(output: str) -> tuple[str, str]:
         return REASON_CONFIG_UNREADABLE, "retry in a moment; the vmx is being rewritten"
     if "the snapshot does not exist" in low:
         return REASON_SNAPSHOT_MISSING, "call snap_list for the names that exist"
+    if any(
+        s in low
+        for s in ("used by another", "being used", "in use", "access is denied", "access rights")
+    ):
+        # A file_push to a destination the guest has open: the usual cause is a running exe holding
+        # its own file. The old fallback hint blamed the VMware install, which sent callers looking
+        # in the wrong place for a lock.
+        return REASON_GUEST_ACCESS, (
+            "the guest refused access to the destination. The usual cause is that the file is in "
+            "use, a running exe locks its own image: stop that process, or push to a different "
+            "name or a writable path like C:\\Users\\Public. It can also be a protected path or "
+            "an account without rights."
+        )
     return "", "check that VMware Workstation is installed and the vmx path is right"
 
 
@@ -686,6 +700,25 @@ class VmwareAdapter(HypervisorAdapter):
         target.write_text(text, encoding="latin-1")
         log.info("created VM %s at %s", name, dst_vmx)
         return {"vmx": str(target), "disk": str(target.parent / disk), "guest_os": guest_os}
+
+    async def host_cpu_percent(self, vm: VmConfig, interval: float = 0.5) -> float | None:
+        """CPU% of the guest's vmware-vmx process on the host, summed if there is more than one."""
+        procs = [
+            p
+            for p in find_vmx_processes(vm.vmx)
+            if (getattr(p, "name", lambda: "")() or "").lower().startswith("vmware-vmx")
+        ]
+        if not procs:
+            return None
+
+        def sample() -> float:
+            total = 0.0
+            for proc in procs:
+                with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                    total += proc.cpu_percent(interval=interval)
+            return total
+
+        return await asyncio.to_thread(sample)
 
     async def kill(self, vm: VmConfig) -> dict[str, Any]:
         """End the VM's vmware-vmx process on the host and clear its stale lock files.

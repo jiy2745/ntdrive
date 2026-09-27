@@ -373,7 +373,7 @@ messages are written in English (ST-9).
 | Tool | Arguments | Returns |
 |---|---|---|
 | `vm_list` | - | `{vms:[{name, backend, power, kd, current_snapshot, term_open:[ids], term_disconnected:[{session_id, successor}], guest_frozen, last_event, power_error?}]}` |
-| `vm_state` | `vm, probe=false` | detail of one item above. `probe=true` adds `guest_reachable` (whether SSH answers now). The `kd` block already tells a running kernel from one halted at the debugger (state `broken`, `last_event.event` `bugcheck`) |
+| `vm_state` | `vm, probe=false` | detail of one item above. `probe=true` adds `guest_reachable` (whether SSH answers now) and `host_cpu_percent` (the vmware-vmx host CPU: high while unreachable means busy, near zero means wedged or frozen). The `kd` block already tells a running kernel from one halted at the debugger (state `broken`, `last_event.event` `bugcheck`) |
 | `vm_wait_ready` | `vm, timeout=180` | `{ready, ip, waited_s, note?}`. Long-polls until the guest answers SSH, for after a reboot or a bugcheck's auto-restart. Returns `ready=false` at the timeout instead of erroring |
 | `vm_start` | `vm, gui=false, discard_saved_state=false` | `{power, saved_state_dropped?: {saved_state, removed}}` |
 | `vm_stop` | `vm, mode=soft\|hard\|kill, confirm?` | `{power, terms_dropped, killed?, locks_removed?, power_error?}` |
