@@ -303,6 +303,10 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     _touch(service, session)
     result = {
         "session_id": p.session_id,
+        # Always say which guest account ran the command. term_* runs as admin by default and
+        # con_run in the interactive account, and a silent mismatch (a per-user resource created by
+        # the wrong one) is hard to spot, so the account is never left implicit.
+        "account": session.account,
         "output": output[: p.max_bytes],
         "exit_code": exit_code,
         "state": session.state,

@@ -551,8 +551,12 @@ class VmwareAdapter(HypervisorAdapter):
         return tree
 
     async def snapshot_revert(self, vm: VmConfig, name: str) -> None:
-        """Revert. vmrun leaves the VM stopped or suspended afterwards; callers call start()."""
-        await self._exec("revertToSnapshot", vm, name, timeout=600)
+        """Revert. vmrun leaves the VM stopped or suspended afterwards; callers call start().
+
+        retry=True because a revert intermittently fails with a transient VIX error and succeeds on
+        a second try, so the adapter swallows that rather than surfacing it to the caller.
+        """
+        await self._exec("revertToSnapshot", vm, name, retry=True, timeout=600)
 
     async def snapshot_delete(self, vm: VmConfig, name: str, children: bool = False) -> None:
         """Delete a snapshot and optionally its subtree."""

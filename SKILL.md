@@ -200,6 +200,21 @@ it with memory included, and `snap_revert` to that snapshot instead of rebooting
 seconds, reattaches the debugger and reopens terminals for you. Remember the revert restores the
 **disk** too, so re-push anything built since that snapshot.
 
+### Running commands in the guest: channel and user
+
+- **The exec link self-heals now.** After a revert or reboot the guest's SSH is gone but the cached
+  client can look alive until the first call fails, which used to leave every later `con_run` and
+  `term_exec` failing with `backend_error`. `exec_once` now drops the stale client and reconnects
+  once on a dropped link. If a call still fails, the guest is genuinely mid-reboot: wait, or
+  `snap_revert` to reset. `file_push`/`file_pull` were always immune (each opens its own channel).
+- **Know which user runs your command.** `con_run` runs in the interactive desktop account (the one
+  autologon signed in, standard by default), while `term_*` run as the admin SSH account, so a
+  per-user resource (a Cloud Files sync root, a per-user registry key) made by one is invisible to
+  the other. Both echo the account in their result, and `account=` chooses it.
+- **Recover a broken guest with `snap_revert`, not repeated `vm_reboot mode=hard`.** A hard reset
+  during active disk I/O can leave the guest wedged in chkdsk or a boot loop, and repeating it makes
+  it worse. A `snap_revert` to a known-good snapshot restores it in seconds.
+
 ### Kernel debugging traps that cost a guest
 
 These all bite through ntdrive but come from kd and the guest, so they are worth knowing before a

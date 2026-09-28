@@ -66,6 +66,71 @@ class _DeadClient:
         raise paramiko.SSHException("SSH session not active")
 
 
+class _Std:
+    def __init__(self, data: bytes = b"") -> None:
+        self._data = data
+
+        class _Ch:
+            def recv_exit_status(self) -> int:
+                return 0
+
+        self.channel = _Ch()
+
+    def read(self) -> bytes:
+        return self._data
+
+
+class _OneShotClient:
+    """exec_command fails like a dropped link, or returns output, depending on `alive`."""
+
+    def __init__(self, alive: bool) -> None:
+        self.alive = alive
+
+    def exec_command(self, *a: Any, **k: Any) -> Any:
+        if not self.alive:
+            raise paramiko.SSHException("SSH session not active")
+        return None, _Std(b"pong"), _Std(b"")
+
+
+async def test_exec_once_reconnects_once_after_a_dropped_link(monkeypatch: Any) -> None:
+    """A cached client stale after a revert must not doom every later exec: reconnect and retry."""
+    transport = SshPtyTransport("127.0.0.1", 22, "u", "p")
+    handed = [_OneShotClient(alive=False), _OneShotClient(alive=True)]
+    served: list[Any] = []
+
+    async def fake_ensure() -> Any:
+        client = handed[len(served)]
+        served.append(client)
+        return client
+
+    dropped: list[bool] = []
+
+    async def fake_close() -> None:
+        dropped.append(True)  # the stale client is dropped before the retry
+
+    monkeypatch.setattr(transport, "_ensure", fake_ensure)
+    monkeypatch.setattr(transport, "close", fake_close)
+    code, out = await transport.exec_once("hostname")
+    assert code == 0 and out == "pong"
+    assert len(served) == 2 and dropped == [True]  # first was dead, dropped, second worked
+
+
+async def test_exec_once_gives_up_after_a_second_dropped_link(monkeypatch: Any) -> None:
+    transport = SshPtyTransport("127.0.0.1", 22, "u", "p")
+
+    async def fake_ensure() -> Any:
+        return _OneShotClient(alive=False)
+
+    async def fake_close() -> None:
+        pass
+
+    monkeypatch.setattr(transport, "_ensure", fake_ensure)
+    monkeypatch.setattr(transport, "close", fake_close)
+    with pytest.raises(NtDriveError) as exc:
+        await transport.exec_once("hostname")
+    assert exc.value.code == BACKEND_ERROR and "after a reconnect" in exc.value.message
+
+
 async def test_transport_file_ops_raise_ntdrive_error_on_dead_link(tmp_path) -> None:  # type: ignore[no-untyped-def]
     transport = SshPtyTransport("127.0.0.1", 22, "u", "p")
     transport._client = _DeadClient()  # type: ignore[assignment]

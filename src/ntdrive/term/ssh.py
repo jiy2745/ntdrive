@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import json
 import os
@@ -32,6 +33,12 @@ SHELL_COMMANDS: dict[str, str] = {
     "pwsh": "pwsh.exe -NoLogo",
     "cmd": "cmd.exe /Q",
 }
+
+
+# Errors that mean the SSH link itself dropped (guest rebooted or reverted underneath a cached
+# client), as opposed to a command that ran and failed. A socket timeout is deliberately excluded:
+# it means the command is slow, not that the link is gone, so it must not trigger a re-run.
+_DROPPED_LINK = (paramiko.SSHException, EOFError, ConnectionError, BrokenPipeError)
 
 
 class HostKeyChanged(paramiko.SSHException):
@@ -399,20 +406,41 @@ class SshPtyTransport(TermTransport):
         await loop.run_in_executor(None, lambda: _guarded(f"sftp delete {target}", "", _delete))
 
     async def exec_once(self, command: str, timeout: float = 60.0) -> tuple[int, str]:
-        """Run a non-interactive command (used by kd_setup_guest and the soft reboot)."""
-        client = await self._ensure()
+        """Run a non-interactive command, reconnecting once if the cached link went stale.
+
+        The client is cached and shared. After a revert or reboot the guest's SSH is gone, but the
+        host-side transport can still report active until the first I/O fails, so a dropped link
+        left every later exec failing with backend_error while SCP kept working (each transfer opens
+        its own channel). On a dropped-link error the stale client is dropped and one fresh attempt
+        is made, which self-heals without a manual revert. A clean non-zero exit is returned as is,
+        and a genuine timeout is not retried.
+        """
         loop = asyncio.get_running_loop()
 
-        def _run() -> tuple[int, str]:
+        def _run(client: paramiko.SSHClient) -> tuple[int, str]:
             _, stdout, stderr = client.exec_command(command, timeout=timeout)
             out = stdout.read().decode("utf-8", errors="replace")
             err = stderr.read().decode("utf-8", errors="replace")
             code = stdout.channel.recv_exit_status()
             return code, out + err
 
-        return await loop.run_in_executor(
-            None, lambda: _guarded(f"ssh exec of {command[:40]!r}", "", _run)
-        )
+        for attempt in (1, 2):
+            client = await self._ensure()
+            try:
+                return await loop.run_in_executor(None, functools.partial(_run, client))
+            except _DROPPED_LINK as exc:
+                await self.close()  # drop the stale client so _ensure reconnects fresh
+                if attempt == 2:
+                    raise NtDriveError(
+                        BACKEND_ERROR,
+                        f"ssh exec of {command[:40]!r} failed after a reconnect: {exc}",
+                        "the guest may still be rebooting: retry, or snap_revert to reset it",
+                    ) from exc
+            except Exception as exc:
+                raise NtDriveError(
+                    BACKEND_ERROR, f"ssh exec of {command[:40]!r} failed: {exc}"
+                ) from exc
+        raise AssertionError("unreachable")
 
 
 def _iso(mtime: float) -> str:
