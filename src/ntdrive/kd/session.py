@@ -28,7 +28,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Any, Protocol
 
-from ntdrive.core.state import KdState
+from ntdrive.core.state import KdState, summarize_kd_event
 from ntdrive.errors import (
     BACKEND_ERROR,
     KD_ALREADY_ATTACHED,
@@ -676,15 +676,25 @@ class KdSession:
         if proc is None or proc.poll() is not None:
             self.state = KdState.DETACHED
             return self.status()
-        if self.state == KdState.BROKEN and not force:
-            try:
-                self._write("g\n")
-                await asyncio.sleep(0.2)
-            except (OSError, NtDriveError):
-                pass
+        loop = asyncio.get_running_loop()
+        if self.state == KdState.BROKEN:
+            # Always try to leave the target running before kd quits. A user-mode target quit while
+            # halted at an int3 (a DebugBreak, or a leftover bp byte) can spin the guest to full CPU
+            # and unreachable: the pending break re-raises with no debugger to take it. Clear this
+            # session's breakpoints and resume. force only bounds the wait, so a wedged kd (the one
+            # case force is for) cannot hang the detach, it just falls through to terminate.
+            def _release() -> None:
+                with contextlib.suppress(OSError, NtDriveError):
+                    self._write("bc *\n")
+                    self._write("g\n")
+
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, _release), timeout=0.5 if force else 2.0
+                )
+            await asyncio.sleep(0.2)
         with contextlib.suppress(OSError, NtDriveError):
             self._write("q\n")
-        loop = asyncio.get_running_loop()
         for _ in range(20):
             if proc.poll() is not None:
                 break
@@ -711,7 +721,7 @@ class KdSession:
             "port": self.port if self.transport == "net" else None,
             "serial_pipe": self.serial_pipe if self.transport == "serial" else None,
             "target_info": self.target_info,
-            "last_event": self.last_event,
+            "last_event": summarize_kd_event(self.last_event),
             "log_path": str(self.log_path),
             "pid": self._proc.pid if self._proc is not None else None,
         }

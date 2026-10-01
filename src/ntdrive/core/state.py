@@ -31,6 +31,30 @@ class KdState(StrEnum):
     BROKEN = "broken"
 
 
+def summarize_kd_event(event: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A compact view of a kd break event for status responses.
+
+    The stored event carries the whole break banner (up to 2000 characters), which a status read
+    like vm_state or kd_state used to echo in full on every call, dozens of lines of noise. Here it
+    is reduced to the event kind, the processor it landed on, a parsed bugcheck when there is one,
+    and the first non-blank line. The full banner stays in kd_log_tail and in the kd_break and
+    kd_wait_event results, which build their own output field and are not routed through this.
+    """
+    if not event:
+        return None
+    summary: dict[str, Any] = {"event": event.get("event")}
+    if event.get("at") is not None:
+        summary["at"] = event["at"]
+    if "processor" in event:
+        summary["processor"] = event["processor"]
+    if "bugcheck" in event:
+        summary["bugcheck"] = event["bugcheck"]
+    first = next((ln.strip() for ln in str(event.get("output", "")).splitlines() if ln.strip()), "")
+    if first:
+        summary["summary"] = first[:160]
+    return summary
+
+
 class TermState(StrEnum):
     """Terminal session state."""
 
@@ -102,7 +126,7 @@ class VmRuntime:
                 "port": self.kd_port,
                 "serial_pipe": self.kd_serial_pipe,
                 "target_info": self.kd_target_info,
-                "last_event": self.kd_last_event,
+                "last_event": summarize_kd_event(self.kd_last_event),
                 "log_path": self.kd_log_path,
             },
             "current_snapshot": self.current_snapshot,

@@ -78,6 +78,7 @@ async def test_con_run_executes_in_the_interactive_session_and_captures_output(
     # The action sets a writable WorkingDirectory so a relative path does not resolve under
     # System32 (the scheduler default), where a standard account cannot write and the file is lost.
     assert "-WorkingDirectory 'C:\\Users\\Public'" in script
+    assert "-Priority 7" in script  # below_normal by default, the long-standing behavior
 
 
 async def test_con_run_honors_an_explicit_working_directory(
@@ -92,6 +93,46 @@ async def test_con_run_honors_an_explicit_working_directory(
         {"vm": "win11-dev", "cmd": "run.bat", "account": "admin", "cwd": "C:\\work"},
     )
     assert "-WorkingDirectory 'C:\\work'" in fake_transport.exec_log[-1]
+
+
+async def test_con_run_idle_priority_keeps_ssh_alive_under_a_cpu_bound_command(
+    service: NtDriveService, fake_transport: FakeTransport, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_transport.exec_responses["$ErrorActionPreference='Stop'"] = (
+        "NTDRIVE_RC=0 STATE=Ready\nNTDRIVE_OUT_BEGIN\n"
+    )
+    await service.call(
+        "con_run",
+        {"vm": "win11-dev", "cmd": "race.exe", "account": "admin", "priority": "idle"},
+    )
+    # Idle priority (task level 10) lets sshd and SFTP preempt a CPU-bound race loop, so a
+    # breadcrumb file_pull or a taskkill still lands while it runs.
+    assert "-Priority 10" in fake_transport.exec_log[-1]
+
+
+async def test_con_run_detach_reports_dispatched_when_the_confirming_call_fails(
+    service: NtDriveService,
+    fake_transport: FakeTransport,
+    fake_vmrun: FakeVmrun,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A starved SSH return must not read as a failed launch: that drove a re-run and an orphan."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    from ntdrive.errors import TIMEOUT
+
+    async def timing_out(command: str, timeout: float = 60.0) -> tuple[int, str]:
+        raise NtDriveError(TIMEOUT, "the guest did not answer the SSH command within 60s")
+
+    monkeypatch.setattr(fake_transport, "exec_once", timing_out)
+    result = await service.call(
+        "con_run",
+        {"vm": "win11-dev", "cmd": "race.exe", "account": "admin", "detach": True},
+    )
+    # The task and log are known host-side, so the launch is reported as dispatched, not failed.
+    assert result["detached"] is True and result["state"] == "unconfirmed"
+    assert result["task"].startswith("ntdrive_run_") and result["log"].endswith(".log")
+    assert "Do NOT re-run" in result["note"]
 
 
 async def test_con_run_reports_a_command_that_did_not_finish(
@@ -139,6 +180,7 @@ async def test_con_run_detach_starts_and_returns_at_once(
     assert "New-Item -ItemType File -Path $log -Force" in script
     # A detached command gets the same writable WorkingDirectory as a foreground one.
     assert "-WorkingDirectory 'C:\\Users\\Public'" in script
+    assert "-Priority 7" in script  # below_normal by default
     assert "exists now" in result["note"]
 
 

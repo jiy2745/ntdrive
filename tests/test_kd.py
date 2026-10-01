@@ -250,6 +250,9 @@ async def test_kd_lifecycle(service: NtDriveService, kd_procs: list[FakeKdProces
 
     state = await service.call("kd_state", {"vm": "win11-dev"})
     assert state["state"] == "broken" and state["last_event"]["event"] == "user_break"
+    # last_event in a status view is summarized, not the whole break banner (context noise): the
+    # kind and a one-line summary, with the full text left in kd_log_tail.
+    assert "output" not in state["last_event"] and "summary" in state["last_event"]
 
     assert (await service.call("kd_go", {"vm": "win11-dev"}))["state"] == "running"
     proc.bugcheck()
@@ -268,6 +271,9 @@ async def test_kd_lifecycle(service: NtDriveService, kd_procs: list[FakeKdProces
     # Detaching from a live KDNET target is explained, so kd.exe transport chatter is not mistaken
     # for a guest crash.
     assert "guest keeps running" in detached["note"]
+    # Breakpoints are cleared before the resume so a leftover int3 cannot spin the guest after kd
+    # quits, then the target is resumed and kd told to quit.
+    assert "bc *" in proc.commands
     assert proc.commands[-2:] == ["g", "q"]
     await settle()
     assert not service.runtime("win11-dev").guest_frozen

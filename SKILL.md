@@ -216,6 +216,17 @@ seconds, reattaches the debugger and reopens terminals for you. Remember the rev
   that appends to `tally.txt`) resolves under `cwd`, which defaults to `C:\Users\Public`, not the
   scheduler's `System32` where a standard account cannot write and the file is silently lost. Pass
   `cwd=` to put outputs where you will `file_pull` them.
+- **Launch a CPU-bound race or fuzz loop with `con_run priority=idle`.** A loop that pins every core
+  starves sshd, so `file_pull` of a breadcrumb file and a `taskkill` both time out and you wait for
+  the run to end to read anything. `priority=idle` runs it below everything, so the moment SSH or
+  SFTP has work it preempts the loop and your read or kill lands while it runs. There is no
+  saturation-proof read channel otherwise (SFTP and the VMware guest-tools fallback both need the
+  guest to schedule a thread), so set the priority at launch rather than fighting it later.
+- **A `con_run detach=true` that returns `state: unconfirmed` is launched, not failed.** The task
+  name and log path are chosen on the host before the call, so when the launching SSH call is
+  starved or dropped the result still carries them with `state: unconfirmed`. The process is almost
+  certainly running. Do NOT re-run (that spawns a second instance that pins the CPU further): read
+  the log with `file_pull`, or `term_exec "schtasks /query /tn <task>"` once the guest frees up.
 - **Recover a broken guest with `snap_revert`, not repeated `vm_reboot mode=hard`.** A hard reset
   during active disk I/O can leave the guest wedged in chkdsk or a boot loop, and repeating it makes
   it worse. A `snap_revert` to a known-good snapshot restores it in seconds.
@@ -252,6 +263,18 @@ long session:
   `kd_break` would. `kd_go` still needs a prompt (it refuses a running target), and a symbol-heavy
   command (`x`, `u`, `ln`, a first `!extension`) can be slow while symbols download: raise its
   `timeout`.
+- **`kd_detach` clears breakpoints and resumes before it quits, so prefer it over `force=true`.** A
+  target left halted at a user-mode int3 (a `DebugBreak`, or a leftover `bp` byte) can spin the
+  guest to full CPU and unreachable once kd is gone, because the pending break re-raises with no
+  debugger to take it. Plain `kd_detach` now sends `bc *` then `g` first, which avoids that. Use
+  `force=true` only when kd itself is wedged: it bounds that cleanup to half a second rather than
+  skipping it, but a wedged kd cannot carry out the resume, so that case can still need a
+  `snap_revert`.
+- **After `kd_go` from a user-mode `DebugBreak`, the next `DebugBreak` may not re-break.** kd can let
+  a repeated user-mode int3 continue rather than stopping again, so a `kd_wait_event` waiting for it
+  times out and a multi-step sync built on repeated `DebugBreak` stalls. Drive the stops with a real
+  breakpoint (`bp` by symbol, or `kd_sample`) instead of relying on the process hitting `DebugBreak`
+  again.
 - **After a guest REBOOT, session modules are absent, not just unresolved.** `lm m win32k*` prints
   only its header, so symbols cannot resolve at all. A plain `.reload` brings them back, and
   `lm m win32k*` then reports the session bases, which you need anyway because a reboot re-randomizes

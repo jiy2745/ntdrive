@@ -95,6 +95,12 @@ def _ps_literal(value: str) -> str:
     return value.replace("'", "''")
 
 
+# Task Scheduler priority levels that map to a process priority class: 5 NORMAL, 7 BELOW_NORMAL,
+# 10 IDLE. idle lets a normal-priority thread (sshd servicing an SFTP transfer, or taskkill)
+# preempt the command whenever it has work, so a CPU-bound race loop stops starving them.
+_TASK_PRIORITY = {"normal": 5, "below_normal": 7, "idle": 10}
+
+
 class RunParams(VmParams):
     """con_run."""
 
@@ -121,6 +127,15 @@ class RunParams(VmParams):
     timeout: float = Field(
         default=60, ge=1, description="Seconds to wait for the command to finish"
     )
+    priority: Literal["normal", "below_normal", "idle"] = Field(
+        default="below_normal",
+        description=(
+            "Scheduler priority for the command's process. idle lets SSH, SFTP and taskkill "
+            "always preempt it, so file_pull can read a breadcrumb file and a kill lands while a "
+            "CPU-bound race or fuzz loop runs, instead of the guest going unreachable. normal "
+            "gives it a full share. below_normal is the default and the long-standing behavior"
+        ),
+    )
     capture: bool = Field(default=True, description="Return the command's stdout and stderr")
     max_bytes: int = Field(
         default=65536, ge=256, le=1 << 20, description="Cap on the returned output (truncated says)"
@@ -136,7 +151,14 @@ class RunParams(VmParams):
 
 
 def _run_script(
-    task: str, log: str, user: str, run_level: str, cmd: str, timeout: float, cwd: str
+    task: str,
+    log: str,
+    user: str,
+    run_level: str,
+    cmd: str,
+    timeout: float,
+    cwd: str,
+    priority: int,
 ) -> str:
     """The PowerShell that runs `cmd` in the user's interactive session and reports the result.
 
@@ -145,6 +167,7 @@ def _run_script(
     logon. The command's output goes to a world-readable file, read back and framed by markers.
     The action's WorkingDirectory is set so a relative path in the command does not resolve under
     System32 (the scheduler default), where a standard account cannot write and the file is lost.
+    Priority sets the process priority class so a CPU-bound command need not starve sshd.
     """
     argument = _ps_literal(f'/c ({cmd}) > "{log}" 2>&1')
     wait = int(timeout)
@@ -161,7 +184,14 @@ def _run_script(
             f"$pr=New-ScheduledTaskPrincipal -UserId '{_ps_literal(user)}' -LogonType Interactive "
             f"-RunLevel {run_level}"
         ),
-        "Register-ScheduledTask -TaskName $t -Action $a -Principal $pr -Force | Out-Null",
+        (
+            f"$s=New-ScheduledTaskSettingsSet -Priority {priority} -AllowStartIfOnBatteries "
+            "-DontStopIfGoingOnBatteries"
+        ),
+        (
+            "Register-ScheduledTask -TaskName $t -Action $a -Principal $pr -Settings $s -Force "
+            "| Out-Null"
+        ),
         "Start-ScheduledTask -TaskName $t",
         f"$deadline=(Get-Date).AddSeconds({wait})",
         (
@@ -180,13 +210,16 @@ def _run_script(
     return "; ".join(lines)
 
 
-def _detach_script(task: str, log: str, user: str, run_level: str, cmd: str, cwd: str) -> str:
+def _detach_script(
+    task: str, log: str, user: str, run_level: str, cmd: str, cwd: str, priority: int
+) -> str:
     """PowerShell that starts `cmd` in the user's session and returns without waiting for it.
 
     The task keeps no time limit so a long-lived provider is not killed, and it is left registered
     so unregistering it does not stop the running process. The command's output goes to a
     world-readable log the caller can file_pull. The started process outlives this SSH call. Its
-    WorkingDirectory is set so a relative path does not resolve under System32 and vanish.
+    WorkingDirectory is set so a relative path does not resolve under System32 and vanish, and its
+    priority is set so a CPU-bound command does not starve the SSH call that reads its log.
     """
     argument = _ps_literal(f'/c ({cmd}) > "{log}" 2>&1')
     lines = [
@@ -206,7 +239,8 @@ def _detach_script(task: str, log: str, user: str, run_level: str, cmd: str, cwd
             f"-RunLevel {run_level}"
         ),
         (
-            "$s=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) "
+            f"$s=New-ScheduledTaskSettingsSet -Priority {priority} "
+            "-ExecutionTimeLimit ([TimeSpan]::Zero) "
             "-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries"
         ),
         (
@@ -451,8 +485,31 @@ async def _con_run_detached(
     run_level: str,
 ) -> dict[str, Any]:
     """Start the command and return at once, leaving it running in the guest session."""
-    script = _detach_script(task, log, user, run_level, p.cmd, p.cwd)
-    _, out = await transport.exec_once(script, timeout=60)
+    script = _detach_script(task, log, user, run_level, p.cmd, p.cwd, _TASK_PRIORITY[p.priority])
+    try:
+        _, out = await transport.exec_once(script, timeout=60)
+    except NtDriveError as exc:
+        # The task name and the log path are chosen here on the host, before the call, so a starved
+        # or dropped SSH return does not mean the launch failed: the task was very likely registered
+        # and started and the process is running. Report it as dispatched with the known ids rather
+        # than raising, so the caller does not read it as a failure and re-run, spawning an orphan
+        # that pins the CPU further. priority=idle makes this call far less likely to be starved.
+        service.state.record_event(p.vm, "con_run", account=p.account, detached=True)
+        return {
+            "vm": p.vm,
+            "account": p.account,
+            "detached": True,
+            "task": task,
+            "log": log,
+            "state": "unconfirmed",
+            "note": (
+                f"the launch was dispatched but its SSH confirmation failed ({exc.code}): "
+                f"{exc.message}. The process is most likely running: a CPU-saturated guest "
+                "starves the confirming call (pass priority=idle to avoid that). Do NOT re-run, "
+                f"which would start a second instance. Check {log} with file_pull, or term_exec "
+                f'"schtasks /query /tn {task}" once the guest frees up'
+            ),
+        }
     match = re.search(r"NTDRIVE_RC=(-?\d+) STATE=(\w+)", out)
     if match is None:
         raise NtDriveError(
@@ -517,7 +574,9 @@ async def con_run(service: NtDriveService, p: RunParams) -> dict[str, Any]:
     run_level = "Highest" if p.account == "admin" else "Limited"
     if p.detach:
         return await _con_run_detached(service, p, transport, task, log, user, run_level)
-    script = _run_script(task, log, user, run_level, p.cmd, p.timeout, p.cwd)
+    script = _run_script(
+        task, log, user, run_level, p.cmd, p.timeout, p.cwd, _TASK_PRIORITY[p.priority]
+    )
     _, out = await transport.exec_once(script, timeout=p.timeout + 30)
     match = re.search(r"NTDRIVE_RC=(-?\d+) STATE=(\w+)", out)
     if match is None:
