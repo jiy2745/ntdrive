@@ -433,12 +433,29 @@ class SshPtyTransport(TermTransport):
                 if attempt == 2:
                     raise NtDriveError(
                         BACKEND_ERROR,
-                        f"ssh exec of {command[:40]!r} failed after a reconnect: {exc}",
+                        f"the SSH exec channel failed again after a reconnect: {exc}",
                         "the guest may still be rebooting: retry, or snap_revert to reset it",
                     ) from exc
-            except Exception as exc:
+            except TimeoutError as exc:
+                # The command never answered. The link is up (a dropped link raises above), so the
+                # usual cause is a guest too busy to schedule sshd: a running fuzz or race loop
+                # pins every core. Not retried, because a re-run queues behind the same load.
                 raise NtDriveError(
-                    BACKEND_ERROR, f"ssh exec of {command[:40]!r} failed: {exc}"
+                    TIMEOUT,
+                    f"the guest did not answer the SSH command within {timeout:.0f}s",
+                    "the guest may be CPU-saturated (a running fuzz or race loop starves sshd: "
+                    "vm_state probe=true shows host_cpu_percent) or still booting. Let it settle "
+                    "and retry, or raise the timeout",
+                ) from exc
+            except Exception as exc:
+                # The command text is not echoed: it can be an internal ntdrive script carrying a
+                # secret (a KDNET key), which must never reach a result or a log. This is the
+                # transport failing, not the caller's command being malformed.
+                raise NtDriveError(
+                    BACKEND_ERROR,
+                    f"the SSH exec channel failed: {exc}",
+                    "this is ntdrive's SSH transport, not the command text. Retry, or snap_revert "
+                    "if the guest was reverted underneath the connection",
                 ) from exc
         raise AssertionError("unreachable")
 

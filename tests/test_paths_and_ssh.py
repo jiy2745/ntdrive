@@ -6,7 +6,7 @@ from typing import Any
 import paramiko
 import pytest
 
-from ntdrive.errors import BACKEND_ERROR, NtDriveError
+from ntdrive.errors import BACKEND_ERROR, TIMEOUT, NtDriveError
 from ntdrive.paths import absolutize_local, is_absolute_local
 from ntdrive.term.ssh import SshPtyTransport, _guarded
 
@@ -113,6 +113,34 @@ async def test_exec_once_reconnects_once_after_a_dropped_link(monkeypatch: Any) 
     code, out = await transport.exec_once("hostname")
     assert code == 0 and out == "pong"
     assert len(served) == 2 and dropped == [True]  # first was dead, dropped, second worked
+
+
+class _SlowClient:
+    """exec_command never answers: it raises a socket timeout, like a CPU-starved guest."""
+
+    def exec_command(self, *a: Any, **k: Any) -> Any:
+        raise TimeoutError
+
+
+async def test_exec_once_blames_a_busy_guest_on_a_timeout(monkeypatch: Any) -> None:
+    """A timeout is the command being slow, not a dropped link: do not retry, name the likely cause."""
+    transport = SshPtyTransport("127.0.0.1", 22, "u", "p")
+    served: list[Any] = []
+
+    async def fake_ensure() -> Any:
+        served.append(True)
+        return _SlowClient()
+
+    async def fake_close() -> None:
+        raise AssertionError("a timeout must not drop the link")
+
+    monkeypatch.setattr(transport, "_ensure", fake_ensure)
+    monkeypatch.setattr(transport, "close", fake_close)
+    with pytest.raises(NtDriveError) as exc:
+        await transport.exec_once("hostname", timeout=5)
+    assert exc.value.code == TIMEOUT and "did not answer" in exc.value.message
+    assert "CPU-saturated" in exc.value.hint  # points at the running-race cause
+    assert len(served) == 1  # not retried: a re-run would queue behind the same load
 
 
 async def test_exec_once_gives_up_after_a_second_dropped_link(monkeypatch: Any) -> None:

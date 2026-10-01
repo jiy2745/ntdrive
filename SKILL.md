@@ -211,6 +211,11 @@ seconds, reattaches the debugger and reopens terminals for you. Remember the rev
   autologon signed in, standard by default), while `term_*` run as the admin SSH account, so a
   per-user resource (a Cloud Files sync root, a per-user registry key) made by one is invisible to
   the other. Both echo the account in their result, and `account=` chooses it.
+- **`con_run` runs `cmd.exe /c`, and a relative path lands in `cwd`.** The command runs through
+  `cmd.exe /c`, so cmd syntax (`for /L %i`, `&`, `>>`, redirection) works. A relative path (a `.bat`
+  that appends to `tally.txt`) resolves under `cwd`, which defaults to `C:\Users\Public`, not the
+  scheduler's `System32` where a standard account cannot write and the file is silently lost. Pass
+  `cwd=` to put outputs where you will `file_pull` them.
 - **Recover a broken guest with `snap_revert`, not repeated `vm_reboot mode=hard`.** A hard reset
   during active disk I/O can leave the guest wedged in chkdsk or a boot loop, and repeating it makes
   it worse. A `snap_revert` to a known-good snapshot restores it in seconds.
@@ -241,6 +246,12 @@ long session:
   overruns its timeout and tells you whether the prompt came back, but avoid these over the net
   transport. If the prompt is dead, `kd_detach` then `kd_attach`. A **plain `.reload`** is safe
   (about 2 s, no wedge) and is the fix below, so only the `/f <module>.sys` form is the trap.
+- **`kd_exec` breaks in on its own, so a first command after `kd_attach` or `kd_go` just works.** A
+  running target has no `kd>` prompt, so `kd_exec` used to fail with `kd_not_broken` until you called
+  `kd_break` by hand. It now breaks in first and says so in `note`, leaving the target broken as
+  `kd_break` would. `kd_go` still needs a prompt (it refuses a running target), and a symbol-heavy
+  command (`x`, `u`, `ln`, a first `!extension`) can be slow while symbols download: raise its
+  `timeout`.
 - **After a guest REBOOT, session modules are absent, not just unresolved.** `lm m win32k*` prints
   only its header, so symbols cannot resolve at all. A plain `.reload` brings them back, and
   `lm m win32k*` then reports the session bases, which you need anyway because a reboot re-randomizes

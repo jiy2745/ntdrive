@@ -98,7 +98,22 @@ def _ps_literal(value: str) -> str:
 class RunParams(VmParams):
     """con_run."""
 
-    cmd: str = Field(description="Command line to run on the interactive desktop (via cmd.exe /c)")
+    cmd: str = Field(
+        description=(
+            "Command line to run on the interactive desktop. It runs through cmd.exe /c in the "
+            "logged-on user's session, so cmd.exe syntax (for /L %i, &, >>, redirection) works. A "
+            "relative path resolves under cwd"
+        )
+    )
+    cwd: str = Field(
+        default="C:\\Users\\Public",
+        description=(
+            "Working directory for the command. A relative path (for example > out.txt or an "
+            "append in a .bat) lands here. Without this a scheduled task starts in "
+            "C:\\Windows\\System32, which a standard account cannot write to, so the file is "
+            "silently lost. C:\\Users\\Public is world-writable and is where file_pull can read it"
+        ),
+    )
     account: Literal["admin", "standard"] = Field(
         default="standard",
         description="Whose interactive session to run in: standard (guest.standard_user) or admin",
@@ -120,12 +135,16 @@ class RunParams(VmParams):
     )
 
 
-def _run_script(task: str, log: str, user: str, run_level: str, cmd: str, timeout: float) -> str:
+def _run_script(
+    task: str, log: str, user: str, run_level: str, cmd: str, timeout: float, cwd: str
+) -> str:
     """The PowerShell that runs `cmd` in the user's interactive session and reports the result.
 
     A scheduled task with LogonType Interactive runs in the logged-on user's session (session 1),
     which SSH (session 0) cannot reach, and needs no stored password because it rides the existing
     logon. The command's output goes to a world-readable file, read back and framed by markers.
+    The action's WorkingDirectory is set so a relative path in the command does not resolve under
+    System32 (the scheduler default), where a standard account cannot write and the file is lost.
     """
     argument = _ps_literal(f'/c ({cmd}) > "{log}" 2>&1')
     wait = int(timeout)
@@ -134,7 +153,10 @@ def _run_script(task: str, log: str, user: str, run_level: str, cmd: str, timeou
         f"$t='{task}'",
         f"$log='{log}'",
         "if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }",
-        f"$a=New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '{argument}'",
+        (
+            f"$a=New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '{argument}' "
+            f"-WorkingDirectory '{_ps_literal(cwd)}'"
+        ),
         (
             f"$pr=New-ScheduledTaskPrincipal -UserId '{_ps_literal(user)}' -LogonType Interactive "
             f"-RunLevel {run_level}"
@@ -158,12 +180,13 @@ def _run_script(task: str, log: str, user: str, run_level: str, cmd: str, timeou
     return "; ".join(lines)
 
 
-def _detach_script(task: str, log: str, user: str, run_level: str, cmd: str) -> str:
+def _detach_script(task: str, log: str, user: str, run_level: str, cmd: str, cwd: str) -> str:
     """PowerShell that starts `cmd` in the user's session and returns without waiting for it.
 
     The task keeps no time limit so a long-lived provider is not killed, and it is left registered
     so unregistering it does not stop the running process. The command's output goes to a
-    world-readable log the caller can file_pull. The started process outlives this SSH call.
+    world-readable log the caller can file_pull. The started process outlives this SSH call. Its
+    WorkingDirectory is set so a relative path does not resolve under System32 and vanish.
     """
     argument = _ps_literal(f'/c ({cmd}) > "{log}" 2>&1')
     lines = [
@@ -174,7 +197,10 @@ def _detach_script(task: str, log: str, user: str, run_level: str, cmd: str) -> 
         # before cmd.exe opens the redirect, and a caller pulling immediately would 404 otherwise.
         # cmd's `>` truncates it when the process actually starts writing.
         "New-Item -ItemType File -Path $log -Force | Out-Null",
-        f"$a=New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '{argument}'",
+        (
+            f"$a=New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '{argument}' "
+            f"-WorkingDirectory '{_ps_literal(cwd)}'"
+        ),
         (
             f"$pr=New-ScheduledTaskPrincipal -UserId '{_ps_literal(user)}' -LogonType Interactive "
             f"-RunLevel {run_level}"
@@ -425,7 +451,7 @@ async def _con_run_detached(
     run_level: str,
 ) -> dict[str, Any]:
     """Start the command and return at once, leaving it running in the guest session."""
-    script = _detach_script(task, log, user, run_level, p.cmd)
+    script = _detach_script(task, log, user, run_level, p.cmd, p.cwd)
     _, out = await transport.exec_once(script, timeout=60)
     match = re.search(r"NTDRIVE_RC=(-?\d+) STATE=(\w+)", out)
     if match is None:
@@ -491,7 +517,7 @@ async def con_run(service: NtDriveService, p: RunParams) -> dict[str, Any]:
     run_level = "Highest" if p.account == "admin" else "Limited"
     if p.detach:
         return await _con_run_detached(service, p, transport, task, log, user, run_level)
-    script = _run_script(task, log, user, run_level, p.cmd, p.timeout)
+    script = _run_script(task, log, user, run_level, p.cmd, p.timeout, p.cwd)
     _, out = await transport.exec_once(script, timeout=p.timeout + 30)
     match = re.search(r"NTDRIVE_RC=(-?\d+) STATE=(\w+)", out)
     if match is None:

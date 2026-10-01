@@ -75,6 +75,23 @@ async def test_con_run_executes_in_the_interactive_session_and_captures_output(
     assert "New-ScheduledTaskPrincipal -UserId 'dev' -LogonType Interactive" in script
     assert "-RunLevel Highest" in script  # admin runs elevated
     assert "cmd.exe" in script and "(whoami)" in script
+    # The action sets a writable WorkingDirectory so a relative path does not resolve under
+    # System32 (the scheduler default), where a standard account cannot write and the file is lost.
+    assert "-WorkingDirectory 'C:\\Users\\Public'" in script
+
+
+async def test_con_run_honors_an_explicit_working_directory(
+    service: NtDriveService, fake_transport: FakeTransport, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_transport.exec_responses["$ErrorActionPreference='Stop'"] = (
+        "NTDRIVE_RC=0 STATE=Ready\nNTDRIVE_OUT_BEGIN\n"
+    )
+    await service.call(
+        "con_run",
+        {"vm": "win11-dev", "cmd": "run.bat", "account": "admin", "cwd": "C:\\work"},
+    )
+    assert "-WorkingDirectory 'C:\\work'" in fake_transport.exec_log[-1]
 
 
 async def test_con_run_reports_a_command_that_did_not_finish(
@@ -120,6 +137,8 @@ async def test_con_run_detach_starts_and_returns_at_once(
     assert "Unregister-ScheduledTask" not in script  # left registered so the process is not stopped
     # The log is created up front so file_pull cannot race the task's own redirect.
     assert "New-Item -ItemType File -Path $log -Force" in script
+    # A detached command gets the same writable WorkingDirectory as a foreground one.
+    assert "-WorkingDirectory 'C:\\Users\\Public'" in script
     assert "exists now" in result["note"]
 
 

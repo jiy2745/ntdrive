@@ -220,9 +220,17 @@ async def test_kd_lifecycle(service: NtDriveService, kd_procs: list[FakeKdProces
     proc = kd_procs[-1]
     assert proc.argv[1:3] == ["-k", "net:port=50000,key=1.2.3.4"]
 
+    # kd_go still needs a prompt: on a running target it refuses with kd_not_broken.
     with pytest.raises(NtDriveError) as exc:
-        await service.call("kd_exec", {"vm": "win11-dev", "cmd": "r"})
+        await service.call("kd_go", {"vm": "win11-dev"})
     assert exc.value.code == KD_NOT_BROKEN
+
+    # kd_exec, though, is not a dead end on a running target: it breaks in first, so the first
+    # command after attach no longer fails with kd_not_broken.
+    auto = await service.call("kd_exec", {"vm": "win11-dev", "cmd": "r"})
+    assert "broke in first" in auto["note"]
+    assert auto["state"] == "broken"
+    assert service.runtime("win11-dev").guest_frozen
 
     broke = await service.call("kd_break", {"vm": "win11-dev"})
     assert broke["state"] == "broken"

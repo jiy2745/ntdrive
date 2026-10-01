@@ -12,6 +12,7 @@ from pydantic import Field
 
 from ntdrive.config import VmConfig, save_kdnet_settings
 from ntdrive.core.registry import tool
+from ntdrive.core.state import KdState
 from ntdrive.core.tools.common import VmParams
 from ntdrive.errors import BACKEND_ERROR, INVALID_ARGS, NtDriveError
 from ntdrive.kd.firewall import MANUAL_FIREWALL_HINT
@@ -463,13 +464,17 @@ async def kd_go(service: NtDriveService, p: VmParams) -> dict[str, Any]:
 
 @tool(
     "kd_exec",
-    "Run one or more debugger commands at the kd> prompt and return each command's output.",
+    "Run one or more debugger commands at the kd> prompt and return each command's output. A "
+    "running target (right after kd_attach, or after kd_go) is broken into first, so the first "
+    "command no longer fails with kd_not_broken. A symbol-heavy command (x, u, ln, a first "
+    "!extension) can be slow while symbols download: raise its timeout, and if one wedges ntdrive "
+    "interrupts it so the next kd_exec works.",
     ExecParams,
     positional=("vm", "cmd"),
     effect="destructive",
 )
 async def kd_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
-    """Execute commands; needs a broken-in target."""
+    """Execute commands, breaking the target in first if it is running."""
     cmds = list(p.cmds or [])
     if p.cmd:
         cmds.insert(0, p.cmd)
@@ -482,8 +487,20 @@ async def kd_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
         cmds.insert(0, f"~{p.processor}s")
     cfg = service.vm_cfg(p.vm)
     session = service.kd_session(cfg)
+    broke_in = False
+    if session.attached and session.state != KdState.BROKEN:
+        # A command needs a kd> prompt, and kd_attach and kd_go both leave the target running, so
+        # the first kd_exec used to fail with kd_not_broken and need a manual kd_break. Break in
+        # here: running a command is why kd_exec was called. The target is left broken, as after a
+        # manual kd_break, and kd_go resumes it.
+        await session.break_in(timeout=min(p.timeout, 20.0))
+        service.runtime(p.vm)  # a break freezes the guest; keep guest_frozen in step
+        broke_in = True
     outputs = await session.exec(cmds, timeout=p.timeout, max_bytes=p.max_bytes)
-    return {"vm": p.vm, "outputs": outputs, "state": str(session.state)}
+    result: dict[str, Any] = {"vm": p.vm, "outputs": outputs, "state": str(session.state)}
+    if broke_in:
+        result["note"] = "the target was running, so kd_exec broke in first. kd_go resumes it"
+    return result
 
 
 @tool(
