@@ -216,6 +216,14 @@ seconds, reattaches the debugger and reopens terminals for you. Remember the rev
   that appends to `tally.txt`) resolves under `cwd`, which defaults to `C:\Users\Public`, not the
   scheduler's `System32` where a standard account cannot write and the file is silently lost. Pass
   `cwd=` to put outputs where you will `file_pull` them.
+- **Run PowerShell code with `con_run shell=powershell`, never quoted inside cmd.** The `cmd` shell
+  default wraps the text in `cmd.exe /c (...)`, where PowerShell code must be quoted against every
+  layer: an unquoted `for($i=0;...)` dies on cmd's metacharacters, and any PowerShell in your own
+  calling stack eats `$vars` inside double quotes (a live session turned `for($i=0;...)` into
+  `for(=0;...)`). `shell=powershell` carries the text as base64 (`-EncodedCommand`), so $vars,
+  quotes and here-strings arrive verbatim with nothing to quote. It runs Windows PowerShell 5.1
+  (`Start-Process -PriorityIdle` does not exist there: use `-PassThru` and set `PriorityClass`).
+  Pass `shell=pwsh` when the guest has PowerShell 7. The result echoes which shell ran.
 - **Launch a CPU-bound race or fuzz loop with `con_run priority=idle`.** A loop that pins every core
   starves sshd, so `file_pull` of a breadcrumb file and a `taskkill` both time out and you wait for
   the run to end to read anything. `priority=idle` runs it below everything, so the moment SSH or

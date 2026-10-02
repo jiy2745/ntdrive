@@ -244,3 +244,75 @@ async def test_con_run_probe_timeout_does_not_block_the_launch(
     )
     result = await service.call("con_run", {"vm": "win11-dev", "cmd": "whoami", "account": "admin"})
     assert result["exit_code"] == 0
+
+
+def _decoded_payload(script: str) -> str:
+    """The -EncodedCommand payload of the task action in a wrapper script, decoded."""
+    import base64
+    import re
+
+    match = re.search(r"-EncodedCommand ([A-Za-z0-9+/=]+)", script)
+    assert match is not None, script
+    return base64.b64decode(match.group(1)).decode("utf-16-le")
+
+
+async def test_con_run_powershell_shell_carries_the_command_verbatim(
+    service: NtDriveService, fake_transport: FakeTransport, fake_vmrun: FakeVmrun
+) -> None:
+    """A $var in PowerShell code must survive every quoting layer (live 2026-10-02 finding)."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_transport.exec_responses["$ErrorActionPreference='Stop'"] = (
+        "NTDRIVE_RC=0 STATE=Ready\nNTDRIVE_OUT_BEGIN\n"
+    )
+    loop = "for($i=0;$i -lt 3;$i++){Write-Output i=$i}"
+    result = await service.call(
+        "con_run",
+        {"vm": "win11-dev", "cmd": loop, "account": "admin", "shell": "powershell"},
+    )
+    assert result["shell"] == "powershell" and result["exit_code"] == 0
+    script = fake_transport.exec_log[-1]
+    assert "-Execute 'powershell.exe'" in script
+    assert "/c (for(" not in script  # no cmd.exe carrier around the code
+    payload = _decoded_payload(script)
+    assert loop in payload  # verbatim, no quote stripping can touch it
+    assert '> "C:\\Users\\Public\\ntdrive_run_' in payload  # the redirect rides inside
+    assert "exit $LASTEXITCODE" in payload  # the exit code is handed back
+
+
+async def test_con_run_pwsh_shell_uses_pwsh_exe(
+    service: NtDriveService, fake_transport: FakeTransport, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_transport.exec_responses["$ErrorActionPreference='Stop'"] = (
+        "NTDRIVE_RC=0 STATE=Ready\nNTDRIVE_OUT_BEGIN\n"
+    )
+    result = await service.call(
+        "con_run", {"vm": "win11-dev", "cmd": "echo hi", "account": "admin", "shell": "pwsh"}
+    )
+    assert result["shell"] == "pwsh"
+    assert "-Execute 'pwsh.exe'" in fake_transport.exec_log[-1]
+
+
+async def test_con_run_detached_powershell_shell_encodes_too(
+    service: NtDriveService, fake_transport: FakeTransport, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_transport.exec_responses["$ErrorActionPreference='Stop'"] = "NTDRIVE_RC=0 STATE=Running\n"
+    result = await service.call(
+        "con_run",
+        {
+            "vm": "win11-dev",
+            "cmd": "for($n=1;$n -le 2;$n++){Write-Output $n}",
+            "account": "admin",
+            "shell": "powershell",
+            "detach": True,
+        },
+    )
+    assert result["shell"] == "powershell" and result["state"] == "Running"
+    assert "for($n=1;$n -le 2;$n++){Write-Output $n}" in _decoded_payload(
+        fake_transport.exec_log[-1]
+    )
+    # The detach script still pre-creates the log and leaves the task registered.
+    script = fake_transport.exec_log[-1]
+    assert "New-Item -ItemType File -Path $log -Force" in script
+    assert "Unregister-ScheduledTask" not in script

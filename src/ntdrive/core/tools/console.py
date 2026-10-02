@@ -152,10 +152,22 @@ class RunParams(VmParams):
 
     cmd: str = Field(
         description=(
-            "Command line to run on the interactive desktop. It runs through cmd.exe /c in the "
-            "logged-on user's session, so cmd.exe syntax (for /L %i, &, >>, redirection) works. A "
-            "relative path resolves under cwd"
+            "Command line to run on the interactive desktop. With shell=cmd (the default) it "
+            "runs through cmd.exe /c, so cmd.exe syntax (for /L %i, &, >>, redirection) works. "
+            "With shell=powershell or pwsh it is the shell's own code, carried as -EncodedCommand "
+            "so it needs no quoting. A relative path resolves under cwd"
         )
+    )
+    shell: Literal["cmd", "powershell", "pwsh"] = Field(
+        default="cmd",
+        description=(
+            "Which shell runs the command on the desktop. cmd (the default, the long-standing "
+            "behavior) carries the text inside cmd.exe /c, where PowerShell code must be fully "
+            "quoted against every layer and an unquoted for($i=0;...) fails (verified live "
+            "2026-10-02). powershell or pwsh carries the text as base64 (-EncodedCommand), so "
+            "$vars, quotes and here-strings arrive verbatim with no quoting to fight. powershell "
+            "is Windows PowerShell 5.1, pwsh needs PowerShell 7 installed in the guest"
+        ),
     )
     cwd: str = Field(
         default="C:\\Users\\Public",
@@ -196,17 +208,37 @@ class RunParams(VmParams):
     )
 
 
+def _task_action(cmd: str, log: str, shell: str) -> tuple[str, str]:
+    """(Execute, Argument) for the scheduled task, already safe as a PS single-quoted literal.
+
+    cmd rides inside `cmd.exe /c (...) > log`, which is the long-standing behavior and fine for
+    cmd syntax, but PowerShell code there must survive three quoting layers and an unquoted
+    for($i=0;...) dies on cmd's metacharacters (verified live 2026-10-02). powershell and pwsh
+    ride as -EncodedCommand, base64 of UTF-16LE, which no quoting layer between the daemon and
+    the desktop can alter: $vars, quotes and here-strings arrive verbatim. The redirect and the
+    exit-code handoff live inside the encoded text, wrapped in a script block because PS cannot
+    redirect a bare statement.
+    """
+    if shell == "cmd":
+        return "cmd.exe", _ps_literal(f'/c ({cmd}) > "{log}" 2>&1')
+    exe = "powershell.exe" if shell == "powershell" else "pwsh.exe"
+    text = f'& {{ {cmd} }} > "{log}" 2>&1; exit $LASTEXITCODE'
+    encoded = base64.b64encode(text.encode("utf-16-le")).decode("ascii")
+    return exe, f"-NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"
+
+
 def _run_script(
     task: str,
     log: str,
     user: str,
     run_level: str,
-    cmd: str,
+    execute: str,
+    argument: str,
     timeout: float,
     cwd: str,
     priority: int,
 ) -> str:
-    """The PowerShell that runs `cmd` in the user's interactive session and reports the result.
+    """The PowerShell that runs the command in the user's session and reports the result.
 
     A scheduled task with LogonType Interactive runs in the logged-on user's session (session 1),
     which SSH (session 0) cannot reach, and needs no stored password because it rides the existing
@@ -215,7 +247,6 @@ def _run_script(
     System32 (the scheduler default), where a standard account cannot write and the file is lost.
     Priority sets the process priority class so a CPU-bound command need not starve sshd.
     """
-    argument = _ps_literal(f'/c ({cmd}) > "{log}" 2>&1')
     wait = int(timeout)
     lines = [
         "$ErrorActionPreference='Stop'",
@@ -223,7 +254,7 @@ def _run_script(
         f"$log='{log}'",
         "if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }",
         (
-            f"$a=New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '{argument}' "
+            f"$a=New-ScheduledTaskAction -Execute '{execute}' -Argument '{argument}' "
             f"-WorkingDirectory '{_ps_literal(cwd)}'"
         ),
         (
@@ -257,9 +288,16 @@ def _run_script(
 
 
 def _detach_script(
-    task: str, log: str, user: str, run_level: str, cmd: str, cwd: str, priority: int
+    task: str,
+    log: str,
+    user: str,
+    run_level: str,
+    execute: str,
+    argument: str,
+    cwd: str,
+    priority: int,
 ) -> str:
-    """PowerShell that starts `cmd` in the user's session and returns without waiting for it.
+    """PowerShell that starts the command in the user's session and returns without waiting for it.
 
     The task keeps no time limit so a long-lived provider is not killed, and it is left registered
     so unregistering it does not stop the running process. The command's output goes to a
@@ -267,7 +305,6 @@ def _detach_script(
     WorkingDirectory is set so a relative path does not resolve under System32 and vanish, and its
     priority is set so a CPU-bound command does not starve the SSH call that reads its log.
     """
-    argument = _ps_literal(f'/c ({cmd}) > "{log}" 2>&1')
     lines = [
         "$ErrorActionPreference='Stop'",
         f"$t='{task}'",
@@ -277,7 +314,7 @@ def _detach_script(
         # cmd's `>` truncates it when the process actually starts writing.
         "New-Item -ItemType File -Path $log -Force | Out-Null",
         (
-            f"$a=New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '{argument}' "
+            f"$a=New-ScheduledTaskAction -Execute '{execute}' -Argument '{argument}' "
             f"-WorkingDirectory '{_ps_literal(cwd)}'"
         ),
         (
@@ -531,7 +568,10 @@ async def _con_run_detached(
     run_level: str,
 ) -> dict[str, Any]:
     """Start the command and return at once, leaving it running in the guest session."""
-    script = _detach_script(task, log, user, run_level, p.cmd, p.cwd, _TASK_PRIORITY[p.priority])
+    execute, argument = _task_action(p.cmd, log, p.shell)
+    script = _detach_script(
+        task, log, user, run_level, execute, argument, p.cwd, _TASK_PRIORITY[p.priority]
+    )
     try:
         _, out = await transport.exec_once(script, timeout=60)
     except NtDriveError as exc:
@@ -544,6 +584,7 @@ async def _con_run_detached(
         return {
             "vm": p.vm,
             "account": p.account,
+            "shell": p.shell,
             "detached": True,
             "task": task,
             "log": log,
@@ -569,6 +610,7 @@ async def _con_run_detached(
     result: dict[str, Any] = {
         "vm": p.vm,
         "account": p.account,
+        "shell": p.shell,
         "detached": True,
         "task": task,
         "log": log,
@@ -592,7 +634,8 @@ async def _con_run_detached(
     "Run a command on the guest's interactive desktop (session 1) and return its output, for GUI "
     "or session-bound programs that SSH in session 0 cannot open. It runs through a scheduled "
     "task in the logged-on user's session, so the account must be logged in (con_autologon). A "
-    "missing session fails fast at launch with that hint. detach=true starts it and returns at "
+    "missing session fails fast at launch with that hint. shell=powershell carries the text as "
+    "-EncodedCommand so $vars and quotes need no quoting. detach=true starts it and returns at "
     "once, leaving it running.",
     RunParams,
     positional=("vm", "cmd"),
@@ -622,8 +665,9 @@ async def con_run(service: NtDriveService, p: RunParams) -> dict[str, Any]:
     run_level = "Highest" if p.account == "admin" else "Limited"
     if p.detach:
         return await _con_run_detached(service, p, transport, task, log, user, run_level)
+    execute, argument = _task_action(p.cmd, log, p.shell)
     script = _run_script(
-        task, log, user, run_level, p.cmd, p.timeout, p.cwd, _TASK_PRIORITY[p.priority]
+        task, log, user, run_level, execute, argument, p.timeout, p.cwd, _TASK_PRIORITY[p.priority]
     )
     _, out = await transport.exec_once(script, timeout=p.timeout + 30)
     match = re.search(r"NTDRIVE_RC=(-?\d+) STATE=(\w+)", out)
@@ -640,6 +684,7 @@ async def con_run(service: NtDriveService, p: RunParams) -> dict[str, Any]:
     result: dict[str, Any] = {
         "vm": p.vm,
         "account": p.account,
+        "shell": p.shell,
         "exit_code": exit_code,
         "state": state,
     }
