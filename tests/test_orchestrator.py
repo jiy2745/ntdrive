@@ -31,6 +31,7 @@ async def test_snapshot_take_list_delete(service: NtDriveService, fake_vmrun: Fa
     taken = await service.call(
         "snap_take", {"vm": "win11-dev", "name": "base", "description": "clean"}
     )
+    assert taken["created"] is True
     assert taken["kd_state_at_snapshot"] == "detached"
     assert taken["via"] == "direct" and taken["memory_included"] is True
     listed = await service.call("snap_list", {"vm": "win11-dev"})
@@ -97,6 +98,87 @@ async def test_allow_suspend_preflights_auth_and_never_suspends_on_a_bad_passwor
     assert not any("suspend" in argv for argv in fake_vmrun.calls)
     assert fake_vmrun.running and not fake_vmrun.suspended
     assert str(service.state.vm("win11-dev").power) == "running"
+
+
+async def test_snap_take_reports_an_existing_name_instead_of_erroring(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    """A checkpoint call must be safe to repeat: report created=false, never destroy the state."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    first = await service.call(
+        "snap_take", {"vm": "win11-dev", "name": "base", "description": "v1"}
+    )
+    assert first["created"] is True and "replaced" not in first
+    again = await service.call(
+        "snap_take", {"vm": "win11-dev", "name": "base", "description": "v2"}
+    )
+    assert again["created"] is False
+    assert again["description"] == "v1"  # the stored facts of the snapshot that is there
+    assert "replace=true" in again["note"]
+    listed = await service.call("snap_list", {"vm": "win11-dev"})
+    assert listed["metadata"]["base"]["description"] == "v1"  # nothing was retaken
+
+
+async def test_snap_take_replace_deletes_and_retakes(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    await service.call("snap_take", {"vm": "win11-dev", "name": "base", "description": "v1"})
+    result = await service.call(
+        "snap_take", {"vm": "win11-dev", "name": "base", "description": "v2", "replace": True}
+    )
+    assert result["created"] is True and result["replaced"] is True
+    assert result["description"] == "v2"
+    listed = await service.call("snap_list", {"vm": "win11-dev"})
+    assert [n["name"] for n in listed["tree"]] == ["base"]  # one snapshot, retaken
+    assert listed["metadata"]["base"]["description"] == "v2"
+
+
+async def test_snap_take_replace_on_a_running_encrypted_vm_uses_the_suspend_flow(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_vmrun.encrypted_live_snapshot_fails = True
+    await service.call("snap_take", {"vm": "win11-dev", "name": "live1", "allow_suspend": True})
+    fake_vmrun.calls.clear()
+    result = await service.call(
+        "snap_take",
+        {
+            "vm": "win11-dev",
+            "name": "live1",
+            "description": "v2",
+            "replace": True,
+            "allow_suspend": True,
+        },
+    )
+    assert result["created"] is True and result["replaced"] is True
+    assert result["via"] == "suspend-resume" and result["memory_included"] is True
+    # The delete and the retake joined one suspend-resume cycle, and the VM is back.
+    assert _calls(fake_vmrun, "suspend") == 1 and _calls(fake_vmrun, "start") == 1
+    assert fake_vmrun.running and not fake_vmrun.suspended
+
+
+async def test_snap_take_names_a_leftover_from_a_refused_live_take(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    """The live 2026-10-02 trap: the refused call still left the snapshot, memory unknown."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_vmrun.encrypted_live_snapshot_fails = True
+    fake_vmrun.live_snapshot_leftover = True
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("snap_take", {"vm": "win11-dev", "name": "live3"})
+    assert exc.value.code == BACKEND_ERROR
+    assert "left live3 in the tree" in exc.value.message
+    assert "replace=true" in exc.value.hint and "allow_suspend=true" in exc.value.hint
+    # Without the record, a plain retry reports the leftover instead of "name already exists".
+    again = await service.call("snap_take", {"vm": "win11-dev", "name": "live3"})
+    assert again["created"] is False and "unknown" in again["note"]
+    # The explicit fix converges: delete the leftover and retake with memory.
+    fixed = await service.call(
+        "snap_take",
+        {"vm": "win11-dev", "name": "live3", "replace": True, "allow_suspend": True},
+    )
+    assert fixed["created"] is True and fixed["via"] == "suspend-resume"
 
 
 async def test_hard_reboot_that_powers_off_is_noticed_and_started(

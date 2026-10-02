@@ -227,6 +227,12 @@ seconds, reattaches the debugger and reopens terminals for you. Remember the rev
   starved or dropped the result still carries them with `state: unconfirmed`. The process is almost
   certainly running. Do NOT re-run (that spawns a second instance that pins the CPU further): read
   the log with `file_pull`, or `term_exec "schtasks /query /tn <task>"` once the guest frees up.
+- **A signed-out desktop fails at launch now.** The daemon probes the interactive session (`quser`)
+  before scheduling, so an idle-logoff'd desktop or a revert that dropped autologon raises
+  `backend_error` with the fix (`con_autologon`, then `vm_reboot mode=soft`) instead of a 0x41303
+  task status after the wait, or a detached log that stays 0 bytes and reads as a silent crash.
+  When it happens mid-loop, reboot to heal (autologon in the disk re-signs-in and pushed files
+  survive). Re-revert only when the guest state itself is contaminated, not for a session drop.
 - **Recover a broken guest with `snap_revert`, not repeated `vm_reboot mode=hard`.** A hard reset
   during active disk I/O can leave the guest wedged in chkdsk or a boot loop, and repeating it makes
   it worse. A `snap_revert` to a known-good snapshot restores it in seconds.
@@ -333,6 +339,12 @@ is the result it would have returned, `error.power` is where the VM was left (`s
 `error.resume_error.reason` (or a later `vm_start` error) is `saved_state_stale`, the vmx names
 a saved state Workstation cannot restore: `vm_start discard_saved_state=true` boots fresh from
 the disk, and the snapshot keeps the memory state. `sys_health` reports such a leftover too.
+
+A refused live take can still leave the snapshot in the tree (vmrun partial work): `snap_take`
+then fails naming the leftover, and the fix is `replace=true` with `allow_suspend=true`. Taking a
+name that already exists is otherwise a report, not an error: `created=false` with the stored
+facts, so a milestone checkpoint call is safe to repeat. `replace=true` deletes and retakes, in
+one suspend-resume cycle when the suspend flow is needed.
 
 ## Files
 

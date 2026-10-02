@@ -32,6 +32,7 @@ from ntdrive.errors import (
     REASON_GUEST_ACCESS,
     REASON_PASSWORD_REQUIRED,
     REASON_SAVED_STATE_STALE,
+    REASON_SNAPSHOT_EXISTS,
     REASON_SNAPSHOT_MISSING,
     TIMEOUT,
     VM_NOT_RUNNING,
@@ -105,6 +106,13 @@ def classify_vmrun_error(output: str) -> tuple[str, str]:
         return REASON_CONFIG_UNREADABLE, "retry in a moment; the vmx is being rewritten"
     if "the snapshot does not exist" in low:
         return REASON_SNAPSHOT_MISSING, "call snap_list for the names that exist"
+    if "name already exists" in low:
+        # vmrun refuses to snapshot a name that is already in the tree. snap_take normally
+        # pre-flights this away; seeing it here means a race or a leftover from a failed attempt.
+        return REASON_SNAPSHOT_EXISTS, (
+            "a snapshot with that name is already in the tree: snap_take replace=true deletes "
+            "and retakes it, or snap_delete it first"
+        )
     if any(
         s in low
         for s in ("used by another", "being used", "in use", "access is denied", "access rights")

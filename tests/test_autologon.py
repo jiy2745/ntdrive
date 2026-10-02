@@ -191,3 +191,56 @@ async def test_con_run_standard_without_an_account_is_an_error(
     with pytest.raises(NtDriveError) as exc:
         await service.call("con_run", {"vm": "win11-dev", "cmd": "whoami", "account": "standard"})
     assert exc.value.code == "invalid_args"
+
+
+async def test_con_run_fails_fast_when_the_desktop_session_is_gone(
+    service: NtDriveService, fake_transport: FakeTransport, fake_vmrun: FakeVmrun
+) -> None:
+    """A signed-out desktop must fail at launch, not as a 0x41303 status or an empty log."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_transport.exec_responses["quser"] = "No User exists for *\r\n"
+    fake_transport.exec_log.clear()
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("con_run", {"vm": "win11-dev", "cmd": "whoami", "account": "admin"})
+    assert exc.value.code == "backend_error"
+    assert "no interactive session" in exc.value.message
+    assert "con_autologon" in exc.value.hint and "vm_reboot" in exc.value.hint
+    # The probe fires before anything is scheduled, so no task and no log are left behind.
+    assert not any("Register-ScheduledTask" in c for c in fake_transport.exec_log)
+
+
+async def test_con_run_skips_the_probe_when_the_guest_cannot_answer_it(
+    service: NtDriveService, fake_transport: FakeTransport, fake_vmrun: FakeVmrun
+) -> None:
+    """quser missing or the probe starved must never block the launch itself."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    fake_transport.exec_responses["quser"] = "quser : The term 'quser' is not recognized.\r\n"
+    fake_transport.exec_responses["$ErrorActionPreference='Stop'"] = (
+        "NTDRIVE_RC=0 STATE=Ready\nNTDRIVE_OUT_BEGIN\n"
+    )
+    result = await service.call("con_run", {"vm": "win11-dev", "cmd": "whoami", "account": "admin"})
+    assert result["exit_code"] == 0
+
+
+async def test_con_run_probe_timeout_does_not_block_the_launch(
+    service: NtDriveService,
+    fake_transport: FakeTransport,
+    fake_vmrun: FakeVmrun,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ntdrive.errors import TIMEOUT
+
+    await service.call("vm_start", {"vm": "win11-dev"})
+    real = fake_transport.exec_once
+
+    async def probe_times_out(command: str, timeout: float = 60.0) -> tuple[int, str]:
+        if command.startswith("quser"):
+            raise NtDriveError(TIMEOUT, "the guest did not answer the probe")
+        return await real(command, timeout)
+
+    monkeypatch.setattr(fake_transport, "exec_once", probe_times_out)
+    fake_transport.exec_responses["$ErrorActionPreference='Stop'"] = (
+        "NTDRIVE_RC=0 STATE=Ready\nNTDRIVE_OUT_BEGIN\n"
+    )
+    result = await service.call("con_run", {"vm": "win11-dev", "cmd": "whoami", "account": "admin"})
+    assert result["exit_code"] == 0

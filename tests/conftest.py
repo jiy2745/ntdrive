@@ -34,6 +34,8 @@ class FakeVmrun:
         self.saw_vp = False
         self.vp_value = ""
         self.encrypted_live_snapshot_fails = False
+        # Seen live 2026-10-02: vmrun refuses the live snapshot but still leaves it in the tree.
+        self.live_snapshot_leftover = False
         self.auth_fails = False  # when True, listSnapshots reports an encryption-auth failure
         # Number of calls right after a suspend that fail with the transient vmx error.
         self.config_unreadable_after_suspend = 0
@@ -105,7 +107,11 @@ class FakeVmrun:
             # Emulate the encrypted-VM quirk: a live snapshot of a running VM is refused, but a
             # snapshot while suspended or off works. Toggle with encrypted_live_snapshot_fails.
             if self.encrypted_live_snapshot_fails and self.running and not self.suspended:
+                if self.live_snapshot_leftover:
+                    self.snapshots.append((rest[1], 0))
                 return 4294967295, "Error: Authentication for encrypted virtual machine failed"
+            if rest[1] in [n for n, _ in self.snapshots]:
+                return 4294967295, "Error: The name already exists"
             self.snapshots.append((rest[1], 0))
             return 0, ""
         if cmd == "listSnapshots":
@@ -336,6 +342,13 @@ class FakeTransport(TermTransport):
         for prefix, out in self.exec_responses.items():
             if command.startswith(prefix):
                 return 0, out
+        if command.startswith("quser"):
+            # con_run's session probe. The default fake has the admin account signed in on the
+            # console; a test overrides exec_responses["quser"] to sign the desktop out.
+            return 0, (
+                " USERNAME SESSIONNAME ID STATE IDLE TIME LOGON TIME\r\n"
+                " dev console 1 Active none 10/2/2026 9:00 AM\r\n"
+            )
         return 0, "The operation completed successfully.\n"
 
 

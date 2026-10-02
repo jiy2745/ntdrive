@@ -37,6 +37,8 @@ REASON_ENCRYPTED_LIVE = "encrypted_live_snapshot"
 REASON_PASSWORD_REQUIRED = "password_required"
 REASON_CONFIG_UNREADABLE = "config_unreadable"
 REASON_SNAPSHOT_MISSING = "snapshot_missing"
+# A snapshot with the requested name is already in the tree.
+REASON_SNAPSHOT_EXISTS = "snapshot_name_exists"
 REASON_GUEST_ACCESS = "guest_access_denied"
 # The vmx names a saved state (checkpoint.vmState) that is not a .vmss next to it, so a
 # start cannot resume it. vm_start discard_saved_state=true boots fresh from the disk.

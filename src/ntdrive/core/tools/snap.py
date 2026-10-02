@@ -20,6 +20,7 @@ from ntdrive.errors import (
     BACKEND_ERROR,
     REASON_CONFIG_UNREADABLE,
     REASON_ENCRYPTED_LIVE,
+    REASON_SNAPSHOT_EXISTS,
     REASON_SNAPSHOT_MISSING,
     SNAPSHOT_NOT_FOUND,
     NtDriveError,
@@ -194,6 +195,14 @@ class SnapTakeParams(SnapNameParams):
     """snap_take."""
 
     description: str = Field(default="", description="Free text stored with the snapshot")
+    replace: bool = Field(
+        default=False,
+        description=(
+            "When the name already exists: false (default) reports the existing snapshot with "
+            "created=false and changes nothing; true deletes it and takes a fresh one. On a "
+            "running encrypted VM the delete joins the allow_suspend flow"
+        ),
+    )
     allow_suspend: bool = Field(
         default=False,
         description=(
@@ -244,7 +253,8 @@ async def snap_list(service: NtDriveService, p: VmParams) -> dict[str, Any]:
 @tool(
     "snap_take",
     "Take a snapshot (memory included while running), record description and kd state, and "
-    "return the snapshot list.",
+    "return the snapshot list. A name that already exists is reported with created=false "
+    "instead of erroring, and replace=true deletes it and retakes.",
     SnapTakeParams,
     positional=("vm", "name"),
     effect="additive",
@@ -255,26 +265,94 @@ async def snap_take(service: NtDriveService, p: SnapTakeParams) -> dict[str, Any
     vmrun refuses a live memory snapshot of a running encrypted VM. With allow_suspend the VM is
     suspended (its running state is written to the encrypted .vmss), snapshotted, then resumed,
     which captures the live state headlessly with only the encryption password.
+
+    A refused live take can still leave the snapshot in the tree (seen live 2026-10-02), so a
+    retry used to hit "name already exists" with nobody able to tell which call captured the
+    memory. Taking an existing name is therefore a report, not an error: created=false with the
+    stored facts, or a note that it is an unrecorded leftover. replace=true is the explicit
+    delete-and-retake.
     """
     cfg = service.vm_cfg(p.vm)
     adapter = service.adapter_for(cfg)
     power_before = await service.refresh_power(cfg)
+    existing = False
+    tree: Any = None
+    try:
+        tree = await adapter.snapshot_list(cfg)
+        existing = p.name in tree.names()
+    except NtDriveError:
+        # The tree cannot be read (an encrypted-VM auth failure, say): fall through, the take
+        # itself surfaces that error with its own classification.
+        pass
+    if existing and not p.replace:
+        recorded = service.load_snapshot_meta(p.vm).get(p.name)
+        result: dict[str, Any] = {
+            "vm": p.vm,
+            "name": p.name,
+            "created": False,
+            "snapshots": tree.names(),
+            "current": tree.current,
+        }
+        if recorded:
+            result.update(recorded)
+            result["note"] = (
+                "a snapshot with this name already exists and was left untouched; pass "
+                "replace=true to delete it and take a fresh one"
+            )
+        else:
+            result["note"] = (
+                "a snapshot with this name exists but ntdrive never recorded creating it (left "
+                "behind by a failed attempt), so whether it holds memory is unknown; pass "
+                "replace=true to delete it and take a fresh one"
+            )
+        service.state.record_event(p.vm, "snapshot_take", snapshot=p.name, via="existing")
+        return result
+
     runtime = service.runtime(p.vm)
     kd_state_before = str(runtime.kd_state)
     detail: dict[str, Any] = {"via": "direct"}
+
+    async def present() -> bool:
+        return p.name in (await adapter.snapshot_list(cfg)).names()
+
     try:
+        if existing:
+            await adapter.snapshot_delete(cfg, p.name)
         await adapter.snapshot_take(cfg, p.name)
     except NtDriveError as exc:
+        if exc.reason != REASON_ENCRYPTED_LIVE:
+            raise
+        leftover = False
+        if not existing:
+            with contextlib.suppress(NtDriveError):
+                leftover = await present()
+        if leftover:
+            raise NtDriveError(
+                BACKEND_ERROR,
+                f"vmrun refused the live snapshot of {p.vm} but left {p.name} in the tree, most "
+                "likely without memory",
+                "retry with allow_suspend=true and replace=true to delete the leftover and take "
+                "a snapshot with memory included",
+            ) from exc
         if not _needs_suspend(exc, p.allow_suspend, power_before):
             raise
 
-        # Suspend serializes memory into the encrypted .vmss, which vmrun can snapshot.
-        async def present() -> bool:
-            return p.name in (await adapter.snapshot_list(cfg)).names()
+        async def op() -> None:
+            if existing:
+                try:
+                    await adapter.snapshot_delete(cfg, p.name)
+                except NtDriveError as exc2:
+                    if exc2.reason != REASON_SNAPSHOT_MISSING:
+                        raise
+            try:
+                await adapter.snapshot_take(cfg, p.name)
+            except NtDriveError as exc3:
+                # A leftover from an earlier partial take makes vmrun refuse the name; `done`
+                # (the tree) decides whether the flow already reached its goal.
+                if exc3.reason != REASON_SNAPSHOT_EXISTS:
+                    raise
 
-        detail = await _suspend_run_resume(
-            service, cfg, lambda: adapter.snapshot_take(cfg, p.name), present
-        )
+        detail = await _suspend_run_resume(service, cfg, op, present)
     entry = {
         "description": p.description,
         "taken_at": time.time(),
@@ -288,7 +366,9 @@ async def snap_take(service: NtDriveService, p: SnapTakeParams) -> dict[str, Any
     service.save_snapshot_meta(p.vm, meta)
     runtime.current_snapshot = p.name
     service.state.record_event(p.vm, "snapshot_take", snapshot=p.name, via=detail["via"])
-    result = {"vm": p.vm, "name": p.name, **entry, **_extra(detail)}
+    result = {"vm": p.vm, "name": p.name, "created": True, **entry, **_extra(detail)}
+    if existing:
+        result["replaced"] = True
     # The list proves the snapshot exists, so the caller need not call snap_list to check.
     with contextlib.suppress(NtDriveError):
         tree = await adapter.snapshot_list(cfg)

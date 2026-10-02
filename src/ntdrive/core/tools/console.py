@@ -100,6 +100,52 @@ def _ps_literal(value: str) -> str:
 # preempt the command whenever it has work, so a CPU-bound race loop stops starving them.
 _TASK_PRIORITY = {"normal": 5, "below_normal": 7, "idle": 10}
 
+# con_run's pre-flight: quser lists the logged-on sessions. A scheduled task with LogonType
+# Interactive can only run inside one, so a signed-out desktop (idle logoff after 20-40 min, or
+# autologon lost to a revert) is the one state con_run cannot work in. Without the probe it
+# surfaced as a 0x41303 task status after the wait, or in detach mode as a 0-byte log that never
+# fills, which reads as "the exe crashed silently".
+_SESSION_PROBE = "quser"
+_SESSION_PROBE_TIMEOUT = 10.0
+
+
+def _row_is_user(token: str, name: str) -> bool:
+    """A quser row's first field is the account name; a truncated long name comes back cut."""
+    low = token.lower()
+    return low == name or (low.endswith("..") and name.startswith(low[:-2]))
+
+
+def _session_present(out: str, user: str) -> bool | None:
+    """True or False from quser output, None when the guest could not run the probe."""
+    if "not recognized" in out.lower():
+        return None
+    name = user.lower()
+    for line in out.splitlines():
+        tokens = line.split()
+        # A connected or disconnected row both count: an interactive task runs in either. The
+        # localized or English header row never starts with the account name.
+        if tokens and _row_is_user(tokens[0], name):
+            return True
+    return False
+
+
+async def _ensure_interactive_session(transport: Any, vm: str, user: str) -> None:
+    """Fail loudly before scheduling when `user` has no interactive session in the guest."""
+    try:
+        _, out = await transport.exec_once(_SESSION_PROBE, timeout=_SESSION_PROBE_TIMEOUT)
+    except NtDriveError:
+        # The probe is advisory: a starved or rebooting guest must not be blocked by it, and the
+        # launch itself will surface the real SSH error.
+        return
+    if _session_present(out, user) is False:
+        raise NtDriveError(
+            BACKEND_ERROR,
+            f"{vm} has no interactive session for {user}: the desktop signed out (idle logoff) "
+            "or autologon is not in the disk, so a scheduled task with LogonType Interactive "
+            "has nowhere to run",
+            "run con_autologon for this account, vm_reboot mode=soft to sign in again, then retry",
+        )
+
 
 class RunParams(VmParams):
     """con_run."""
@@ -545,8 +591,9 @@ async def _con_run_detached(
     "con_run",
     "Run a command on the guest's interactive desktop (session 1) and return its output, for GUI "
     "or session-bound programs that SSH in session 0 cannot open. It runs through a scheduled "
-    "task in the logged-on user's session, so the account must be logged in (con_autologon). "
-    "detach=true starts it and returns at once, leaving it running.",
+    "task in the logged-on user's session, so the account must be logged in (con_autologon). A "
+    "missing session fails fast at launch with that hint. detach=true starts it and returns at "
+    "once, leaving it running.",
     RunParams,
     positional=("vm", "cmd"),
     touches_guest=True,
@@ -569,6 +616,7 @@ async def con_run(service: NtDriveService, p: RunParams) -> dict[str, Any]:
     transport = await service.transport(cfg)
     if not hasattr(transport, "exec_once"):
         raise NtDriveError(BACKEND_ERROR, "the transport cannot run commands")
+    await _ensure_interactive_session(transport, p.vm, user)
     task = f"ntdrive_run_{secrets.token_hex(4)}"
     log = f"C:\\Users\\Public\\{task}.log"  # world-readable, so admin SSH reads what the user ran
     run_level = "Highest" if p.account == "admin" else "Limited"
