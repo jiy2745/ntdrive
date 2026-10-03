@@ -218,6 +218,18 @@ that needs many fresh landings.
   `term_exec` failing with `backend_error`. `exec_once` now drops the stale client and reconnects
   once on a dropped link. If a call still fails, the guest is genuinely mid-reboot: wait, or
   `snap_revert` to reset. `file_push`/`file_pull` were always immune (each opens its own channel).
+- **SSH that resets (10054) after a revert while file ops still work is the Public-profile trap, and
+  it is a one-time guest fix.** On a resume or a NIC re-detect Windows can classify the network as
+  Public, and the default Windows OpenSSH rule is scoped to Private/Domain, so inbound 22 is blocked
+  and the host's SSH is reset, while `file_push`/`file_pull` keep working over the VMware Tools
+  fallback (slower, not a blocker). `scripts/setup-guest.ps1` already scopes the rule to every
+  profile (`-Profile Any`), so a guest set up with the current script is immune. A snapshot baked
+  before that still has the default scope, so widen the rule once on the running guest and re-bake:
+  `term_exec` (or `con_run`) `Set-NetFirewallRule -Name OpenSSH-Server-In-TCP -Enabled True -Profile
+  Any` as admin, confirm SSH is steady, then `snap_take` with memory. After that the profile no
+  longer matters on any revert of that snapshot. If SSH is down right now because the network is
+  already Public, flip it back first (`Set-NetConnectionProfile -NetworkCategory Private` over the
+  VNC console, or just re-revert, which often comes back Private) so the command can land.
 - **Know which user runs your command.** `con_run` runs in the interactive desktop account (the one
   autologon signed in, standard by default), while `term_*` run as the admin SSH account, so a
   per-user resource (a Cloud Files sync root, a per-user registry key) made by one is invisible to
