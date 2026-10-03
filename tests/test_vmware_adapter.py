@@ -218,6 +218,38 @@ async def test_vm_stop_kill_ends_the_vmx_process_and_clears_locks(
     assert not (folder / "win11-dev.vmx.lck").exists() and (folder / "keep.txt").exists()
 
 
+async def test_vm_stop_kill_retries_a_transient_access_denied(
+    service: NtDriveService, config: Config, fake_vmrun: FakeVmrun, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A momentary AccessDenied while vmware-vmx tears down must not need a manual second call."""
+    import psutil
+
+    await service.call("vm_start", {"vm": "win11-dev"})
+
+    class _FlakyProc:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+            self.kills = 0
+            self.waited: float | None = None
+
+        def kill(self) -> None:
+            self.kills += 1
+            if self.kills == 1:
+                raise psutil.AccessDenied(self.pid)  # transient, clears on the retry
+            fake_vmrun.running = False
+
+        def wait(self, timeout: float | None = None) -> None:
+            self.waited = timeout
+
+    proc = _FlakyProc(7777)
+    monkeypatch.setattr(vmware_mod, "find_vmx_processes", lambda vmx: [proc])
+    done = await service.call("vm_stop", {"vm": "win11-dev", "mode": "kill", "confirm": True})
+    # The retry ended it directly: no vmrun fallback, no access_denied, no manual second call.
+    assert done["killed"] == [7777] and proc.kills == 2
+    assert "access_denied" not in done and done.get("via") != "vmrun_stop_hard"
+    assert done["power"] == "off"
+
+
 async def test_vmrun_timeout_points_at_the_kill_path(config: Config) -> None:
     async def hung(argv: list[str], timeout: float) -> tuple[int, str]:
         raise NtDriveError(TIMEOUT, "vmrun.exe timed out after 180s")

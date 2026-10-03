@@ -200,6 +200,17 @@ it with memory included, and `snap_revert` to that snapshot instead of rebooting
 seconds, reattaches the debugger and reopens terminals for you. Remember the revert restores the
 **disk** too, so re-push anything built since that snapshot.
 
+This is also how you attach kd to an "already booted" guest without the KDNET boot-only handshake
+getting in the way, and how you hold KASLR still. KDNET only announces itself at boot, so you cannot
+cold-attach to a guest that booted without kd. But a memory snapshot freezes a guest that was
+already kd-connected, and `snap_revert` respawns kd.exe and reconnects by breaking in (it does not
+wait for the one-time banner), so the debugger is back in seconds against the same running image. A
+memory snapshot restores the same memory every time, so `nt` and the session bases do not move
+across reverts: resolve `nt` once on that snapshot and reuse it, instead of rebooting (which
+re-randomizes KASLR) to take each sample. Reverting is also far faster than a cold
+`kill -> start -> wait-ready -> settle` cycle, so prefer a ready-state snapshot for any workflow
+that needs many fresh landings.
+
 ### Running commands in the guest: channel and user
 
 - **The exec link self-heals now.** After a revert or reboot the guest's SSH is gone but the cached

@@ -829,6 +829,27 @@ class VmwareAdapter(HypervisorAdapter):
 
         return await asyncio.to_thread(sample)
 
+    async def _kill_with_retry(
+        self, proc: psutil.Process, attempts: int = 4, delay: float = 0.3
+    ) -> bool:
+        """Kill one process, retrying a transient AccessDenied before giving up.
+
+        vmware-vmx can report AccessDenied for a moment while it tears down (a handle or a child in
+        transition), then be killable, which is why a single vm_stop mode=kill sometimes needed a
+        manual retry. A genuine privilege denial (an unelevated daemon against an elevated
+        vmware-vmx) persists through every attempt, and the caller then falls back to vmrun stop
+        hard. NoSuchProcess propagates: the process is already gone, which is the goal.
+        """
+        for attempt in range(attempts):
+            try:
+                proc.kill()
+                return True
+            except psutil.AccessDenied:
+                if attempt == attempts - 1:
+                    return False
+                await asyncio.sleep(delay)
+        return False
+
     async def kill(self, vm: VmConfig) -> dict[str, Any]:
         """End the VM's vmware-vmx process on the host and clear its stale lock files.
 
@@ -841,14 +862,12 @@ class VmwareAdapter(HypervisorAdapter):
         denied: list[int] = []
         for proc in procs:
             with contextlib.suppress(psutil.NoSuchProcess):
-                try:
-                    proc.kill()
-                except psutil.AccessDenied:
-                    # vmware-vmx runs at a level an unelevated daemon cannot end. Swallowing this
-                    # made the documented escape hatch report success while killing nothing.
+                # A short retry absorbs a transient AccessDenied during teardown, so the common
+                # case ends the process directly instead of needing vmrun or a manual second call.
+                if await self._kill_with_retry(proc):
+                    killed.append(proc.pid)
+                else:
                     denied.append(proc.pid)
-                    continue
-                killed.append(proc.pid)
         for proc in procs:
             with contextlib.suppress(psutil.NoSuchProcess, psutil.TimeoutExpired):
                 await asyncio.to_thread(proc.wait, 10)
