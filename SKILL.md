@@ -211,6 +211,14 @@ re-randomizes KASLR) to take each sample. Reverting is also far faster than a co
 `kill -> start -> wait-ready -> settle` cycle, so prefer a ready-state snapshot for any workflow
 that needs many fresh landings.
 
+One caveat: a memory snapshot freezes more than KASLR. The heap layout, the kLFH state, timer
+phases and scheduler timing are all restored identically, so timing-sensitive code behaves
+differently on a frozen revert than on a fresh boot. An exploit that races a window, depends on
+kLFH bucket churn, leaks through a cache-timing side channel (EntryBleed), or trips a
+compaction/`0x7E` path can be distorted or masked by the frozen state. Use a ready-state snapshot
+for fast iteration and for anything that just needs a known layout, but validate a timing-dependent
+result against a fresh soft reboot before trusting it.
+
 ### Running commands in the guest: channel and user
 
 - **The exec link self-heals now.** After a revert or reboot the guest's SSH is gone but the cached
@@ -286,6 +294,11 @@ long session:
   `nt!ExAllocatePool2`, `nt!ExFreePool*` and anything in an allocation, DPC or interrupt path are
   the usual traps.
 - **A tight user-mode spin does the same.** Always `SwitchToThread()` in a spin loop.
+- **Attaching or breaking a CPU-saturated guest also `0x80` NMIs it.** A `kd_attach` (it probes by
+  breaking in) or a `kd_break` while a race or fuzz loop pins every core stalls a vCPU the watchdog
+  then kills. Check `vm_state probe=true` first: a high `host_cpu_percent` means wait for the run to
+  finish, or stop the load, before attaching or breaking. This is the same NMI as a hot breakpoint,
+  reached a different way.
 - **KDNET attaching during boot often bugchecks the guest** (seen on 4 of 6 `vm_reboot
   reattach_kd=true` attempts, also `0x80`). A second reboot comes up fine, so reboot again rather
   than digging into the first crash.

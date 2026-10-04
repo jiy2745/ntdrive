@@ -159,19 +159,23 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
             size = os.path.getsize(local)
             by_tools = True
         entry: dict[str, Any] = {"local": local, "remote": remote, "bytes": size}
-        if by_tools and p.verify:
-            tools_copied.append((entry, local, remote))
         ok: bool | None = None
-        if p.verify and transport is not None:
+        if p.verify and by_tools:
+            tools_copied.append((entry, local, remote))  # hashed in the guest batch below
+        elif p.verify and transport is not None:
+            remote_hash = None
             try:
                 remote_hash = await transport.remote_sha256(remote)
             except _SFTP_FAILURES as exc:
-                remote_hash = None
-                entry["verify_error"] = str(exc)
-                hash_failures += 1
+                # The copy may be fine but the SFTP read failed, or the copy is genuinely corrupt.
+                # Either way, do not leave it unverified: rehash through guest tools, which decides.
+                # A silent verified:null once let a corrupt pushed exe read as merely unchecked.
+                entry["verify_note"] = f"sftp hash failed ({exc}); rehashed with guest tools"
             if remote_hash is not None:
                 ok = remote_hash == await _sha256_async(local)
                 verified += 1 if ok else 0
+            else:
+                tools_copied.append((entry, local, remote))
         entry["verified"] = ok
         total += size
         copied.append(entry)

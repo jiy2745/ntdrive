@@ -175,12 +175,16 @@ class SshPtyTransport(TermTransport):
         password: str,
         connect_timeout: float = 10.0,
         host_key_file: Path | None = None,
+        sftp_timeout: float = 60.0,
     ) -> None:
         self.host = host
         self.port = port
         self.user = user
         self._password = password
         self.connect_timeout = connect_timeout
+        # Idle timeout on an SFTP channel: a half-open socket (guest gone after a revert) must fail
+        # a read in seconds, not block for the OS TCP timeout, which stranded file_pull for ~660 s.
+        self.sftp_timeout = sftp_timeout
         # None (tests, ad hoc use) accepts any host key. The daemon always pins per VM.
         self.host_key_file = host_key_file
         self._client: paramiko.SSHClient | None = None
@@ -278,132 +282,127 @@ class SshPtyTransport(TermTransport):
                     self._client.close()
                 self._client = None
 
-    async def _sftp(self) -> paramiko.SFTPClient:
-        client = await self._ensure()
+    async def _sftp_do[T](
+        self, what: str, hint: str, work: Callable[[paramiko.SFTPClient], T]
+    ) -> T:
+        """Run a blocking SFTP operation, reconnecting once if the cached link went stale.
+
+        SFTP opens a fresh channel per call but over the SAME cached transport, so after a revert or
+        reboot the first transfer hits the dead transport and fails (often WinError 10054), which
+        used to drop straight to the slower guest-tools path or, on a half-open socket, hang until
+        the OS TCP timeout (the ~660 s file_pull stall). Like exec_once, drop the stale client and
+        try once on a fresh connection, and give the channel an idle timeout so a dead socket fails
+        in seconds. `work` must not close the sftp client: this wrapper owns its lifetime.
+        """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None,
-            lambda: _guarded(
-                "opening sftp",
-                "the guest sshd must have the sftp subsystem enabled (Win32-OpenSSH default)",
-                client.open_sftp,
-            ),
-        )
+
+        def _run(client: paramiko.SSHClient) -> T:
+            sftp = client.open_sftp()
+            try:
+                channel = sftp.get_channel()
+                if channel is not None:
+                    channel.settimeout(self.sftp_timeout)
+                return work(sftp)
+            finally:
+                with contextlib.suppress(Exception):
+                    sftp.close()
+
+        for attempt in (1, 2):
+            client = await self._ensure()
+            try:
+                return await loop.run_in_executor(None, functools.partial(_run, client))
+            except _DROPPED_LINK as exc:
+                await self.close()  # drop the stale client so _ensure reconnects fresh
+                if attempt == 2:
+                    raise NtDriveError(
+                        BACKEND_ERROR,
+                        f"{what} failed after a reconnect: {exc}",
+                        hint
+                        or "the guest may still be rebooting; retry or snap_revert to reset it",
+                    ) from exc
+            except NtDriveError:
+                raise
+            except Exception as exc:
+                raise NtDriveError(BACKEND_ERROR, f"{what} failed: {exc}", hint) from exc
+        raise AssertionError("unreachable")
 
     async def put_file(self, local: str, remote: str) -> int:
         """Upload one file with SFTP, creating the remote directory when needed."""
-        sftp = await self._sftp()
-        loop = asyncio.get_running_loop()
         target = _sftp_path(remote)
 
-        def _put() -> int:
-            try:
-                _mkdirs(sftp, _remote_dirname(target))
-                sftp.put(local, target)
-                return os.path.getsize(local)
-            finally:
-                sftp.close()
+        def _put(sftp: paramiko.SFTPClient) -> int:
+            _mkdirs(sftp, _remote_dirname(target))
+            sftp.put(local, target)
+            return os.path.getsize(local)
 
-        return await loop.run_in_executor(None, lambda: _guarded(f"sftp put {target}", "", _put))
+        return await self._sftp_do(f"sftp put {target}", "", _put)
 
     async def get_file(self, remote: str, local: str) -> int:
         """Download one file with SFTP."""
-        sftp = await self._sftp()
-        loop = asyncio.get_running_loop()
         source = _sftp_path(remote)
 
-        def _get() -> int:
-            try:
-                os.makedirs(os.path.dirname(os.path.abspath(local)) or ".", exist_ok=True)
-                sftp.get(source, local)
-                return os.path.getsize(local)
-            finally:
-                sftp.close()
+        def _get(sftp: paramiko.SFTPClient) -> int:
+            os.makedirs(os.path.dirname(os.path.abspath(local)) or ".", exist_ok=True)
+            sftp.get(source, local)
+            return os.path.getsize(local)
 
-        return await loop.run_in_executor(
-            None,
-            lambda: _guarded(
-                f"sftp get {source}",
-                "check the guest path; the guest-tools fallback runs next",
-                _get,
-            ),
+        return await self._sftp_do(
+            f"sftp get {source}", "check the guest path; the guest-tools fallback runs next", _get
         )
 
     async def remote_sha256(self, remote: str) -> str | None:
         """Hash a remote file by streaming it through SFTP."""
-        sftp = await self._sftp()
-        loop = asyncio.get_running_loop()
         source = _sftp_path(remote)
 
-        def _hash() -> str:
+        def _hash(sftp: paramiko.SFTPClient) -> str:
             digest = hashlib.sha256()
-            try:
-                with sftp.open(source, "rb") as fh:
-                    fh.prefetch()
-                    while True:
-                        chunk = fh.read(1 << 20)
-                        if not chunk:
-                            break
-                        digest.update(chunk)
-            finally:
-                sftp.close()
+            with sftp.open(source, "rb") as fh:
+                fh.prefetch()
+                while True:
+                    chunk = fh.read(1 << 20)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
             return digest.hexdigest()
 
-        return await loop.run_in_executor(None, lambda: _guarded(f"sftp read {source}", "", _hash))
+        return await self._sftp_do(f"sftp read {source}", "", _hash)
 
     async def stat_file(self, remote: str) -> dict[str, Any] | None:
         """SFTP stat; None when the path does not exist."""
-        sftp = await self._sftp()
-        loop = asyncio.get_running_loop()
         source = _sftp_path(remote)
 
-        def _stat() -> dict[str, Any] | None:
+        def _stat(sftp: paramiko.SFTPClient) -> dict[str, Any] | None:
             try:
-                try:
-                    attr = sftp.stat(source)
-                except FileNotFoundError:
-                    return None
-                d = _attr_dict(remote.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1], attr)
-                d.pop("name")
-                return d
-            finally:
-                sftp.close()
+                attr = sftp.stat(source)
+            except FileNotFoundError:
+                return None
+            d = _attr_dict(remote.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1], attr)
+            d.pop("name")
+            return d
 
-        return await loop.run_in_executor(None, lambda: _guarded(f"sftp stat {source}", "", _stat))
+        return await self._sftp_do(f"sftp stat {source}", "", _stat)
 
     async def list_dir(self, remote: str) -> list[dict[str, Any]]:
         """SFTP directory listing."""
-        sftp = await self._sftp()
-        loop = asyncio.get_running_loop()
         source = _sftp_path(remote)
 
-        def _list() -> list[dict[str, Any]]:
-            try:
-                return [_attr_dict(a.filename, a) for a in sftp.listdir_attr(source)]
-            finally:
-                sftp.close()
+        def _list(sftp: paramiko.SFTPClient) -> list[dict[str, Any]]:
+            return [_attr_dict(a.filename, a) for a in sftp.listdir_attr(source)]
 
-        return await loop.run_in_executor(
-            None, lambda: _guarded(f"sftp list {source}", "check the guest path", _list)
-        )
+        return await self._sftp_do(f"sftp list {source}", "check the guest path", _list)
 
     async def delete_file(self, remote: str, recurse: bool = False) -> None:
         """Remove a remote file or directory; FileNotFoundError when absent."""
-        sftp = await self._sftp()
-        loop = asyncio.get_running_loop()
         target = _sftp_path(remote)
 
-        def _delete() -> None:
-            try:
-                attr = sftp.stat(target)  # raises FileNotFoundError when absent
-                if attr.st_mode and statmod.S_ISDIR(attr.st_mode):
-                    _sftp_rmtree(sftp, target) if recurse else sftp.rmdir(target)
-                else:
-                    sftp.remove(target)
-            finally:
-                sftp.close()
+        def _delete(sftp: paramiko.SFTPClient) -> None:
+            attr = sftp.stat(target)  # raises FileNotFoundError when absent
+            if attr.st_mode and statmod.S_ISDIR(attr.st_mode):
+                _sftp_rmtree(sftp, target) if recurse else sftp.rmdir(target)
+            else:
+                sftp.remove(target)
 
-        await loop.run_in_executor(None, lambda: _guarded(f"sftp delete {target}", "", _delete))
+        await self._sftp_do(f"sftp delete {target}", "", _delete)
 
     async def exec_once(self, command: str, timeout: float = 60.0) -> tuple[int, str]:
         """Run a non-interactive command, reconnecting once if the cached link went stale.

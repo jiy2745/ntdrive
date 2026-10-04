@@ -352,6 +352,45 @@ async def test_revert_flow_restores_kd_and_terminal(
     assert {s["session_id"] for s in listing["sessions"]} == {opened["session_id"], new_sid}
 
 
+async def test_snap_revert_warns_when_kd_snapshot_reverted_without_reattach(
+    service: NtDriveService,
+    fake_vmrun: FakeVmrun,
+    kd_procs: list[FakeKdProcess],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A memory snapshot taken with kd attached, reverted with reattach_kd=false, can spin the guest."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("snap_take", {"vm": "win11-dev", "name": "dbg"})
+
+    import ntdrive.term.manager as manager_mod
+
+    async def fake_wait(host: str, port: int, timeout: float, interval: float = 2.0) -> bool:
+        return True
+
+    monkeypatch.setattr(manager_mod, "wait_for_port", fake_wait)
+
+    result = await service.call(
+        "snap_revert",
+        {
+            "vm": "win11-dev",
+            "name": "dbg",
+            "reattach_kd": False,
+            "reopen_term": False,
+            "timeout": 5,
+        },
+    )
+    assert "warning" in result
+    assert "kd_state_at_snapshot=running" in result["warning"]
+    assert "reattach_kd=true" in result["warning"]
+
+    # Reverting with the default reattach_kd=true drives the debugger, so there is no warning.
+    result2 = await service.call(
+        "snap_revert", {"vm": "win11-dev", "name": "dbg", "reopen_term": False, "timeout": 5}
+    )
+    assert "warning" not in result2
+
+
 async def test_revert_and_reboot_reattach_serial_kd_without_key(
     service: NtDriveService, fake_vmrun: FakeVmrun, kd_procs: list[FakeKdProcess]
 ) -> None:
@@ -617,11 +656,13 @@ async def test_file_push_reports_verification_failure(
     pushed = await service.call(
         "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\a.bin"}
     )
-    # The hash could not be READ, which is unknown, not a mismatch: false would read as corruption.
+    # A failed SFTP hash no longer leaves the copy unverified: it falls back to the guest-tools
+    # hash, which decides. Here guest tools cannot hash it either (the fake has no such file), so
+    # the result is unknown (null), not a false mismatch, and both the sftp note and the reason show.
     assert pushed["via"] == "ssh" and pushed["verified"] is None and pushed["verified_count"] == 0
     assert pushed["copied"][0]["verified"] is None
-    assert pushed["copied"][0]["verify_error"]
-    assert "permission denied" in pushed["copied"][0]["verify_error"]
+    assert "sftp hash failed" in pushed["copied"][0]["verify_note"]
+    assert "guest tools could not hash" in pushed["copied"][0]["verify_error"]
     assert "verification failed" in pushed["note"]
 
 

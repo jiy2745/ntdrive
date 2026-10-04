@@ -159,6 +159,79 @@ async def test_exec_once_gives_up_after_a_second_dropped_link(monkeypatch: Any) 
     assert exc.value.code == BACKEND_ERROR and "after a reconnect" in exc.value.message
 
 
+class _Sftp:
+    """Minimal SFTP stand-in: a channel whose timeout can be set, and one readable file."""
+
+    def __init__(self, payload: bytes = b"ok") -> None:
+        self._payload = payload
+
+    def get_channel(self) -> Any:
+        class _Ch:
+            def settimeout(self, _t: float) -> None:
+                pass
+
+        return _Ch()
+
+    def open(self, _path: str, _mode: str) -> Any:
+        payload = {"data": self._payload}
+
+        class _F:
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *_a: Any) -> bool:
+                return False
+
+            def prefetch(self) -> None:
+                pass
+
+            def read(self, _n: int = -1) -> bytes:
+                data, payload["data"] = payload["data"], b""
+                return data
+
+        return _F()
+
+    def close(self) -> None:
+        pass
+
+
+class _OneShotSftpClient:
+    """open_sftp fails like a dropped link, or returns an _Sftp, depending on `alive`."""
+
+    def __init__(self, alive: bool) -> None:
+        self.alive = alive
+
+    def open_sftp(self) -> Any:
+        if not self.alive:
+            raise paramiko.SSHException("SSH session not active")
+        return _Sftp()
+
+
+async def test_sftp_reconnects_once_after_a_dropped_link(monkeypatch: Any) -> None:
+    """A cached client stale after a revert must not doom file transfers: SFTP reconnects too."""
+    import hashlib
+
+    transport = SshPtyTransport("127.0.0.1", 22, "u", "p")
+    handed = [_OneShotSftpClient(alive=False), _OneShotSftpClient(alive=True)]
+    served: list[Any] = []
+
+    async def fake_ensure() -> Any:
+        client = handed[len(served)]
+        served.append(client)
+        return client
+
+    dropped: list[bool] = []
+
+    async def fake_close() -> None:
+        dropped.append(True)  # the stale client is dropped before the retry
+
+    monkeypatch.setattr(transport, "_ensure", fake_ensure)
+    monkeypatch.setattr(transport, "close", fake_close)
+    digest = await transport.remote_sha256("C:\\a.bin")
+    assert digest == hashlib.sha256(b"ok").hexdigest()
+    assert len(served) == 2 and dropped == [True]  # first was dead, dropped, second worked
+
+
 async def test_transport_file_ops_raise_ntdrive_error_on_dead_link(tmp_path) -> None:  # type: ignore[no-untyped-def]
     transport = SshPtyTransport("127.0.0.1", 22, "u", "p")
     transport._client = _DeadClient()  # type: ignore[assignment]

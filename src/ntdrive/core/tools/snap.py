@@ -396,7 +396,8 @@ async def snap_revert(service: NtDriveService, p: SnapRevertParams) -> dict[str,
             f"VM {p.vm} has no snapshot named {p.name}",
             f"known snapshots: {', '.join(tree.names()) or '(none)'}",
         )
-    return await revert_flow(
+    kd_at_snapshot = service.load_snapshot_meta(p.vm).get(p.name, {}).get("kd_state_at_snapshot")
+    result = await revert_flow(
         service,
         cfg,
         p.name,
@@ -405,6 +406,17 @@ async def snap_revert(service: NtDriveService, p: SnapRevertParams) -> dict[str,
         reopen_term=p.reopen_term,
         timeout=p.timeout,
     )
+    if p.start and not p.reattach_kd and kd_at_snapshot in ("running", "broken", "waiting"):
+        # This snapshot froze a guest that had the debugger attached. Restoring it with nothing on
+        # the debug transport can leave the guest spinning to full CPU and unreachable, waiting for
+        # a debugger that is not there. The flag is explicit, so this warns rather than overriding.
+        result["warning"] = (
+            f"this snapshot was taken while the debugger was attached "
+            f"(kd_state_at_snapshot={kd_at_snapshot}) but reattach_kd=false, so nothing is driving "
+            "the debug transport. The guest can spin to full CPU and go unreachable waiting for a "
+            "debugger. If it does, kd_attach now, or snap_revert again with reattach_kd=true."
+        )
+    return result
 
 
 @tool(
