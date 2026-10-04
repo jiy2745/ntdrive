@@ -40,7 +40,15 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
     return {"store": store, "vmx": vmx, "config": tmp_path / "vms.yaml"}
 
 
-def _run(env: dict[str, Any], args: list[str], input_text: str) -> Result:
+def _run(
+    env: dict[str, Any], args: list[str], input_text: str, *, standard: bool = False
+) -> Result:
+    # The standard account (ntdrive-user) is created by default now, which adds a name and a
+    # password prompt. Tests that are not about it pass standard=False (the default) and this skips
+    # it with --standard-user none so their piped input stays aligned; the standard-account tests
+    # pass standard=True to drive the prompt, or set --standard-user themselves.
+    if not standard and "--standard-user" not in args:
+        args = [*args, "--standard-user", "none"]
     cli = build_cli(load_builtin_tools())
     return CliRunner().invoke(
         cli, ["--config", str(env["config"]), "setup", *args], input=input_text
@@ -67,7 +75,7 @@ def test_setup_writes_the_entry_and_keeps_secrets_out_of_the_file(env: dict[str,
 def test_setup_adds_a_second_vm_and_updates_an_existing_one(
     env: dict[str, Any], tmp_path: Path
 ) -> None:
-    first = _run(env, ["--name", "one", "--user", "u1", "--transport", "serial"], "1\npw\n\nvmpw\n")
+    first = _run(env, ["--name", "one", "--user", "u1", "--transport", "serial"], "1\npw\nvmpw\n")
     assert first.exit_code == 0, first.output
     other = tmp_path / "other.vmx"
     other.write_text('displayName = "Other"\n')
@@ -160,7 +168,9 @@ def test_setup_honours_ntdrive_config_before_the_file_exists(
     monkeypatch.setenv("NTDRIVE_CONFIG", str(target))
     cli = build_cli(load_builtin_tools())
     result = CliRunner().invoke(
-        cli, ["setup", "--name", "dev", "--user", "u", "--no-restart"], input="1\npw\n\n\n"
+        cli,
+        ["setup", "--name", "dev", "--user", "u", "--standard-user", "none", "--no-restart"],
+        input="1\npw\n\n\n",
     )
     assert result.exit_code == 0, result.output
     assert target.is_file() and "dev" in load_config(target).vms
@@ -206,19 +216,28 @@ def test_setup_explains_the_passwords_before_asking(env: dict[str, Any]) -> None
     )
 
 
+def test_setup_creates_the_standard_account_by_default(env: dict[str, Any]) -> None:
+    # Enter at the standard prompt takes the default (ntdrive-user), so a fresh VM gets one.
+    result = _run(env, ["--name", "dev", "--user", "u"], "1\npw1\n\nstdpw\n\n", standard=True)
+    assert result.exit_code == 0, result.output
+    vm = load_config(env["config"]).vms["dev"]
+    assert vm.guest.standard_user == "ntdrive-user"
+    assert "run setup-guest.cmd (OpenSSH, KDNET and the ntdrive-user account" in result.output
+
+
 def test_setup_stores_an_optional_standard_account(env: dict[str, Any]) -> None:
     # Account and password, then the standard account and its password, Enter for encryption.
-    result = _run(env, ["--name", "dev"], "1\nalice\npw1\ntester\npw2\n\n")
+    result = _run(env, ["--name", "dev"], "1\nalice\npw1\ntester\npw2\n\n", standard=True)
     assert result.exit_code == 0, result.output
     vm = load_config(env["config"]).vms["dev"]
     assert vm.guest.user == "alice" and vm.guest.standard_user == "tester"
     assert vm.guest.standard_password_env == "NTDRIVE_DEV_STDPW"
     assert env["store"] == {"NTDRIVE_DEV_PW": "pw1", "NTDRIVE_DEV_STDPW": "pw2"}
     assert "pw2" not in env["config"].read_text()
-    assert "[*] standard account: optional" in result.output
-    assert "run setup-guest.cmd -Standard -StandardAccount tester" in result.output
+    assert "[*] standard account: a second guest account" in result.output
+    assert "run setup-guest.cmd -StandardAccount tester" in result.output
     # Enter everywhere keeps both accounts and both passwords.
-    again = _run(env, ["--name", "dev"], "1\n\n\n\n\n\n")
+    again = _run(env, ["--name", "dev"], "1\n\n\n\n\n\n", standard=True)
     assert again.exit_code == 0, again.output
     vm = load_config(env["config"]).vms["dev"]
     assert vm.guest.standard_user == "tester" and len(env["store"]) == 2
@@ -228,4 +247,4 @@ def test_setup_stores_an_optional_standard_account(env: dict[str, Any]) -> None:
     assert dropped.exit_code == 0, dropped.output
     vm = load_config(env["config"]).vms["dev"]
     assert vm.guest.standard_user == "" and vm.guest.standard_password_env == ""
-    assert "run setup-guest.cmd (OpenSSH and KDNET" in dropped.output
+    assert "run setup-guest.cmd -NoStandard (OpenSSH and KDNET" in dropped.output

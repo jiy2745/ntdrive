@@ -31,7 +31,7 @@ def ssh_fix(message: str, vm: str, standard: str = "") -> str:
     if "authentication" in lower and standard:
         return (
             f"the password of {standard} is wrong: run ntdrive setup --name {vm} and, at the "
-            "standard account prompt, type the name and password that setup-guest.cmd -Standard "
+            "standard account prompt, type the name and password that setup-guest.cmd "
             "set in the guest, or run that there first"
         )
     if "authentication" in lower:

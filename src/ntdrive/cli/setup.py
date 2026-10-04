@@ -382,9 +382,9 @@ def run_setup(
 
     log.info(
         "standard account",
-        "optional: a second guest account without administrator rights. term_open "
+        "a second guest account without administrator rights, created by default. term_open "
         "account=standard logs in as it, to drive the guest the way a plain user sees it. "
-        "setup-guest.cmd -Standard creates ntdrive-user for this. Enter or none skips it",
+        "setup-guest.cmd creates ntdrive-user for this. Enter keeps it, none skips it",
     )
     if standard_opt is not None:
         standard = standard_opt
@@ -392,7 +392,7 @@ def run_setup(
         standard = str(
             click.prompt(
                 "Standard account inside the guest, or none",
-                default=guest.get("standard_user") or "none",
+                default=guest.get("standard_user") or "ntdrive-user",
             )
         )
     standard = "" if standard.strip().lower() in ("", "none", "-") else standard.strip()
@@ -502,11 +502,16 @@ def run_setup(
     if not issues:
         log.ok(source, "no issues for this VM")
     log.verdict("DONE", f"{name} is configured on the host")
-    guest_cmd, guest_does = "setup-guest.cmd", "OpenSSH and KDNET"
-    if standard:
-        guest_cmd += " -Standard"
-        if standard != "ntdrive-user":
-            guest_cmd += f" -StandardAccount {standard}"
+    # setup-guest.cmd creates the standard account (ntdrive-user) by default, so only a different
+    # name or opting out needs a flag.
+    guest_cmd = "setup-guest.cmd"
+    if not standard:
+        guest_cmd += " -NoStandard"
+        guest_does = "OpenSSH and KDNET"
+    elif standard == "ntdrive-user":
+        guest_does = "OpenSSH, KDNET and the ntdrive-user account"
+    else:
+        guest_cmd += f" -StandardAccount {standard}"
         guest_does = f"OpenSSH, KDNET and the {standard} account"
     log.next_steps(
         [

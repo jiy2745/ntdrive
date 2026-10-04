@@ -36,7 +36,7 @@ vms:
       user: "dev"
       password_env: "NTDRIVE_WIN11_DEV_PW" # the password is read from this environment variable
       # Optional second account without administrator rights, for term_open account=standard
-      # (drive the guest the way a plain user sees it). setup-guest.cmd -Standard creates it.
+      # (drive the guest the way a plain user sees it). setup-guest.cmd creates it.
       standard_user: "" # for example "ntdrive-user"
       standard_password_env: "" # for example "NTDRIVE_WIN11_DEV_STDPW" (or standard_password inline)
       ssh_port: 22

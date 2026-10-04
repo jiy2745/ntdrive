@@ -26,10 +26,10 @@ exit /b %_ntdrive_code%
   SSH logs in with a Windows account and its password, and a personal account may have none or
   allow Windows Hello only. Type the same password in ntdrive setup on the host.
 
-  -Standard also creates a second account without administrator rights (ntdrive-user,
-  -StandardAccount changes the name) and asks for its password. ntdrive opens a terminal as it
-  when asked (term_open account=standard), so the guest can be driven the way a plain user sees
-  it: UAC prompts, access-denied paths, per-user settings. The administrator account stays,
+  A second account without administrator rights (ntdrive-user, -StandardAccount changes the name)
+  is created by default and its password is asked. -NoStandard skips it. ntdrive opens a terminal
+  as it when asked (term_open account=standard), so the guest can be driven the way a plain user
+  sees it: UAC prompts, access-denied paths, per-user settings. The administrator account stays,
   because ntdrive's own work (reading the KDNET key over SSH, file copies) needs it.
 
   Installs and starts OpenSSH Server with PowerShell as the default shell, opens port 22, and
@@ -65,15 +65,15 @@ exit /b %_ntdrive_code%
   Use your own Windows account for SSH instead of creating the ntdrive account.
 
 .EXAMPLE
-  setup-guest.cmd -Standard
-  Also create ntdrive-user, a plain account, for terminals opened as a standard user.
+  setup-guest.cmd -NoStandard
+  Skip the standard account (ntdrive-user is created by default for term_open account=standard).
 #>
 
 [CmdletBinding()]
 param(
   [string]$Account = "ntdrive",
   [switch]$NoAccount,
-  [switch]$Standard,
+  [switch]$NoStandard,
   [string]$StandardAccount = "ntdrive-user",
   [switch]$Serial,
   [switch]$OpenSshOnly,
@@ -303,7 +303,7 @@ try {
     }
     Ok "account" "$Account is an administrator (bcdedit over SSH needs that)"
   }
-  if ($Standard) {
+  if (-not $NoStandard) {
     # A second account with no administrator rights, so the host can open a shell that sees the
     # guest the way a plain user does. Users group only: that is what grants it a logon.
     if (-not $NoAccount -and $StandardAccount -eq $Account) {
@@ -420,7 +420,7 @@ try {
     Info "guest account" "$user (use this name and its Windows password in ntdrive setup on the host)"
     Info "no password or Windows Hello only?" "run setup-guest.cmd without -NoAccount to get a local administrator for ntdrive"
   }
-  if ($Standard) {
+  if (-not $NoStandard) {
     Info "standard account" "$StandardAccount (a plain user: at the standard account prompt of ntdrive setup on the host type this name and its password)"
   }
   Info "guest IPv4" "$($ips -join ', ') (ntdrive finds it through VMware Tools, this is for a manual ssh test)"

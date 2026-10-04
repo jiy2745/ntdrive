@@ -423,7 +423,7 @@ one suspend-resume cycle when the suspend flow is needed.
   (`term_open`, and `term_disconnected` with successors). After reboots and reverts the stale ids
   stay in `term_list` (each names its successor) until `term_prune` forgets them.
 - `term_open account=standard` opens the shell as the guest's plain account (`guest.standard_user`
-  in vms.yaml, created by `setup-guest.cmd -Standard`) instead of the administrator. Use it when
+  in vms.yaml, created by `setup-guest.cmd`) instead of the administrator. Use it when
   the question is what a normal user sees: UAC, access denied, per-user settings. `file_push`,
   `file_pull` and `kd_setup_guest` always use the administrator account. Without a standard
   account configured the call fails with `invalid_args` and says how to add one.

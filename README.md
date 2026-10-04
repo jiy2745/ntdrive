@@ -115,7 +115,7 @@ Options, all optional:
 | Where | Switch | What it does |
 |---|---|---|
 | guest | `setup-guest.cmd -NoAccount` | use your own Windows account for SSH instead of creating `ntdrive` |
-| guest | `setup-guest.cmd -Standard` | also create `ntdrive-user`, a plain account, for `term_open account=standard` |
+| guest | `setup-guest.cmd -NoStandard` | skip `ntdrive-user` (created by default, a plain account for `term_open account=standard`) |
 | guest | `setup-guest.cmd -OpenSshZip <file or URL>` | OpenSSH from the Win32-OpenSSH zip, for a guest without internet (Insider builds have no capability package, and the script falls back to a download on its own) |
 | guest | `setup-guest.cmd -Serial` | serial named-pipe transport instead of KDNET |
 | host | `setup-host.cmd -Verify` | only the end-to-end check |

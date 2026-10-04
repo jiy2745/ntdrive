@@ -107,4 +107,4 @@ async def test_verify_proves_the_standard_account_when_one_is_configured(
     assert "[+] ssh standard: logged in as ntdrive-user, a plain user" in result.output
     assert "ALL SET: win11-dev" in result.output
     fix = ssh_fix("Authentication failed.", "win11-dev", "ntdrive-user")
-    assert "password of ntdrive-user is wrong" in fix and "setup-guest.cmd -Standard" in fix
+    assert "password of ntdrive-user is wrong" in fix and "setup-guest.cmd" in fix
