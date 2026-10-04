@@ -282,7 +282,7 @@ async def _configure_guest(
     note = ""
     if not serial:
         settings = _parse_bcd(await run("bcdedit /dbgsettings"))
-        # The guest shell is PowerShell (setup-guest.ps1 sets DefaultShell). PowerShell parses a
+        # The guest shell is PowerShell (setup-guest.cmd sets DefaultShell). PowerShell parses a
         # bare {current} as a script block and, worse, turns it into -encodedCommand for the native
         # exe, so bcdedit sees /encodedCommand and fails. Single quotes keep it a literal.
         current = _parse_bcd(await run("bcdedit /enum '{current}'"))
@@ -394,7 +394,7 @@ async def kd_attach(service: NtDriveService, p: AttachParams) -> dict[str, Any]:
     cfg = service.vm_cfg(p.vm)
     key = p.key or cfg.kdnet.key
     if cfg.kd_transport == "net" and not key:
-        # A guest that ran scripts/setup-guest.ps1 already debugs to this host with a key of its
+        # A guest that ran scripts/setup-guest.cmd already debugs to this host with a key of its
         # own. Read it back over SSH, the kd_setup_guest step, instead of failing.
         configured = await _configure_guest(service, cfg, None, None)
         if configured["needs_reboot"]:

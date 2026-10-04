@@ -17,14 +17,13 @@ shell on the host.
 
 Fastest path in (guest first, then host):
 
-1. In the guest, copy `scripts\setup-guest.ps1` in, open PowerShell as administrator, and run
-   `powershell -ExecutionPolicy Bypass -File setup-guest.ps1` (it stops and says so if not elevated).
+1. In the guest, copy `scripts\setup-guest.cmd` in and run it.
 2. On the host:
 
    ```powershell
    git clone https://github.com/jiy2745/ntdrive
    cd ntdrive
-   powershell -ExecutionPolicy Bypass -File scripts\setup-host.ps1
+   scripts\setup-host.cmd
    ```
 
    It ends with `ntdrive verify` and prints ALL SET.
@@ -77,10 +76,9 @@ the VM settings (`bcdedit /debug on` needs that) and, for KDNET, the `e1000e` NI
 then host: the host script ends with the end-to-end check and reboots the guest itself when the
 debugger needs it. `ntdrive sys health` names the fix for anything that is missing.
 
-**1. Guest.** Copy `scripts\setup-guest.ps1` into the guest (drag and
-drop works once VMware Tools are in), open Windows PowerShell as administrator and run
-`powershell -ExecutionPolicy Bypass -File setup-guest.ps1`. It needs administrator rights and stops
-with a message if it is not elevated. It creates the local administrator `ntdrive` and
+**1. Guest.** Copy `scripts\setup-guest.cmd` into the guest (drag and
+drop works once VMware Tools are in) and run it from any shell or by double click. It asks
+for administrator rights itself (one UAC click), creates the local administrator `ntdrive` and
 asks for its password (type the same one in `ntdrive setup` on the host), installs OpenSSH Server
 with PowerShell as the default shell, opens port 22 and turns on KDNET. The host IP comes from the
 NAT gateway and the key is generated in the guest, so nothing is copied by hand. Running it again
@@ -91,7 +89,7 @@ is safe. Reboot the guest when it says so.
 ```powershell
 git clone https://github.com/jiy2745/ntdrive
 cd ntdrive
-powershell -ExecutionPolicy Bypass -File scripts\setup-host.ps1
+scripts\setup-host.cmd
 ```
 
 It runs `uv sync`, puts the `ntdrive`, `ntdrive-mcp` and `ntdrived` commands on your PATH (an
@@ -116,15 +114,15 @@ Options, all optional:
 
 | Where | Switch | What it does |
 |---|---|---|
-| guest | `setup-guest.ps1 -NoAccount` | use your own Windows account for SSH instead of creating `ntdrive` |
-| guest | `setup-guest.ps1 -Standard` | also create `ntdrive-user`, a plain account, for `term_open account=standard` |
-| guest | `setup-guest.ps1 -OpenSshZip <file or URL>` | OpenSSH from the Win32-OpenSSH zip, for a guest without internet (Insider builds have no capability package, and the script falls back to a download on its own) |
-| guest | `setup-guest.ps1 -Serial` | serial named-pipe transport instead of KDNET |
-| host | `setup-host.ps1 -Verify` | only the end-to-end check |
-| host | `setup-host.ps1 -FirewallOnly` | manual repair of the KDNET firewall rules, from an Administrator shell |
+| guest | `setup-guest.cmd -NoAccount` | use your own Windows account for SSH instead of creating `ntdrive` |
+| guest | `setup-guest.cmd -Standard` | also create `ntdrive-user`, a plain account, for `term_open account=standard` |
+| guest | `setup-guest.cmd -OpenSshZip <file or URL>` | OpenSSH from the Win32-OpenSSH zip, for a guest without internet (Insider builds have no capability package, and the script falls back to a download on its own) |
+| guest | `setup-guest.cmd -Serial` | serial named-pipe transport instead of KDNET |
+| host | `setup-host.cmd -Verify` | only the end-to-end check |
+| host | `setup-host.cmd -FirewallOnly` | manual repair of the KDNET firewall rules, from an Administrator shell |
 | host | `ntdrive setup --transport serial` | serial transport for a host where nobody can approve a UAC prompt, then `ntdrive kd setup-host <vm>` with the VM off |
 
-Several VMs: run `setup-host.ps1` again (or `ntdrive setup`) for each VM and `setup-guest.ps1` in
+Several VMs: run `setup-host.cmd` again (or `ntdrive setup`) for each VM and `setup-guest.cmd` in
 each guest. Every guest picks its own KDNET port from its machine id, and the host moves a guest
 whose port collides with another VM's. A guest set up by hand gets its KDNET settings from
 `ntdrive kd setup-guest <vm>`. `scripts\probe-guest.ps1` prints what a guest has (build, Secure

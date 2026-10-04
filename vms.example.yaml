@@ -23,7 +23,7 @@ vms:
 
     # Kernel debug transport. "net" (default) is KDNET over UDP: the host firewall must allow
     # kd.exe inbound, which `ntdrive kd setup-host <vm>` repairs through one UAC prompt
-    # (scripts/setup-host.ps1 -FirewallOnly does the same by hand), and the guest NIC must be
+    # (scripts/setup-host.cmd -FirewallOnly does the same by hand), and the guest NIC must be
     # e1000e. "serial" is kd over a VMware named pipe: no network, no firewall, no prompt. Run
     # `ntdrive kd setup-host <vm>` once with the VM off to add the port to the vmx.
     kd_transport: net # net | serial
@@ -32,11 +32,11 @@ vms:
 
     guest:
       # The administrator account SSH logs in with: ntdrive's own guest work (bcdedit, SFTP)
-      # and the default for terminals. setup-guest.ps1 creates "ntdrive".
+      # and the default for terminals. setup-guest.cmd creates "ntdrive".
       user: "dev"
       password_env: "NTDRIVE_WIN11_DEV_PW" # the password is read from this environment variable
       # Optional second account without administrator rights, for term_open account=standard
-      # (drive the guest the way a plain user sees it). setup-guest.ps1 -Standard creates it.
+      # (drive the guest the way a plain user sees it). setup-guest.cmd -Standard creates it.
       standard_user: "" # for example "ntdrive-user"
       standard_password_env: "" # for example "NTDRIVE_WIN11_DEV_STDPW" (or standard_password inline)
       ssh_port: 22

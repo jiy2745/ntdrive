@@ -216,7 +216,7 @@ def test_setup_stores_an_optional_standard_account(env: dict[str, Any]) -> None:
     assert env["store"] == {"NTDRIVE_DEV_PW": "pw1", "NTDRIVE_DEV_STDPW": "pw2"}
     assert "pw2" not in env["config"].read_text()
     assert "[*] standard account: optional" in result.output
-    assert "-File setup-guest.ps1 -Standard -StandardAccount tester" in result.output
+    assert "run setup-guest.cmd -Standard -StandardAccount tester" in result.output
     # Enter everywhere keeps both accounts and both passwords.
     again = _run(env, ["--name", "dev"], "1\n\n\n\n\n\n")
     assert again.exit_code == 0, again.output
@@ -228,4 +228,4 @@ def test_setup_stores_an_optional_standard_account(env: dict[str, Any]) -> None:
     assert dropped.exit_code == 0, dropped.output
     vm = load_config(env["config"]).vms["dev"]
     assert vm.guest.standard_user == "" and vm.guest.standard_password_env == ""
-    assert "-File setup-guest.ps1 (OpenSSH and KDNET" in dropped.output
+    assert "run setup-guest.cmd (OpenSSH and KDNET" in dropped.output

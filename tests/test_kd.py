@@ -418,7 +418,7 @@ async def test_kd_setup_guest_writes_config(service: NtDriveService, fake_transp
     audit = (service.log_dir / "audit.jsonl").read_text()
     assert key not in audit
 
-    # A guest that already debugs to this host (setup-guest.ps1 did it): the port and key are
+    # A guest that already debugs to this host (setup-guest.cmd did it): the port and key are
     # read back and saved, nothing is rewritten, and no reboot is needed once debug is on.
     fake_transport.exec_log.clear()
     fake_transport.exec_responses["bcdedit /dbgsettings"] = (
@@ -490,7 +490,7 @@ async def test_kd_setup_guest_writes_config(service: NtDriveService, fake_transp
 async def test_kd_attach_reads_the_key_a_guest_script_set(
     service: NtDriveService, fake_transport, kd_procs: list[FakeKdProcess]
 ) -> None:  # type: ignore[no-untyped-def]
-    # setup-host.ps1 wrote the entry without a key, setup-guest.ps1 configured KDNET in the guest:
+    # setup-host.cmd wrote the entry without a key, setup-guest.cmd configured KDNET in the guest:
     # the first attach reads the port and key back over SSH and saves them.
     cfg = service.config.vms["win11-dev"]
     cfg.kdnet.key = ""

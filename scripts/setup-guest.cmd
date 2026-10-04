@@ -1,9 +1,24 @@
+@echo off
+rem setup-guest.cmd runs this file's own PowerShell (below the marker line). It works from any
+rem shell or by double click whatever the PowerShell execution policy is, asks for administrator
+rem rights itself, and does its work in that elevated window. Arguments pass through, for
+rem example: setup-guest.cmd -Serial
+setlocal
+set "_ntdrive_self=%~f0"
+set "_ntdrive_ps=%TEMP%\ntdrive-setup-guest.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$t=[IO.File]::ReadAllText($env:_ntdrive_self);$i=$t.LastIndexOf('#:::NTDRIVE-PS-BELOW:::');$j=$t.IndexOf([char]10,$i);[IO.File]::WriteAllText($env:_ntdrive_ps,$t.Substring($j+1))"
+if errorlevel 1 ( echo could not unpack the embedded PowerShell & pause & exit /b 1 )
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%_ntdrive_ps%" %*
+set "_ntdrive_code=%errorlevel%"
+if not "%_ntdrive_code%"=="0" pause
+exit /b %_ntdrive_code%
+#:::NTDRIVE-PS-BELOW:::
 <#
 .SYNOPSIS
-  Prepare a Windows 10/11 guest for ntdrive. Run it inside the guest from a PowerShell opened as
-  administrator: `powershell -ExecutionPolicy Bypass -File setup-guest.ps1`. It needs administrator
-  rights (a service, HKLM, a firewall rule, bcdedit); run without them it says so and stops rather
-  than prompting, so open the administrator window yourself and that is the window you read.
+  Prepare a Windows 10/11 guest for ntdrive. Run it inside the guest through setup-guest.cmd (any
+  shell or a double click, whatever the execution policy says). It asks for administrator rights
+  itself: a new window opens with those rights, does the work, shows the log and stays open until
+  you close it.
 
 .DESCRIPTION
   Creates a local administrator account for ntdrive (named ntdrive, -Account changes it, -NoAccount
@@ -36,21 +51,21 @@
   lines, `[>]` fix lines under a failure, and a DONE or NOT READY verdict with numbered next steps.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File setup-guest.ps1
-  The usual run, from an administrator PowerShell: the ntdrive account, OpenSSH, KDNET. Then, on the
-  host, ntdrive verify proves it. The -ExecutionPolicy Bypass is what lets a .ps1 run on a default
-  Windows install.
+  setup-guest.cmd
+  The usual run: the ntdrive account, OpenSSH, KDNET. Then, on the host, ntdrive verify proves it.
+  setup-guest.cmd is one self-contained file: it carries this PowerShell, bypasses the execution
+  policy and relaunches itself elevated, so there is no separate .ps1 to copy or unblock.
 
 .EXAMPLE
-  setup-guest.ps1 -Serial
+  setup-guest.cmd -Serial
   Serial named-pipe transport instead of KDNET.
 
 .EXAMPLE
-  setup-guest.ps1 -NoAccount
+  setup-guest.cmd -NoAccount
   Use your own Windows account for SSH instead of creating the ntdrive account.
 
 .EXAMPLE
-  setup-guest.ps1 -Standard
+  setup-guest.cmd -Standard
   Also create ntdrive-user, a plain account, for terminals opened as a standard user.
 #>
 
@@ -65,7 +80,8 @@ param(
   [string]$HostIp,
   [int]$Port = 50000,
   [string]$Key,
-  [string]$OpenSshZip = "https://github.com/PowerShell/Win32-OpenSSH/releases/latest/download/OpenSSH-Win64.zip"
+  [string]$OpenSshZip = "https://github.com/PowerShell/Win32-OpenSSH/releases/latest/download/OpenSSH-Win64.zip",
+  [switch]$Elevated
 )
 
 $ErrorActionPreference = "Stop"
@@ -124,16 +140,37 @@ Step 1 4 "Administrator rights"
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]$identity
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  # Everything below needs administrator rights (a service, HKLM, a firewall rule, bcdedit). Rather
-  # than relaunch through UAC, say what to do: the window the person opens is the one they read.
-  Fail "administrator rights" "setup-guest needs to run as administrator"
-  Fix "open Windows PowerShell as administrator (right-click it, then Run as administrator), and run:"
-  Fix "powershell -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-  exit 1
+  # Everything below needs administrator rights (a service, HKLM, a firewall rule, bcdedit).
+  # Relaunch elevated in a visible window that shows the whole log and stays open at the end
+  # (-Elevated makes it pause). One UAC click, and the window you read is the one doing the work.
+  Info "needed for" "the OpenSSH service, the default shell (HKLM), the firewall rule and bcdedit"
+  Info "opening an administrator window" "approve the UAC prompt. The setup runs and its log stays in that window"
+  $forward = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "-Elevated")
+  foreach ($bound in $PSBoundParameters.GetEnumerator()) {
+    if ($bound.Value -is [switch]) {
+      if ($bound.Value.IsPresent) { $forward += "-$($bound.Key)" }
+    } else {
+      $forward += @("-$($bound.Key)", "`"$($bound.Value)`"")
+    }
+  }
+  try {
+    Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $forward | Out-Null
+  } catch {
+    Fail "administrator rights" "the UAC prompt was refused"
+    Fix "run setup-guest.cmd again and approve the prompt, or run it from an Administrator PowerShell"
+    exit 1
+  }
+  exit 0
 }
 Ok "elevated" $identity.Name
 
+# When this instance was relaunched with administrator rights, keep its window open at the end so
+# the log can be read. The launching window has already closed.
 function Complete([int]$Code) {
+  if ($Elevated) {
+    Write-Host ""
+    Read-Host "Press Enter to close this window" | Out-Null
+  }
   exit $Code
 }
 
@@ -200,7 +237,7 @@ function Install-OpenSshZip([string]$Source) {
         }
       }
       if (-not $downloaded) {
-        throw "could not download OpenSSH from $Source. If this guest has no internet, copy OpenSSH-Win64.zip in and run: setup-guest.ps1 -OpenSshZip <path to that zip>"
+        throw "could not download OpenSSH from $Source. If this guest has no internet, copy OpenSSH-Win64.zip in and run: setup-guest.cmd -OpenSshZip <path to that zip>"
       }
     } elseif (Test-Path $Source) {
       Info "zip" "using $Source"
@@ -381,7 +418,7 @@ try {
     Info "guest account" "$Account (use this name and the password you just typed in ntdrive setup on the host)"
   } else {
     Info "guest account" "$user (use this name and its Windows password in ntdrive setup on the host)"
-    Info "no password or Windows Hello only?" "run setup-guest.ps1 without -NoAccount to get a local administrator for ntdrive"
+    Info "no password or Windows Hello only?" "run setup-guest.cmd without -NoAccount to get a local administrator for ntdrive"
   }
   if ($Standard) {
     Info "standard account" "$StandardAccount (a plain user: at the standard account prompt of ntdrive setup on the host type this name and its password)"
@@ -395,12 +432,12 @@ try {
   } else {
     Verdict "DONE" "OpenSSH is configured in this guest, the debugger is not yet"
   }
-  $steps += "on the host run ntdrive verify (or scripts\setup-host.ps1 -Verify): it reads the KDNET key, reboots if needed and ends with ALL SET"
+  $steps += "on the host run ntdrive verify (or scripts\setup-host.cmd -Verify): it reads the KDNET key, reboots if needed and ends with ALL SET"
   NextSteps $steps
   Complete 0
 } catch {
   Fail "setup" $_.Exception.Message
-  Fix "fix the cause above, then run setup-guest.ps1 again (it skips what is already done)"
+  Fix "fix the cause above, then run setup-guest.cmd again (it skips what is already done)"
   Verdict "NOT READY" "this guest is not set up yet"
   Complete 1
 }

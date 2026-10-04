@@ -347,12 +347,12 @@ def run_setup(
     log.section(2, 3, "Guest account and passwords")
     log.info(
         "guest account",
-        "ntdrive, the local administrator setup-guest.ps1 creates in the VM, or any Windows "
+        "ntdrive, the local administrator setup-guest.cmd creates in the VM, or any Windows "
         "account you log in with there (whoami in the guest prints it)",
     )
     log.info(
         "guest password",
-        "the Windows password of that account, the one setup-guest.ps1 asked for (or what you "
+        "the Windows password of that account, the one setup-guest.cmd asked for (or what you "
         "type at the guest's lock screen). ntdrive uses it for SSH",
     )
     if encrypted:
@@ -384,7 +384,7 @@ def run_setup(
         "standard account",
         "optional: a second guest account without administrator rights. term_open "
         "account=standard logs in as it, to drive the guest the way a plain user sees it. "
-        "setup-guest.ps1 -Standard creates ntdrive-user for this. Enter or none skips it",
+        "setup-guest.cmd -Standard creates ntdrive-user for this. Enter or none skips it",
     )
     if standard_opt is not None:
         standard = standard_opt
@@ -502,7 +502,7 @@ def run_setup(
     if not issues:
         log.ok(source, "no issues for this VM")
     log.verdict("DONE", f"{name} is configured on the host")
-    guest_cmd, guest_does = "setup-guest.ps1", "OpenSSH and KDNET"
+    guest_cmd, guest_does = "setup-guest.cmd", "OpenSSH and KDNET"
     if standard:
         guest_cmd += " -Standard"
         if standard != "ntdrive-user":
@@ -511,12 +511,12 @@ def run_setup(
     log.next_steps(
         [
             (
-                "in the guest: copy setup-guest.ps1 in, then from an administrator PowerShell run "
-                f"powershell -ExecutionPolicy Bypass -File {guest_cmd} ({guest_does})"
+                f"in the guest: copy setup-guest.cmd in and run {guest_cmd} "
+                f"({guest_does}, one UAC click)"
             ),
             (
                 f"on the host: ntdrive kd setup-host {name} for the firewall "
-                "(scripts\\setup-host.ps1 does it), then ntdrive verify"
+                "(scripts\\setup-host.cmd does it), then ntdrive verify"
             ),
         ]
     )
