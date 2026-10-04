@@ -148,7 +148,7 @@ async def test_term_open_as_the_standard_account(
     await service.call("vm_start", {"vm": "win11-dev"})
     with pytest.raises(NtDriveError) as exc:
         await service.call("term_open", {"vm": "win11-dev", "account": "standard"})
-    assert exc.value.code == INVALID_ARGS and "setup-guest.cmd -Standard" in exc.value.hint
+    assert exc.value.code == INVALID_ARGS and "setup-guest.ps1 -Standard" in exc.value.hint
     assert fake_transport.opened_as == []  # refused before any SSH login
 
     cfg = service.config.vms["win11-dev"]

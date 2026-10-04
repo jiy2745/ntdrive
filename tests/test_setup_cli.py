@@ -197,9 +197,9 @@ def test_mask_shows_enough_to_recognize_a_password() -> None:
 def test_setup_explains_the_passwords_before_asking(env: dict[str, Any]) -> None:
     result = _run(env, ["--name", "dev", "--user", "u", "--no-restart"], "1\npw12\n\n\n")
     assert result.exit_code == 0, result.output
-    assert "INFO  guest password: the Windows password of that account" in result.output
-    assert "INFO  VM encryption password: the one VMware asked for" in result.output
-    assert "INFO  entered: pw*2 (4 chars)" in result.output and "pw12" not in result.output
+    assert "[*] guest password: the Windows password of that account" in result.output
+    assert "[*] VM encryption password: the one VMware asked for" in result.output
+    assert "[*] entered: pw*2 (4 chars)" in result.output and "pw12" not in result.output
     assert (
         "== 3/3 Write and check" in result.output
         and "DONE: dev is configured on the host" in result.output
@@ -215,8 +215,8 @@ def test_setup_stores_an_optional_standard_account(env: dict[str, Any]) -> None:
     assert vm.guest.standard_password_env == "NTDRIVE_DEV_STDPW"
     assert env["store"] == {"NTDRIVE_DEV_PW": "pw1", "NTDRIVE_DEV_STDPW": "pw2"}
     assert "pw2" not in env["config"].read_text()
-    assert "INFO  standard account: optional" in result.output
-    assert "run setup-guest.cmd -Standard -StandardAccount tester" in result.output
+    assert "[*] standard account: optional" in result.output
+    assert "-File setup-guest.ps1 -Standard -StandardAccount tester" in result.output
     # Enter everywhere keeps both accounts and both passwords.
     again = _run(env, ["--name", "dev"], "1\n\n\n\n\n\n")
     assert again.exit_code == 0, again.output
@@ -228,4 +228,4 @@ def test_setup_stores_an_optional_standard_account(env: dict[str, Any]) -> None:
     assert dropped.exit_code == 0, dropped.output
     vm = load_config(env["config"]).vms["dev"]
     assert vm.guest.standard_user == "" and vm.guest.standard_password_env == ""
-    assert "run setup-guest.cmd (OpenSSH and KDNET" in dropped.output
+    assert "-File setup-guest.ps1 (OpenSSH and KDNET" in dropped.output

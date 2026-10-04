@@ -44,7 +44,7 @@ async def test_kd_setup_host_repairs_the_kdnet_firewall(
     # Look only: nothing changes and no prompt is shown.
     done = await service.call("kd_setup_host", {"vm": "win11-dev", "fix_firewall": False})
     assert done["changed"] is False and done["firewall"]["ok"] is False
-    assert fake_firewall.fixes == 0 and "setup-host.cmd" in done["next"]
+    assert fake_firewall.fixes == 0 and "setup-host.ps1" in done["next"]
 
     done = await service.call("kd_setup_host", {"vm": "win11-dev"})
     assert done["changed"] is True and done["firewall"]["ok"] is True
@@ -94,7 +94,7 @@ async def test_kd_setup_host_reports_a_refused_uac_prompt(
     fake_firewall.refuse = True
     with pytest.raises(NtDriveError) as exc:
         await service.call("kd_setup_host", {"vm": "win11-dev"})
-    assert exc.value.code == BACKEND_ERROR and "setup-host.cmd" in exc.value.hint
+    assert exc.value.code == BACKEND_ERROR and "setup-host.ps1" in exc.value.hint
 
 
 async def test_kd_setup_host_does_not_guess_when_the_firewall_is_unreadable(

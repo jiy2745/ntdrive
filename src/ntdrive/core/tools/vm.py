@@ -560,7 +560,7 @@ async def vm_create(service: NtDriveService, p: CreateParams) -> dict[str, Any]:
         "next": (
             "vm_start gui=true and install the OS from the ISO (Windows 11 setup refuses without a "
             "TPM, so use the setup LabConfig BypassTPMCheck/BypassSecureBootCheck registry keys), "
-            "then run scripts/setup-guest.cmd in the guest for SSH and KDNET. After that this VM "
+            "then run scripts/setup-guest.ps1 in the guest for SSH and KDNET. After that this VM "
             "is unencrypted, so vm_clone works on it."
         ),
     }

@@ -52,7 +52,7 @@ async def test_verify_says_all_set_and_leaves_nothing_attached(
 ) -> None:
     result = await _verify(service, monkeypatch, ["verify", "win11-dev"])
     assert result.exit_code == 0, result.output
-    for line in ("OK    config", "OK    power", "OK    ssh", "OK    firewall", "OK    debugger"):
+    for line in ("[+] config", "[+] power", "[+] ssh", "[+] firewall", "[+] debugger"):
         assert line in result.output
     assert result.output.strip().endswith("all worked.") and "ALL SET: win11-dev" in result.output
     # The debugger verify attached is detached again, so the guest is not left frozen.
@@ -77,11 +77,9 @@ async def test_verify_stops_at_the_first_failure_with_the_fix(
     fake_firewall.block_rules = ["Windows Kernel Debugger"]
     result = await _verify(service, monkeypatch, ["verify", "win11-dev"])
     assert result.exit_code == 1
-    assert (
-        "FAIL  firewall: inbound Block rules for kd.exe: Windows Kernel Debugger" in result.output
-    )
-    assert "fix: run scripts\\setup-host.cmd" in result.output
-    assert "OK    debugger" not in result.output and "NOT READY: win11-dev" in result.output
+    assert "[-] firewall: inbound Block rules for kd.exe: Windows Kernel Debugger" in result.output
+    assert "[>] run scripts\\setup-host.ps1" in result.output
+    assert "[+] debugger" not in result.output and "NOT READY: win11-dev" in result.output
     assert "  next:" in result.output and "1. win11-dev (firewall):" in result.output
 
     service.config.vms.clear()
@@ -94,7 +92,7 @@ def test_ssh_fix_names_the_cause() -> None:
         "ssh connect to 10.0.0.5:22 failed: Authentication failed.", "dev"
     )
     assert "VMware Tools" in ssh_fix("guest IP unknown, VMware Tools may not be running", "dev")
-    assert "setup-guest.cmd" in ssh_fix("ssh connect to 10.0.0.5:22 refused: timed out", "dev")
+    assert "setup-guest.ps1" in ssh_fix("ssh connect to 10.0.0.5:22 refused: timed out", "dev")
 
 
 async def test_verify_proves_the_standard_account_when_one_is_configured(
@@ -105,8 +103,8 @@ async def test_verify_proves_the_standard_account_when_one_is_configured(
     cfg.guest.standard_password = "plain-pw"
     result = await _verify(service, monkeypatch, ["verify", "win11-dev"])
     assert result.exit_code == 0, result.output
-    assert "OK    ssh: logged in as dev and got a shell" in result.output
-    assert "OK    ssh standard: logged in as ntdrive-user, a plain user" in result.output
+    assert "[+] ssh: logged in as dev and got a shell" in result.output
+    assert "[+] ssh standard: logged in as ntdrive-user, a plain user" in result.output
     assert "ALL SET: win11-dev" in result.output
     fix = ssh_fix("Authentication failed.", "win11-dev", "ntdrive-user")
-    assert "password of ntdrive-user is wrong" in fix and "setup-guest.cmd -Standard" in fix
+    assert "password of ntdrive-user is wrong" in fix and "setup-guest.ps1 -Standard" in fix

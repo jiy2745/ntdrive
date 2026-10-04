@@ -1,19 +1,3 @@
-@echo off
-rem setup-host.cmd runs this file's own PowerShell (below the marker line), from any shell or by
-rem double click whatever the PowerShell execution policy is. Nothing here needs elevation except
-rem -FirewallOnly. Arguments pass through, for example: setup-host.cmd -Verify
-setlocal
-set "_ntdrive_self=%~f0"
-set "_ntdrive_ps=%TEMP%\ntdrive-setup-host.ps1"
-echo %cmdcmdline% | find /i "%~nx0" >nul && set "_ntdrive_pause=1"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$t=[IO.File]::ReadAllText($env:_ntdrive_self);$i=$t.LastIndexOf('#:::NTDRIVE-PS-BELOW:::');$j=$t.IndexOf([char]10,$i);[IO.File]::WriteAllText($env:_ntdrive_ps,$t.Substring($j+1))"
-if errorlevel 1 ( echo could not unpack the embedded PowerShell & pause & exit /b 1 )
-set "NTDRIVE_SCRIPT_DIR=%~dp0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%_ntdrive_ps%" %*
-set "_ntdrive_code=%errorlevel%"
-if defined _ntdrive_pause pause
-exit /b %_ntdrive_code%
-#:::NTDRIVE-PS-BELOW:::
 <#
 .SYNOPSIS
   Set up a Windows 11 host for ntdrive in one run.
@@ -29,28 +13,30 @@ exit /b %_ntdrive_code%
   proves every VM end to end (SSH login, debugger attach, break in, resume) and prints ALL SET,
   or the first thing to fix and how.
 
-  Nothing here needs an elevated PowerShell. Run it again to add a VM. -Verify runs only the last
-  step, for example after setup-guest.cmd ran in a guest later. -FirewallOnly is the manual route
-  for the KDNET firewall rules and is the one thing that needs an Administrator PowerShell.
+  Run it from PowerShell with `powershell -ExecutionPolicy Bypass -File scripts\setup-host.ps1`
+  (the -ExecutionPolicy Bypass is what lets a .ps1 run on a default Windows install). Nothing here
+  needs an elevated PowerShell. Run it again to add a VM. -Verify runs only the last step, for
+  example after setup-guest.ps1 ran in a guest later. -FirewallOnly is the manual route for the
+  KDNET firewall rules and is the one thing that needs an Administrator PowerShell.
 
-  Output follows the ntdrive convention: `== n/total title` sections, OK / FAIL / WARN / INFO
-  lines, `fix:` under a FAIL, and a verdict (ALL SET, DONE or NOT READY) with numbered next steps.
-
-.EXAMPLE
-  scripts\setup-host.cmd
-  Interactive: lists the VMs VMware knows, asks for the account and passwords. The .cmd launcher
-  runs this script whatever the PowerShell execution policy says.
+  Output follows the ntdrive convention: `== n/total title` sections, `[+]` `[-]` `[!]` `[*]` result
+  lines, `[>]` fix lines under a failure, and a verdict (ALL SET, DONE or NOT READY) with numbered
+  next steps.
 
 .EXAMPLE
-  scripts\setup-host.cmd -Vmx D:\VMs\win11\win11.vmx -Name win11 -User dev
+  powershell -ExecutionPolicy Bypass -File scripts\setup-host.ps1
+  Interactive: lists the VMs VMware knows, asks for the account and passwords.
+
+.EXAMPLE
+  scripts\setup-host.ps1 -Vmx D:\VMs\win11\win11.vmx -Name win11 -User dev
   One VM with the answers given up front. Only the passwords are asked.
 
 .EXAMPLE
-  scripts\setup-host.cmd -Verify
+  scripts\setup-host.ps1 -Verify
   Only the end-to-end check, whichever of the two scripts ran last.
 
 .EXAMPLE
-  scripts\setup-host.cmd -FirewallOnly
+  scripts\setup-host.ps1 -FirewallOnly
   Administrator PowerShell: remove the kd.exe Block rules and recreate the Allow rule, nothing else.
 #>
 
@@ -70,26 +56,22 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-# The repo root. The single-file setup-host.cmd unpacks this script to a temp .ps1 and runs it, so
-# $PSScriptRoot points at the temp dir then; the launcher passes the real scripts dir in
-# NTDRIVE_SCRIPT_DIR. Fall back to $PSScriptRoot when run as a plain .ps1.
-$scriptDir = if ($env:NTDRIVE_SCRIPT_DIR) { $env:NTDRIVE_SCRIPT_DIR.TrimEnd('\') } else { $PSScriptRoot }
-$root = Split-Path -Parent $scriptDir
+$root = Split-Path -Parent $PSScriptRoot
 
 # -- output convention (the same shapes as ntdrive setup and ntdrive verify) --------------------
 
 function Step([int]$Index, [int]$Total, [string]$Title) { Write-Host "== $Index/$Total $Title" }
 function Line([string]$Tag, [string]$Subject, [string]$Detail) {
-  $text = "  " + $Tag.PadRight(5) + " " + $Subject
+  $text = $Tag + " " + $Subject
   if ($Detail) { $text += ": " + $Detail }
   Write-Host $text
 }
-function Ok([string]$Subject, [string]$Detail) { Line "OK" $Subject $Detail }
-function Fail([string]$Subject, [string]$Detail) { Line "FAIL" $Subject $Detail }
-function Warn([string]$Subject, [string]$Detail) { Line "WARN" $Subject $Detail }
-function Info([string]$Subject, [string]$Detail) { Line "INFO" $Subject $Detail }
-function Running([string]$Subject, [string]$Detail) { Line ".." $Subject $Detail }
-function Fix([string]$Text) { Write-Host "        fix: $Text" }
+function Ok([string]$Subject, [string]$Detail) { Line "[+]" $Subject $Detail }
+function Fail([string]$Subject, [string]$Detail) { Line "[-]" $Subject $Detail }
+function Warn([string]$Subject, [string]$Detail) { Line "[!]" $Subject $Detail }
+function Info([string]$Subject, [string]$Detail) { Line "[*]" $Subject $Detail }
+function Running([string]$Subject, [string]$Detail) { Line "[*]" $Subject $Detail }
+function Fix([string]$Text) { Write-Host "    [>] $Text" }
 function Verdict([string]$Word, [string]$Text) { Write-Host "${Word}: $Text" }
 
 function Invoke-NtDrive([string[]]$Arguments) {
@@ -114,7 +96,7 @@ if ($FirewallOnly) {
   Push-Location $root
   try {
     $script = (& uv run --no-sync python -c "import sys; from ntdrive.kd.firewall import fix_script; sys.stdout.write(fix_script(sys.argv[1]))" $Kd) -join "`n"
-    if ($LASTEXITCODE -ne 0 -or -not $script) { throw "could not generate the repair script (run scripts\setup-host.cmd once first)" }
+    if ($LASTEXITCODE -ne 0 -or -not $script) { throw "could not generate the repair script (run scripts\setup-host.ps1 once first)" }
   } finally {
     Pop-Location
   }
@@ -159,7 +141,7 @@ foreach ($binary in $binaries) {
 Step 2 $total "Python environment"
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
   Fail "uv" "not installed"
-  Fix "install uv from https://docs.astral.sh/uv/ then run scripts\setup-host.cmd again"
+  Fix "install uv from https://docs.astral.sh/uv/ then run scripts\setup-host.ps1 again"
   Verdict "NOT READY" "host setup did not start"
   exit 1
 }
@@ -233,7 +215,7 @@ try {
   $ready = ($LASTEXITCODE -eq 0)
 } catch {
   Fail "host setup" $_.Exception.Message
-  Fix "fix the cause above, then run scripts\setup-host.cmd again (it skips what is already done)"
+  Fix "fix the cause above, then run scripts\setup-host.ps1 again (it skips what is already done)"
   Verdict "NOT READY" "host setup did not finish"
   exit 1
 } finally {

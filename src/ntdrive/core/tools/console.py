@@ -500,7 +500,7 @@ async def con_autologon(service: NtDriveService, p: AutologonParams) -> dict[str
         raise NtDriveError(
             INVALID_ARGS,
             f"{p.vm} has no {p.account} account (guest.{field} is empty)",
-            "add it in vms.yaml (setup-guest.cmd -Standard creates ntdrive-user), or pass "
+            "add it in vms.yaml (setup-guest.ps1 -Standard creates ntdrive-user), or pass "
             "account=admin",
         )
     service.ensure_not_frozen(p.vm)

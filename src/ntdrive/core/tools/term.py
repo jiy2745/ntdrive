@@ -144,7 +144,7 @@ async def term_open(service: NtDriveService, p: OpenParams) -> dict[str, Any]:
         raise NtDriveError(
             INVALID_ARGS,
             f"{p.vm} has no standard account (guest.standard_user is empty)",
-            "in the guest run setup-guest.cmd -Standard (creates ntdrive-user), then ntdrive "
+            "in the guest run setup-guest.ps1 -Standard (creates ntdrive-user), then ntdrive "
             "setup on the host and answer the standard account prompt, or use account=admin",
         )
     service.ensure_not_frozen(p.vm)

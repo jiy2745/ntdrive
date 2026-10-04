@@ -1,6 +1,6 @@
 """`ntdrive verify`: prove that a VM is ready end to end, and say so plainly.
 
-Runs the checks a person would otherwise do by hand after setup-host.cmd and setup-guest.cmd,
+Runs the checks a person would otherwise do by hand after setup-host.ps1 and setup-guest.ps1,
 in order, and stops at the first failure with the fix: config and host (sys_health), the VM
 running, an SSH login as the configured account, the debugger transport on the host (firewall
 or serial pipe), then a real debugger round trip (attach, break in, resume, detach). A guest that
@@ -31,19 +31,19 @@ def ssh_fix(message: str, vm: str, standard: str = "") -> str:
     if "authentication" in lower and standard:
         return (
             f"the password of {standard} is wrong: run ntdrive setup --name {vm} and, at the "
-            "standard account prompt, type the name and password that setup-guest.cmd -Standard "
+            "standard account prompt, type the name and password that setup-guest.ps1 -Standard "
             "set in the guest, or run that there first"
         )
     if "authentication" in lower:
         return (
             f"the account or password is wrong: run ntdrive setup --name {vm} and type the "
-            "account and password that setup-guest.cmd created in the guest (ntdrive by default), "
-            "or run setup-guest.cmd there first"
+            "account and password that setup-guest.ps1 created in the guest (ntdrive by default), "
+            "or run setup-guest.ps1 there first"
         )
     if "guest ip" in lower or "vmware tools" in lower:
         return "VMware Tools are not running in the guest: install them (VM > Install VMware Tools)"
     return (
-        "OpenSSH does not answer: in the guest run setup-guest.cmd (installs OpenSSH, one UAC "
+        "OpenSSH does not answer: in the guest run setup-guest.ps1 (installs OpenSSH, one UAC "
         "click), then verify again"
     )
 
@@ -70,7 +70,7 @@ def verify_vm(client: DaemonClient, name: str, out: Out) -> Report:
     vm = next((v for v in health.get("vms", []) if v.get("name") == name), None)
     if vm is None:
         return failed(
-            "config", f"{name} is not in vms.yaml", "run scripts\\setup-host.cmd or ntdrive setup"
+            "config", f"{name} is not in vms.yaml", "run scripts\\setup-host.ps1 or ntdrive setup"
         )
     # The key is read from the guest during the attach below, the SSH port and the firewall are
     # tested for real further down, so those live findings are not verdicts yet.
@@ -115,7 +115,7 @@ def verify_vm(client: DaemonClient, name: str, out: Out) -> Report:
         try:
             host_side = client.call("kd_setup_host", {"vm": name, "fix_firewall": False})
         except NtDriveError as exc:
-            return failed("firewall", exc.message, exc.hint or "run scripts\\setup-host.cmd")
+            return failed("firewall", exc.message, exc.hint or "run scripts\\setup-host.ps1")
         firewall = host_side.get("firewall", {})
         if not firewall.get("ok"):
             rules = firewall.get("block_rules") or []
@@ -127,7 +127,7 @@ def verify_vm(client: DaemonClient, name: str, out: Out) -> Report:
             return failed(
                 "firewall",
                 detail,
-                "run scripts\\setup-host.cmd (one UAC prompt), or scripts\\setup-host.cmd "
+                "run scripts\\setup-host.ps1 (one UAC prompt), or scripts\\setup-host.ps1 "
                 "-FirewallOnly from an Administrator shell",
             )
         passed("firewall", "kd.exe may receive KDNET")
@@ -150,7 +150,7 @@ def verify_vm(client: DaemonClient, name: str, out: Out) -> Report:
         except NtDriveError as exc:
             if "needs a reboot" not in exc.message:
                 return failed("debugger", exc.message, exc.hint or "look at the guest console")
-            # setup-guest.cmd (or the attach itself) configured KDNET a moment ago. The reboot is
+            # setup-guest.ps1 (or the attach itself) configured KDNET a moment ago. The reboot is
             # part of the setup, so do it here rather than sending the person back and forth.
             log.running("debugger", "KDNET was configured in the guest just now, rebooting it", out)
             try:
@@ -225,7 +225,7 @@ def verify_command() -> click.Command:
             click.echo(json.dumps({"ready": ready, "vms": report}, indent=2))
         elif not names:
             log.verdict("NOT READY", "no VM is configured")
-            log.next_steps(["run scripts\\setup-host.cmd (or ntdrive setup) and pick the VM"])
+            log.next_steps(["run scripts\\setup-host.ps1 (or ntdrive setup) and pick the VM"])
         elif ready:
             log.verdict(
                 "ALL SET",
@@ -237,7 +237,7 @@ def verify_command() -> click.Command:
             log.verdict("NOT READY", ", ".join(bad))
             log.next_steps(
                 [f"{n} ({last['check']}): {last['fix']}" for n, last in bad.items()]
-                + ["then run ntdrive verify again (or scripts\\setup-host.cmd -Verify)"]
+                + ["then run ntdrive verify again (or scripts\\setup-host.ps1 -Verify)"]
             )
         if not ready:
             sys.exit(1)

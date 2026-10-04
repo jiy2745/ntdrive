@@ -59,13 +59,13 @@ Requirements live in `PRD.md`. Setup is in `README.md`.
 
 ## Output of the setup commands and scripts
 
-`ntdrive setup`, `ntdrive verify`, `scripts/setup-host.cmd` and `scripts/setup-guest.cmd` (each a
-single self-contained file that bypasses the execution policy) share one shape, defined in `src/ntdrive/cli/log.py` and copied as small functions in the scripts:
+`ntdrive setup`, `ntdrive verify`, `scripts/setup-host.ps1` and `scripts/setup-guest.ps1` (each run
+with `powershell -ExecutionPolicy Bypass -File ...`) share one shape, defined in `src/ntdrive/cli/log.py` and copied as small functions in the scripts:
 
 - A section is `== n/total title`.
-- A result line is two spaces, a tag padded to five characters (`OK`, `FAIL`, `WARN`, `INFO`, or
-  `..` for something still running), a space, the subject, and a detail after a colon.
-- A `FAIL` line is followed by `        fix: <the exact command or action>`.
+- A result line is a one-symbol tag (`[+]` success, `[-]` failure, `[!]` warning, `[*]` info or a
+  step still running), a space, the subject, and a detail after a colon.
+- A `[-]` line is followed by `    [>] <the exact command or action>`.
 - The last line is a verdict: `ALL SET: ...`, `DONE: ...` or `NOT READY: ...`, and NOT READY is
   followed by `  next:` with numbered steps.
 - Passwords are typed masked and echoed partly masked (`mask()` in `cli/setup.py`). Nothing
@@ -77,7 +77,7 @@ single self-contained file that bypasses the execution policy) share one shape, 
 uv sync                                          # once, and after a dependency change
 uv tool install -e .                             # ntdrive, ntdrive-mcp, ntdrived on PATH, running this checkout
 uv tool install -e . --reinstall                 # after a dependency change, with every MCP client closed
-uv run --no-sync pre-commit install              # once per clone (scripts/setup-host.cmd does it too)
+uv run --no-sync pre-commit install              # once per clone (scripts/setup-host.ps1 does it too)
 uv run --no-sync pre-commit run --all-files      # ruff format, ruff check, mypy, prettier, ASCII check: what CI runs
 uv run --no-sync pytest -q                       # unit tests with fakes for vmrun, kd.exe and SSH: what CI runs next
 uv run --no-sync ntdrive daemon restart          # after editing daemon-side code, or the old code keeps running
@@ -141,10 +141,10 @@ Commit messages follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, 
   `daemon` group and `term attach` (its body is `cli/attach.py`). `cli/setup.py` (`ntdrive setup`,
   writes `vms.yaml`), `cli/verify.py` (`ntdrive verify`, the end-to-end check) and `cli/log.py`
   (the shared output shape) are hand-written too.
-- `scripts/`: `setup-host.cmd` and `setup-guest.cmd`, each a single self-contained file (a batch
-  header plus the PowerShell it unpacks to a temp file and runs, past the `#:::NTDRIVE-PS-BELOW:::`
-  marker) that bypasses the execution policy, `probe-guest.ps1` (a guest diagnostic),
-  `check_ascii.py` (the hook) and `tools_table.py` (the README table).
+- `scripts/`: `setup-host.ps1` and `setup-guest.ps1` (run with `powershell -ExecutionPolicy Bypass
+  -File ...`, and setup-guest refuses to run unelevated and says to reopen PowerShell as an
+  administrator), `probe-guest.ps1` (a guest diagnostic), `check_ascii.py` (the hook) and
+  `tools_table.py` (the README table).
 - `tests/conftest.py`: `FakeVmrun`, `FakeTransport`, `FakeKdProcess` and the `service` fixture.
   `tests/test_registry.py` pins the tool list and the README table, `tests/test_faces.py` the
   front-door parity over HTTP, `tests/test_imports.py` the light CLI and MCP imports. Live testing
@@ -234,7 +234,7 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   and
   `con_run detach=true` starts a long-lived provider without the tool's timeout killing it.
 - `Add-WindowsCapability` for OpenSSH fails on Insider builds (no Feature-on-Demand package for
-  them). The Win32-OpenSSH zip works, and `scripts/setup-guest.cmd` falls back to it on its own.
+  them). The Win32-OpenSSH zip works, and `scripts/setup-guest.ps1` falls back to it on its own.
 - PSReadLine redraws the input line on every keystroke and floods terminal reads. The terminal
   unloads it at session start.
 - The daemon runs detached, without a console. A child started the normal way opens a console
