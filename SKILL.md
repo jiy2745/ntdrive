@@ -80,7 +80,7 @@ KDNET is the default. `kd_setup_host` reads the host firewall rules for kd.exe a
 block it, repairs them through one UAC prompt that a person at the desktop must approve (pass
 `fix_firewall=false` to only look, `sys_health` reports the same check as `kdnet_firewall`).
 When no KDNET key is saved yet, `kd_attach` first reads the port and key that
-scripts/setup-guest.ps1 configured in the guest and saves them. `kd_setup_guest` is the explicit
+scripts/setup-guest.cmd configured in the guest and saves them. `kd_setup_guest` is the explicit
 form of that step (`adopted: true`), for a guest set up by hand (it then writes the settings,
 `needs_reboot: true`, so `vm_reboot mode=soft` next) or to change the port or key.
 
@@ -230,7 +230,7 @@ result against a fresh soft reboot before trusting it.
   it is a one-time guest fix.** On a resume or a NIC re-detect Windows can classify the network as
   Public, and the default Windows OpenSSH rule is scoped to Private/Domain, so inbound 22 is blocked
   and the host's SSH is reset, while `file_push`/`file_pull` keep working over the VMware Tools
-  fallback (slower, not a blocker). `scripts/setup-guest.ps1` already scopes the rule to every
+  fallback (slower, not a blocker). `scripts/setup-guest.cmd` already scopes the rule to every
   profile (`-Profile Any`), so a guest set up with the current script is immune. A snapshot baked
   before that still has the default scope, so widen the rule once on the running guest and re-bake:
   `term_exec` (or `con_run`) `Set-NetFirewallRule -Name OpenSSH-Server-In-TCP -Enabled True -Profile

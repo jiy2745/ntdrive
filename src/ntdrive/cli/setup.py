@@ -511,7 +511,7 @@ def run_setup(
     log.next_steps(
         [
             (
-                f"in the guest: copy setup-guest.cmd and setup-guest.ps1 in and run {guest_cmd} "
+                f"in the guest: copy setup-guest.cmd in and run {guest_cmd} "
                 f"({guest_does}, one UAC click)"
             ),
             (

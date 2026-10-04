@@ -23,7 +23,7 @@ vms:
 
     # Kernel debug transport. "net" (default) is KDNET over UDP: the host firewall must allow
     # kd.exe inbound, which `ntdrive kd setup-host <vm>` repairs through one UAC prompt
-    # (scripts/setup-host.ps1 -FirewallOnly does the same by hand), and the guest NIC must be
+    # (scripts/setup-host.cmd -FirewallOnly does the same by hand), and the guest NIC must be
     # e1000e. "serial" is kd over a VMware named pipe: no network, no firewall, no prompt. Run
     # `ntdrive kd setup-host <vm>` once with the VM off to add the port to the vmx.
     kd_transport: net # net | serial

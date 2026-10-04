@@ -17,7 +17,7 @@ shell on the host.
 
 Fastest path in (guest first, then host):
 
-1. In the guest, copy `scripts\setup-guest.cmd` and `scripts\setup-guest.ps1` in and run the `.cmd`.
+1. In the guest, copy `scripts\setup-guest.cmd` in and run it.
 2. On the host:
 
    ```powershell
@@ -76,8 +76,8 @@ the VM settings (`bcdedit /debug on` needs that) and, for KDNET, the `e1000e` NI
 then host: the host script ends with the end-to-end check and reboots the guest itself when the
 debugger needs it. `ntdrive sys health` names the fix for anything that is missing.
 
-**1. Guest.** Copy `scripts\setup-guest.cmd` and `scripts\setup-guest.ps1` into the guest (drag and
-drop works once VMware Tools are in) and run the `.cmd` from any shell or by double click. It asks
+**1. Guest.** Copy `scripts\setup-guest.cmd` into the guest (drag and
+drop works once VMware Tools are in) and run it from any shell or by double click. It asks
 for administrator rights itself (one UAC click), creates the local administrator `ntdrive` and
 asks for its password (type the same one in `ntdrive setup` on the host), installs OpenSSH Server
 with PowerShell as the default shell, opens port 22 and turns on KDNET. The host IP comes from the

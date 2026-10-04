@@ -5,7 +5,7 @@ Allow rule for kd.exe. Windows adds inbound Block rules for a program when its f
 raises the firewall prompt and nobody clicks Allow, and a Block rule wins over any Allow rule.
 Reading the rules needs no privilege. Changing them needs an administrator, so the repair runs
 a short script through Start-Process -Verb RunAs, which shows exactly one UAC prompt.
-scripts/setup-host.ps1 -FirewallOnly runs the same script from an elevated shell.
+scripts/setup-host.cmd -FirewallOnly runs the same script from an elevated shell.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from ntdrive.hostproc import run_hidden
 ALLOW_RULE = "ntdrive kd.exe KDNET"
 POWERSHELL = "powershell.exe"
 CHECK_TIMEOUT = 30.0
-MANUAL_FIREWALL_HINT = "run scripts/setup-host.ps1 -FirewallOnly as Administrator once"
+MANUAL_FIREWALL_HINT = "run scripts/setup-host.cmd -FirewallOnly as Administrator once"
 TOOL_FIREWALL_HINT = "run kd_setup_host, one UAC prompt"
 
 

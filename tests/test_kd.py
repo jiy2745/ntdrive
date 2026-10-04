@@ -418,7 +418,7 @@ async def test_kd_setup_guest_writes_config(service: NtDriveService, fake_transp
     audit = (service.log_dir / "audit.jsonl").read_text()
     assert key not in audit
 
-    # A guest that already debugs to this host (setup-guest.ps1 did it): the port and key are
+    # A guest that already debugs to this host (setup-guest.cmd did it): the port and key are
     # read back and saved, nothing is rewritten, and no reboot is needed once debug is on.
     fake_transport.exec_log.clear()
     fake_transport.exec_responses["bcdedit /dbgsettings"] = (

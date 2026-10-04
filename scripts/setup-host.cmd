@@ -1,10 +1,243 @@
 @echo off
-rem Runs setup-host.ps1 from any shell or by double click, whatever the PowerShell execution
-rem policy says. Arguments pass through, for example: setup-host.cmd -FirewallOnly
-rem A double click closes the window at the end and the log is lost, so keep it open then. When
-rem started from a shell (cmdcmdline does not name this script) it returns without pausing.
+rem setup-host.cmd runs this file's own PowerShell (below the marker line), from any shell or by
+rem double click whatever the PowerShell execution policy is. Nothing here needs elevation except
+rem -FirewallOnly. Arguments pass through, for example: setup-host.cmd -Verify
+setlocal
+set "_ntdrive_self=%~f0"
+set "_ntdrive_ps=%TEMP%\ntdrive-setup-host.ps1"
 echo %cmdcmdline% | find /i "%~nx0" >nul && set "_ntdrive_pause=1"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup-host.ps1" %*
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$t=[IO.File]::ReadAllText($env:_ntdrive_self);$i=$t.LastIndexOf('#:::NTDRIVE-PS-BELOW:::');$j=$t.IndexOf([char]10,$i);[IO.File]::WriteAllText($env:_ntdrive_ps,$t.Substring($j+1))"
+if errorlevel 1 ( echo could not unpack the embedded PowerShell & pause & exit /b 1 )
+set "NTDRIVE_SCRIPT_DIR=%~dp0"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%_ntdrive_ps%" %*
 set "_ntdrive_code=%errorlevel%"
 if defined _ntdrive_pause pause
 exit /b %_ntdrive_code%
+#:::NTDRIVE-PS-BELOW:::
+<#
+.SYNOPSIS
+  Set up a Windows 11 host for ntdrive in one run.
+
+.DESCRIPTION
+  Six numbered steps: checks vmrun.exe, kd.exe and kdnet.exe, installs the Python environment
+  with uv, puts the ntdrive, ntdrive-mcp and ntdrived commands on PATH (uv tool install,
+  editable, so they run this checkout), runs `ntdrive setup` for each VM you want (pick it from
+  the VMware library, enter the guest account and the passwords, which go to User environment
+  variables and never into a file), runs `ntdrive kd setup-host` for every configured VM (net,
+  the default: repairs the host firewall for kd.exe through one UAC prompt. serial: adds the
+  named-pipe COM port to the vmx while the VM is off) and ends with `ntdrive verify`, which
+  proves every VM end to end (SSH login, debugger attach, break in, resume) and prints ALL SET,
+  or the first thing to fix and how.
+
+  Nothing here needs an elevated PowerShell. Run it again to add a VM. -Verify runs only the last
+  step, for example after setup-guest.cmd ran in a guest later. -FirewallOnly is the manual route
+  for the KDNET firewall rules and is the one thing that needs an Administrator PowerShell.
+
+  Output follows the ntdrive convention: `== n/total title` sections, OK / FAIL / WARN / INFO
+  lines, `fix:` under a FAIL, and a verdict (ALL SET, DONE or NOT READY) with numbered next steps.
+
+.EXAMPLE
+  scripts\setup-host.cmd
+  Interactive: lists the VMs VMware knows, asks for the account and passwords. The .cmd launcher
+  runs this script whatever the PowerShell execution policy says.
+
+.EXAMPLE
+  scripts\setup-host.cmd -Vmx D:\VMs\win11\win11.vmx -Name win11 -User dev
+  One VM with the answers given up front. Only the passwords are asked.
+
+.EXAMPLE
+  scripts\setup-host.cmd -Verify
+  Only the end-to-end check, whichever of the two scripts ran last.
+
+.EXAMPLE
+  scripts\setup-host.cmd -FirewallOnly
+  Administrator PowerShell: remove the kd.exe Block rules and recreate the Allow rule, nothing else.
+#>
+
+[CmdletBinding()]
+param(
+  [string]$Vmrun = "C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe",
+  [string]$Kd = "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\kd.exe",
+  [string]$Vmx,
+  [string]$Name,
+  [string]$User,
+  [string]$StandardUser,
+  [string]$Transport,
+  [switch]$InlineSecrets,
+  [switch]$SkipVms,
+  [switch]$Verify,
+  [switch]$FirewallOnly
+)
+
+$ErrorActionPreference = "Stop"
+# The repo root. The single-file setup-host.cmd unpacks this script to a temp .ps1 and runs it, so
+# $PSScriptRoot points at the temp dir then; the launcher passes the real scripts dir in
+# NTDRIVE_SCRIPT_DIR. Fall back to $PSScriptRoot when run as a plain .ps1.
+$scriptDir = if ($env:NTDRIVE_SCRIPT_DIR) { $env:NTDRIVE_SCRIPT_DIR.TrimEnd('\') } else { $PSScriptRoot }
+$root = Split-Path -Parent $scriptDir
+
+# -- output convention (the same shapes as ntdrive setup and ntdrive verify) --------------------
+
+function Step([int]$Index, [int]$Total, [string]$Title) { Write-Host "== $Index/$Total $Title" }
+function Line([string]$Tag, [string]$Subject, [string]$Detail) {
+  $text = "  " + $Tag.PadRight(5) + " " + $Subject
+  if ($Detail) { $text += ": " + $Detail }
+  Write-Host $text
+}
+function Ok([string]$Subject, [string]$Detail) { Line "OK" $Subject $Detail }
+function Fail([string]$Subject, [string]$Detail) { Line "FAIL" $Subject $Detail }
+function Warn([string]$Subject, [string]$Detail) { Line "WARN" $Subject $Detail }
+function Info([string]$Subject, [string]$Detail) { Line "INFO" $Subject $Detail }
+function Running([string]$Subject, [string]$Detail) { Line ".." $Subject $Detail }
+function Fix([string]$Text) { Write-Host "        fix: $Text" }
+function Verdict([string]$Word, [string]$Text) { Write-Host "${Word}: $Text" }
+
+function Invoke-NtDrive([string[]]$Arguments) {
+  # --no-sync: the environment was synced in step 2, and a re-sync would rewrite ntdrive-mcp.exe,
+  # which fails while an MCP client keeps it open.
+  & uv run --no-sync ntdrive @Arguments
+  if ($LASTEXITCODE -ne 0) { throw "ntdrive $($Arguments -join ' ') failed (exit $LASTEXITCODE)" }
+}
+
+# -- manual firewall route ------------------------------------------------------------------------
+
+if ($FirewallOnly) {
+  Step 1 1 "Firewall for kd.exe (KDNET UDP inbound), manual route"
+  $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+  if (-not $isAdmin) {
+    Fail "administrator rights" "-FirewallOnly needs an Administrator PowerShell"
+    Fix "open PowerShell as Administrator and run it there, or let ntdrive kd setup-host <vm> do it through a UAC prompt"
+    exit 1
+  }
+  # The repair script is generated by the package, so the tool route and this route agree.
+  Push-Location $root
+  try {
+    $script = (& uv run --no-sync python -c "import sys; from ntdrive.kd.firewall import fix_script; sys.stdout.write(fix_script(sys.argv[1]))" $Kd) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or -not $script) { throw "could not generate the repair script (run scripts\setup-host.cmd once first)" }
+  } finally {
+    Pop-Location
+  }
+  Invoke-Expression $script
+  Ok "firewall" "Block rules for $Kd removed, Allow rule 'ntdrive kd.exe KDNET' recreated"
+  Verdict "DONE" "kd.exe may receive KDNET"
+  exit 0
+}
+
+# -- verify only ----------------------------------------------------------------------------------
+
+if ($Verify) {
+  Push-Location $root
+  try {
+    # A failed sync (for example the MCP client holding ntdrive-mcp.exe) must not stop the check:
+    # the environment from the last full run is enough. No stderr redirection here, because with
+    # ErrorActionPreference Stop that turns uv's progress lines into a terminating error.
+    uv sync | Out-Null
+    & uv run --no-sync ntdrive verify
+    exit $LASTEXITCODE
+  } finally {
+    Pop-Location
+  }
+}
+
+# -- the six steps --------------------------------------------------------------------------------
+
+$total = 6
+$ready = $false
+
+Step 1 $total "Host binaries"
+$binaries = @(
+  @{ Path = $Vmrun; Fix = "install VMware Workstation Pro 17.6 or newer (it provides vmrun.exe)" },
+  @{ Path = $Kd; Fix = "install the Debugging Tools for Windows (Windows SDK or WDK), or pass -Kd <path>" },
+  @{ Path = (Join-Path (Split-Path $Kd) "kdnet.exe"); Fix = "install the Debugging Tools for Windows (Windows SDK or WDK)" }
+)
+foreach ($binary in $binaries) {
+  $leaf = Split-Path $binary.Path -Leaf
+  if (Test-Path $binary.Path) { Ok $leaf $binary.Path } else { Fail $leaf "missing at $($binary.Path)"; Fix $binary.Fix }
+}
+
+Step 2 $total "Python environment"
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+  Fail "uv" "not installed"
+  Fix "install uv from https://docs.astral.sh/uv/ then run scripts\setup-host.cmd again"
+  Verdict "NOT READY" "host setup did not start"
+  exit 1
+}
+Push-Location $root
+try {
+  Running "uv sync" "installing the Python environment"
+  uv sync
+  if ($LASTEXITCODE -ne 0) { throw "uv sync failed, see the lines above" }
+  Ok "uv sync" "environment ready"
+  if (Test-Path (Join-Path $root ".git")) {
+    uv run --no-sync pre-commit install | Out-Null
+    Ok "pre-commit" "hooks installed for this clone"
+  }
+
+  Step 3 $total "Commands on PATH (ntdrive, ntdrive-mcp, ntdrived)"
+  $installed = @(uv tool list 2>$null) -match '^ntdrive v'
+  if ($installed) {
+    # An editable install already follows this checkout. Reinstalling would rewrite the
+    # launchers, which fails while an MCP client (Claude Code) keeps ntdrive-mcp.exe open.
+    Ok "ntdrive" "already installed ($installed)"
+    Info "after a dependency change" "uv tool install --editable --reinstall . (with Claude Code closed)"
+  } else {
+    uv tool install --editable .
+    if ($LASTEXITCODE -eq 0) {
+      Ok "ntdrive" "installed, editable, so the commands run this checkout"
+    } else {
+      Warn "ntdrive" "uv tool install failed, the commands still work through uv run"
+    }
+    $toolBin = (uv tool dir --bin).Trim()
+    if (-not (($env:Path -split ";") -contains $toolBin)) {
+      Warn "PATH" "$toolBin is not on PATH"
+      Fix "run: uv tool update-shell, then open a new terminal"
+    }
+  }
+
+  Step 4 $total "VMs (vms.yaml in %LOCALAPPDATA%\ntdrive, passwords in User environment variables)"
+  if ($SkipVms) {
+    Info "skipped" "-SkipVms"
+  } else {
+    $first = @("setup")
+    if ($Vmx) { $first += @("--vmx", $Vmx) }
+    if ($Name) { $first += @("--name", $Name) }
+    if ($User) { $first += @("--user", $User) }
+    if ($StandardUser) { $first += @("--standard-user", $StandardUser) }
+    if ($Transport) { $first += @("--transport", $Transport) }
+    $again = @("setup")
+    if ($InlineSecrets) { $first += "--inline-secrets"; $again += "--inline-secrets" }
+    Invoke-NtDrive $first
+    while (-not $Vmx -and (Read-Host "Add another VM? [y/N]") -match "^[Yy]") {
+      Invoke-NtDrive $again
+    }
+  }
+
+  Step 5 $total "Debugger transport per VM (net: firewall, one UAC prompt. serial: pipe in the vmx, VM off)"
+  Invoke-NtDrive @("daemon", "restart") | Out-Null
+  Ok "daemon" "restarted on the current code and config"
+  $vms = ((& uv run --no-sync ntdrive --json vm list) | ConvertFrom-Json).vms
+  foreach ($vm in $vms) {
+    if ($vm.kd.transport -eq "serial" -and $vm.power -ne "off") {
+      Warn $vm.name "serial transport, but the VM is running"
+      Fix "power it off, then run: ntdrive kd setup-host $($vm.name)"
+      continue
+    }
+    Running $vm.name "kd setup-host ($($vm.kd.transport))"
+    & uv run --no-sync ntdrive kd setup-host $vm.name | Out-Null
+    if ($LASTEXITCODE -eq 0) { Ok $vm.name "host side ready ($($vm.kd.transport))" } else { Warn $vm.name "kd setup-host did not finish, see above" }
+  }
+
+  Step 6 $total "Verify (config, power, SSH login, firewall, then attach, break in, resume)"
+  & uv run --no-sync ntdrive verify
+  $ready = ($LASTEXITCODE -eq 0)
+} catch {
+  Fail "host setup" $_.Exception.Message
+  Fix "fix the cause above, then run scripts\setup-host.cmd again (it skips what is already done)"
+  Verdict "NOT READY" "host setup did not finish"
+  exit 1
+} finally {
+  Pop-Location
+}
+
+if ($ready) { exit 0 } else { exit 1 }

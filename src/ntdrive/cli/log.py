@@ -4,7 +4,7 @@ Section headers are `== n/total title`. Result lines carry a fixed-width tag in 
 FAIL, WARN, INFO, or `..` for something still running), then the subject, then a detail after a
 colon. A failure is followed by `fix:` lines that say exactly what to do. The last line of a run
 is a verdict, ALL SET, DONE or NOT READY, and NOT READY is followed by numbered next steps.
-Secrets never appear. scripts/setup-host.ps1 and scripts/setup-guest.ps1 print the same shapes.
+Secrets never appear. scripts/setup-host.cmd and scripts/setup-guest.cmd print the same shapes.
 """
 
 from __future__ import annotations

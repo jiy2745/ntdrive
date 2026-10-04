@@ -11,7 +11,7 @@ update when a tool changes. Read `AGENTS.md` and follow it.
 ## Claude Code specifics
 
 - `.mcp.json` registers the `ntdrive` MCP server as the installed `ntdrive-mcp` command, with no
-  path. Install it once with `uv tool install -e .` (`scripts/setup-host.ps1` does this), which
+  path. Install it once with `uv tool install -e .` (`scripts/setup-host.cmd` does this), which
   makes `ntdrive`, `ntdrive-mcp` and `ntdrived` run this checkout's code from any directory.
   Allow its tools with the permission rule `mcp__ntdrive__*`. The wait tools long-poll, so the
   MCP tool-call timeout must be above the daemon cap (600 s by default).
