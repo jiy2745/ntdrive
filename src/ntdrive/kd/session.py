@@ -534,13 +534,21 @@ class KdSession:
             )
 
     async def _interrupt_wedged_command(
-        self, cmd: str, sentinel: str, start: int, timeout: float, original: NtDriveError
+        self,
+        cmd: str,
+        sentinel: str,
+        start: int,
+        timeout: float,
+        original: NtDriveError,
+        at_bugcheck: bool = False,
     ) -> NtDriveError:
         """Break into kd.exe to end a command that never returned. Returns the error to raise.
 
         The break is delivered to kd.exe's console, so it interrupts the debugger's own command
         loop rather than the target. When it works the prompt comes back and the session is still
-        usable for the next command; when it does not, say plainly that kd_detach is the way out.
+        usable for the next command; when it does not, say what the way out is. At a bugcheck the
+        way out is not kd_detach: detaching resumes the target, which completes the crash and
+        reboots the guest, so the warning points elsewhere.
         """
         proc = self._proc
         if proc is None:
@@ -549,23 +557,55 @@ class KdSession:
         with contextlib.suppress(Exception):
             await loop.run_in_executor(None, self._break, proc)
         recovered = await self._wait_state({KdState.BROKEN}, min(timeout, 15.0), allow_timeout=True)
+        # The usual offender: over a network symbol path the first lookup during a processor switch
+        # (~Ns) or a symbol-heavy command blocks on the symbol server. The guest's cache cures it.
+        sympath_hint = (
+            "A processor switch (processor=/~Ns) or a symbol-heavy command (x, u, ln, !analyze) "
+            "over a network symbol path wedges on the first lookup: set a cache-only path with "
+            r".sympath cache*C:\symbols once symbols are cached, or pre-fetch with .reload /f "
+            "while broken, then retry."
+        )
         if recovered:
+            if at_bugcheck:
+                hint = (
+                    "the debugger is back at a prompt and the target is still at the bugcheck, so "
+                    "the next kd_exec works. Do NOT kd_detach or kd_go to recover: both resume the "
+                    "target, which completes the crash and reboots the guest, losing the bugcheck "
+                    "context. " + sympath_hint
+                )
+            else:
+                hint = (
+                    "the debugger is back at a prompt, so the next kd_exec works. That command "
+                    "wedges kd over this transport: avoid it, or raise timeout. `!process 0 0 "
+                    "<name>` is a known offender over KDNET. " + sympath_hint
+                )
             return NtDriveError(
                 TIMEOUT,
                 f"kd command {cmd!r} did not finish in {timeout:.0f}s and was interrupted",
-                "the debugger is back at a prompt, so the next kd_exec works. That command wedges "
-                "kd over this transport: avoid it, or raise timeout. `!process 0 0 <name>` is a "
-                "known offender over KDNET.",
+                hint,
                 reason="kd_command_wedged",
                 interrupted=True,
+                at_bugcheck=at_bugcheck,
+            )
+        if at_bugcheck:
+            hint = (
+                "kd.exe is wedged and the break did not recover it. The target is at a bugcheck, "
+                "so neither kd_detach nor a re-attach preserves it: losing the debugger lets the "
+                "crash complete and the guest reboots. The bugcheck context is likely already "
+                "lost, so kd_detach force=true, kd_attach, and re-trigger. " + sympath_hint
+            )
+        else:
+            hint = (
+                "kd.exe is stuck, not the guest: kd_detach then kd_attach to get a usable prompt "
+                "again. The guest itself keeps running (vm_state probe=true confirms)."
             )
         return NtDriveError(
             TIMEOUT,
             f"kd command {cmd!r} wedged the debugger and the break did not recover it",
-            "kd.exe is stuck, not the guest: kd_detach then kd_attach to get a usable prompt "
-            "again. The guest itself keeps running (vm_state probe=true confirms).",
+            hint,
             reason="kd_wedged",
             interrupted=False,
+            at_bugcheck=at_bugcheck,
         )
 
     async def exec(
@@ -573,6 +613,11 @@ class KdSession:
     ) -> list[dict[str, Any]]:
         """Run commands one after another and return each one's output."""
         self._require_broken()
+        # Why the target is broken decides what a wedge may do: at a bugcheck, resuming completes
+        # the crash and reboots, so an interrupt (or the detach a caller might reach for) must warn
+        # loudly rather than quietly cost the crash context. Read it before any command overwrites
+        # last_event (the break the interrupt itself raises classifies as a user_break).
+        at_bugcheck = bool(self.last_event and self.last_event.get("event") == "bugcheck")
         results: list[dict[str, Any]] = []
         async with self._lock:
             for cmd in cmds:
@@ -593,7 +638,7 @@ class KdSession:
                     # CTRL_BREAK goes to kd.exe, not the target, which is how WinDbg interrupts a
                     # running extension. Try it once so the session stays usable.
                     recovery = await self._interrupt_wedged_command(
-                        cmd, sentinel, start, timeout, exc
+                        cmd, sentinel, start, timeout, exc, at_bugcheck
                     )
                     raise recovery from exc
                 raw = bytes(self._buf[start - self._base : idx - self._base])

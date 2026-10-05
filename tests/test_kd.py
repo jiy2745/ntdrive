@@ -536,6 +536,48 @@ async def test_kd_exec_frames_a_line_eating_meta_command(
     assert not any("; .echo" in c for c in proc.commands)
 
 
+async def test_kd_exec_interrupts_a_wedged_command_and_stays_usable(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # A command that never returns (over KDNET `!process 0 0 <name>` is the classic) must not leave
+    # the session dead: ntdrive breaks into kd.exe, the prompt comes back, and the error says the
+    # next kd_exec works and names the network-sympath wedge so the caller can avoid it.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    kd_procs[-1].wedge_on = "!process 0 0 explorer.exe"
+    with pytest.raises(NtDriveError) as exc:
+        await service.call(
+            "kd_exec", {"vm": "win11-dev", "cmd": "!process 0 0 explorer.exe", "timeout": 1}
+        )
+    assert exc.value.code == TIMEOUT
+    assert exc.value.extra["interrupted"] is True and exc.value.extra["at_bugcheck"] is False
+    assert "the next kd_exec works" in exc.value.hint
+    assert "cache*" in exc.value.hint  # the sympath cure is offered
+    # The session recovered to a prompt, so a plain command runs again.
+    again = await service.call("kd_exec", {"vm": "win11-dev", "cmd": "r rip"})
+    assert again["outputs"][0]["output"].startswith("output of [r rip]")
+
+
+async def test_a_wedge_at_a_bugcheck_warns_against_detaching(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # At a bugcheck the target is halted in KeBugCheckEx: resuming completes the crash and reboots,
+    # losing the context. So a wedge-interrupt there must not tell the caller to kd_detach (which
+    # resumes), the way the non-bugcheck hint does.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    kd_procs[-1].bugcheck()  # the target is now broken at a bugcheck
+    event = await service.call("kd_wait_event", {"vm": "win11-dev", "timeout": 5})
+    assert event["event"] == "bugcheck"
+    kd_procs[-1].wedge_on = "~1s"
+    with pytest.raises(NtDriveError) as exc:
+        await service.call(
+            "kd_exec", {"vm": "win11-dev", "cmd": "dps rsp", "processor": 1, "timeout": 1}
+        )
+    assert exc.value.code == TIMEOUT and exc.value.extra["at_bugcheck"] is True
+    assert "Do NOT kd_detach" in exc.value.hint
+    assert "completes the crash" in exc.value.hint
+
+
 async def test_kd_break_timeout_points_at_reconnecting_the_guest(
     service: NtDriveService, kd_procs: list[FakeKdProcess]
 ) -> None:

@@ -107,7 +107,8 @@ class ExecParams(VmParams):
         description=(
             "Switch to this processor (~Ns) before the commands. A break lands on whichever "
             "processor hit it, and kd_state's last_event reports which one, so pass it to run "
-            "where the break happened"
+            "where the break happened. The switch resolves symbols, so over a network symbol path "
+            "it can wedge on the first lookup: set .sympath cache* or pre-.reload /f first"
         ),
     )
 
@@ -467,8 +468,11 @@ async def kd_go(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     "Run one or more debugger commands at the kd> prompt and return each command's output. A "
     "running target (right after kd_attach, or after kd_go) is broken into first, so the first "
     "command no longer fails with kd_not_broken. A symbol-heavy command (x, u, ln, a first "
-    "!extension) can be slow while symbols download: raise its timeout, and if one wedges ntdrive "
-    "interrupts it so the next kd_exec works.",
+    "!extension) or a processor switch can be slow while symbols download: over a network symbol "
+    "path the first lookup blocks on the server, so set a cache-only path "
+    "(.sympath cache*C:\\symbols) or pre-fetch (.reload /f) once symbols are cached. Raise the "
+    "timeout, and if one wedges ntdrive interrupts it so the next kd_exec works (at a bugcheck the "
+    "interrupt keeps the break, but do not kd_detach there: detaching resumes and reboots).",
     ExecParams,
     positional=("vm", "cmd"),
     effect="destructive",

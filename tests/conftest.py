@@ -391,6 +391,8 @@ class FakeKdProcess:
         self.commands: list[str] = []
         self.broken = False
         self.break_on_go = False  # when True a `g` is followed by a breakpoint hit
+        self.wedge_on: str | None = None  # a command that never returns, to test interrupt recovery
+        self._swallow_echo = False
         self.eval_value = 1  # what `? <expr>` evaluates to, for condition tests
         self.bps: list[str] = []
         self._next_bp = 0
@@ -405,6 +407,11 @@ class FakeKdProcess:
 
     def handle(self, line: str) -> None:
         self.commands.append(line)
+        if self.wedge_on is not None and line.strip() == self.wedge_on:
+            # kd is stuck on this command: print nothing and eat the sentinel .echo that follows,
+            # so the caller times out and has to interrupt (break_in), just like a real wedge.
+            self._swallow_echo = True
+            return
         if line.strip() == "g":
             self.broken = False
             if self.break_on_go:
@@ -445,6 +452,10 @@ class FakeKdProcess:
             threading.Timer(0.1, self.reconnect).start()
             return
         if line.startswith(".echo "):
+            if self._swallow_echo:
+                # The wedged command swallowed its framing .echo too: no sentinel comes back.
+                self._swallow_echo = False
+                return
             # The sentinel arrives on its own line now, framing the command written before it.
             self.inject(line[len(".echo ") :].encode() + b"\r\nkd> ")
             return
