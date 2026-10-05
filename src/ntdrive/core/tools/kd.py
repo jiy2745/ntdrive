@@ -14,7 +14,13 @@ from ntdrive.config import VmConfig, save_kdnet_settings
 from ntdrive.core.registry import tool
 from ntdrive.core.state import KdState
 from ntdrive.core.tools.common import VmParams
-from ntdrive.errors import BACKEND_ERROR, INVALID_ARGS, NtDriveError
+from ntdrive.errors import (
+    BACKEND_ERROR,
+    INVALID_ARGS,
+    KD_NOT_ATTACHED,
+    KD_NOT_BROKEN,
+    NtDriveError,
+)
 from ntdrive.kd.firewall import MANUAL_FIREWALL_HINT
 from ntdrive.kd.session import generate_kdnet_key, parse_bugcheck
 
@@ -111,6 +117,66 @@ class ExecParams(VmParams):
             "it can wedge on the first lookup: set .sympath cache* or pre-.reload /f first"
         ),
     )
+
+
+class CaptureFaultParams(VmParams):
+    """kd_capture_fault."""
+
+    processor: int | None = Field(
+        default=None,
+        ge=0,
+        le=1023,
+        description=(
+            "Processor to switch to (~Ns). Defaults to the one the bugcheck broke on, from "
+            "kd_state last_event"
+        ),
+    )
+    fault_rip: str | None = Field(
+        default=None,
+        description=(
+            "Faulting instruction address to find on the stack. Defaults to bugcheck Arg3 (the "
+            "0x50 PAGE_FAULT case). Pass it for bugchecks that carry the fault address elsewhere"
+        ),
+    )
+    context_record: str | None = Field(
+        default=None,
+        description=(
+            "A CONTEXT pointer to .cxr instead of searching the stack, for bugchecks that pass one "
+            "(0x3B / 0x7E Arg3). Takes precedence over fault_rip"
+        ),
+    )
+    trap_offset: int = Field(
+        default=0x168,
+        ge=0,
+        le=0x1000,
+        description=(
+            "Offset of Rip inside KTRAP_FRAME on x64 (0x168 on current Windows). The trap frame "
+            "base is a stack match of fault_rip minus this"
+        ),
+    )
+    match_index: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Which stack match of fault_rip is the KTRAP_FRAME, when several carry the same value. "
+            "All candidates are returned so another can be chosen"
+        ),
+    )
+    search_quads: int = Field(
+        default=0x800,
+        ge=0x10,
+        le=0x4000,
+        description="How many quadwords above rsp to scan for the trap frame",
+    )
+    cache_symbols: bool = Field(
+        default=True,
+        description=(
+            "Set a cache-only symbol path (.sympath cache*<cache>) for the session first, so the "
+            "symbol-heavy capture cannot wedge on a network symbol server and drop the bugcheck. "
+            "false keeps the current path"
+        ),
+    )
+    timeout: float = Field(default=30, ge=1, description="Seconds per debugger command")
 
 
 class SampleParams(VmParams):
@@ -535,6 +601,150 @@ async def kd_bugcheck(service: NtDriveService, p: VmParams) -> dict[str, Any]:
             ".bugcheck reported no code, so the target is probably not in a bugcheck. "
             "kd_wait_event returns the code and arguments directly when it catches one"
         )
+    return result
+
+
+def _local_symbol_cache(sympath: str) -> str:
+    r"""The local cache directory out of a symbol path, for a cache-only .sympath.
+
+    `srv*C:\symbols*https://...` caches downloads under `C:\symbols`, so a cache-only path that
+    serves those without touching the network is `cache*C:\symbols`. The cache is the first element
+    that looks like a drive path; with none, the ntdrive default is assumed.
+    """
+    for part in sympath.split("*"):
+        if re.match(r"^[A-Za-z]:[\\/]", part):
+            return part
+    return r"C:\symbols"
+
+
+def _stack_search_hits(text: str) -> list[int]:
+    """Addresses from `s -q` output: each match line leads with the address of the found value."""
+    hits: list[int] = []
+    for line in text.splitlines():
+        m = re.match(r"\s*([0-9a-fA-F`]{8,19})\b", line)
+        if not m:
+            continue
+        token = m.group(1).replace("`", "")
+        if re.fullmatch(r"[0-9a-fA-F]{8,16}", token):
+            with contextlib.suppress(ValueError):
+                hits.append(int(token, 16))
+    return hits
+
+
+@tool(
+    "kd_capture_fault",
+    "Capture an OOB-write or fault bugcheck in one call: switch to the processor the bugcheck "
+    "broke on, find the KTRAP_FRAME on the stack by the faulting RIP (bugcheck Arg3 by default) "
+    "and .trap it (or .cxr a context_record), then return the unwound call stack (kb), the "
+    "faulting instruction and the kernel module bases (lm). Needs a bugcheck break (kd_wait_event "
+    "catches one). It sets a cache-only symbol path first so the symbol-heavy commands cannot "
+    "wedge on a network symbol server and drop the target mid-capture (cache_symbols=false keeps "
+    "the current path). Pass fault_rip or context_record for bugchecks that do not carry the fault "
+    "address in Arg3. Do not kd_detach or kd_go afterwards to leave: both resume and complete the "
+    "crash, losing the bugcheck.",
+    CaptureFaultParams,
+    long_poll=True,
+    effect="destructive",
+)
+async def kd_capture_fault(service: NtDriveService, p: CaptureFaultParams) -> dict[str, Any]:
+    """One-shot fault capture for a bugcheck: the manual .trap/kb/lm round trip, automated."""
+    cfg = service.vm_cfg(p.vm)
+    session = service.kd_session(cfg)
+    if not session.attached:
+        raise NtDriveError(KD_NOT_ATTACHED, f"kd is not attached to {p.vm}", "call kd_attach first")
+    if session.state != KdState.BROKEN:
+        raise NtDriveError(
+            KD_NOT_BROKEN,
+            f"target is {session.state}; kd_capture_fault needs a bugcheck break",
+            "kd_wait_event catches a bugcheck, then call this",
+        )
+    # The processor the bugcheck landed on, before any command resets the implicit context.
+    event = session.last_event or {}
+    bc_processor = event.get("processor") if event.get("event") == "bugcheck" else None
+    proc = p.processor if p.processor is not None else bc_processor
+
+    prep: list[str] = []
+    symbol_path = ""
+    if p.cache_symbols:
+        cache_dir = _local_symbol_cache(session.symbol_path)
+        symbol_path = f"cache*{cache_dir}"
+        prep.append(f".sympath {symbol_path}")
+    if proc is not None:
+        prep.append(f"~{proc}s")
+    if prep:
+        await session.exec(prep, timeout=p.timeout, max_bytes=4096)
+
+    bc_text = (await session.exec([".bugcheck"], timeout=p.timeout, max_bytes=4096))[0]["output"]
+    parsed = parse_bugcheck(bc_text)
+    result: dict[str, Any] = {
+        "vm": p.vm,
+        "bugcheck": parsed,
+        "processor": proc,
+        "cache_symbols": p.cache_symbols,
+    }
+    if symbol_path:
+        result["symbol_path"] = symbol_path
+    if parsed is None:
+        result["state"] = str(session.state)
+        result["note"] = (
+            ".bugcheck reported no code, so the target is not at a bugcheck. kd_capture_fault "
+            "needs one (kd_wait_event catches it). For a plain break use kd_exec kb"
+        )
+        return result
+
+    args = parsed["arguments"]
+    rip_cmd = "u @rip L1"
+    if p.context_record:
+        await session.exec([f".cxr {p.context_record}"], timeout=p.timeout, max_bytes=2048)
+        result["mode"] = "cxr"
+        result["context_record"] = p.context_record
+    else:
+        fault_rip = p.fault_rip or (args[2] if len(args) >= 3 else None)
+        if not fault_rip:
+            result["state"] = str(session.state)
+            result["note"] = (
+                "could not determine the faulting RIP: the bugcheck has fewer than three "
+                "arguments. Pass fault_rip=<addr> or context_record=<ptr>"
+            )
+            return result
+        result["fault_rip"] = fault_rip
+        search = await session.exec(
+            [f"s -q @rsp L{p.search_quads:x} {fault_rip}"], timeout=p.timeout, max_bytes=8192
+        )
+        candidates = [hit - p.trap_offset for hit in _stack_search_hits(search[0]["output"])]
+        result["trap_candidates"] = [f"{c:#x}" for c in candidates]
+        if not candidates:
+            result["state"] = str(session.state)
+            result["note"] = (
+                f"{fault_rip} was not found in {p.search_quads:#x} quadwords above rsp, so no "
+                "KTRAP_FRAME was located. Try a larger search_quads, a different fault_rip "
+                "(another bugcheck argument), or context_record"
+            )
+            return result
+        if p.match_index >= len(candidates):
+            result["state"] = str(session.state)
+            result["note"] = (
+                f"match_index {p.match_index} is out of range: only {len(candidates)} match(es). "
+                "trap_candidates lists them"
+            )
+            return result
+        trap_base = candidates[p.match_index]
+        await session.exec([f".trap {trap_base:#x}"], timeout=p.timeout, max_bytes=2048)
+        result["mode"] = "trap"
+        result["trap_frame"] = f"{trap_base:#x}"
+        rip_cmd = f"u {fault_rip} L1"
+
+    outs = await session.exec(["kb", rip_cmd, "lm k"], timeout=p.timeout, max_bytes=16384)
+    by_cmd = {str(o["cmd"]): str(o["output"]).strip() for o in outs}
+    result["stack"] = by_cmd.get("kb", "")
+    result["faulting_instruction"] = by_cmd.get(rip_cmd, "")
+    result["modules"] = by_cmd.get("lm k", "")
+    result["state"] = str(session.state)
+    result["note"] = (
+        "the register context is left at the fault (.trap/.cxr) for more kd_exec, and resets on "
+        "the next break. Do not kd_detach or kd_go to leave: both resume and complete the crash"
+    )
+    service.state.record_event(p.vm, "kd_capture_fault", bugcheck=parsed.get("code"))
     return result
 
 

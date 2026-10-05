@@ -434,6 +434,11 @@ class FakeKdProcess:
                     self.bps.remove(token)
             self.inject(b"kd> ")
             return
+        if line.startswith("s "):
+            # A stack search (`s -q @rsp L.. <value>`): return one synthetic KTRAP_FRAME.Rip hit,
+            # whose value is the fault RIP the .bugcheck fake reports (ffffd000`aabbccdd).
+            self.inject(b"ffffd000`0a1b2c00  ffffd000`aabbccdd\r\nkd> ")
+            return
         if line.strip() == ".bugcheck":
             self.inject(
                 b"Bugcheck code 0000003B\r\n"

@@ -377,6 +377,60 @@ async def test_kd_bugcheck_classifies_without_analyze(
     assert not any("analyze" in c for c in kd_procs[-1].commands)
 
 
+async def test_kd_capture_fault_automates_the_trap_and_stack(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # The manual OOB-write capture (cache sympath, switch processor, find the KTRAP_FRAME by the
+    # fault RIP, .trap it, kb/lm) in one call.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    kd_procs[-1].bugcheck()
+    assert (await service.call("kd_wait_event", {"vm": "win11-dev", "timeout": 5}))["event"] == (
+        "bugcheck"
+    )
+    result = await service.call("kd_capture_fault", {"vm": "win11-dev", "processor": 1})
+    assert result["mode"] == "trap"
+    assert result["bugcheck"]["code"] == "0x0000003b"
+    # Arg3 is the default fault RIP, and the trap frame is its stack match minus 0x168.
+    assert result["fault_rip"] == "0xffffd000aabbccdd"
+    assert result["trap_frame"] == "0xffffd0000a1b2a98"
+    assert result["trap_candidates"] == ["0xffffd0000a1b2a98"]
+    assert "output of [kb]" in result["stack"] and "output of [lm k]" in result["modules"]
+    # A cache-only symbol path is set first so the symbol-heavy capture cannot wedge on the network.
+    assert result["cache_symbols"] is True and result["symbol_path"] == r"cache*C:\symbols"
+    cmds = kd_procs[-1].commands
+    assert r".sympath cache*C:\symbols" in cmds and "~1s" in cmds
+    assert "s -q @rsp L800 0xffffd000aabbccdd" in cmds
+    assert "lm k" in cmds and any(c.startswith(".trap 0x") for c in cmds)
+
+
+async def test_kd_capture_fault_can_use_a_context_record(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # A bugcheck that carries a CONTEXT pointer (0x3B / 0x7E Arg3) skips the stack search and .cxr it.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    kd_procs[-1].bugcheck()
+    await service.call("kd_wait_event", {"vm": "win11-dev", "timeout": 5})
+    result = await service.call(
+        "kd_capture_fault",
+        {"vm": "win11-dev", "context_record": "0xffffd00011112222", "cache_symbols": False},
+    )
+    assert result["mode"] == "cxr" and result["context_record"] == "0xffffd00011112222"
+    cmds = kd_procs[-1].commands
+    assert ".cxr 0xffffd00011112222" in cmds
+    assert not any(c.startswith("s -q") for c in cmds)  # no stack search
+    assert not any(c.startswith(".sympath") for c in cmds)  # cache_symbols was off
+
+
+async def test_kd_capture_fault_needs_a_broken_target(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # Right after attach the target is running, not at a bugcheck break, so it refuses clearly.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("kd_capture_fault", {"vm": "win11-dev"})
+    assert exc.value.code == KD_NOT_BROKEN and "kd_wait_event" in exc.value.hint
+
+
 async def test_kd_exec_pins_the_processor_when_asked(
     service: NtDriveService, kd_procs: list[FakeKdProcess]
 ) -> None:
