@@ -67,7 +67,15 @@ class AttachParams(VmParams):
 
     port: int | None = Field(default=None, ge=1, le=65535, description="Override the port")
     key: str | None = Field(default=None, pattern=KDNET_KEY, description="Override the key")
-    symbol_path: str | None = Field(default=None, description="Override host.symbol_path")
+    symbol_path: str | None = Field(
+        default=None,
+        description=(
+            r"Override host.symbol_path for this session. cache*C:\symbols (cache only, no symbol "
+            "server) is the cure for a host with no symbol-server access: a network path makes the "
+            "first lookup of a processor switch or a symbol-heavy command block, which wedges kd "
+            "and can drop a KDNET target that is sitting at a bugcheck"
+        ),
+    )
     wait_for_target: bool = Field(
         default=True,
         description=(
