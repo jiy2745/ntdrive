@@ -349,7 +349,12 @@ async def test_revert_flow_restores_kd_and_terminal(
     assert old_info.state == "disconnected" and old_info.successor == new_sid
     assert fake_vmrun.running
     listing = await service.call("term_list", {})
-    assert {s["session_id"] for s in listing["sessions"]} == {opened["session_id"], new_sid}
+    # A revert is exactly what piles dead sessions up, so the disconnected predecessor is counted
+    # rather than listed. Its successor link is still there for whoever asks for the full list.
+    assert [s["session_id"] for s in listing["sessions"]] == [new_sid]
+    assert listing["counts"]["disconnected"] == 1 and listing["total"] == 2
+    full = await service.call("term_list", {"include_closed": True})
+    assert {s["session_id"] for s in full["sessions"]} == {opened["session_id"], new_sid}
 
 
 async def test_snap_revert_warns_when_kd_snapshot_reverted_without_reattach(

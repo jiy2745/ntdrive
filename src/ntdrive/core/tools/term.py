@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ntdrive.core.registry import tool
 from ntdrive.core.tools.common import VmParams
-from ntdrive.errors import INVALID_ARGS, TIMEOUT, NtDriveError
+from ntdrive.errors import INVALID_ARGS, SESSION_BUSY, TIMEOUT, NtDriveError
 from ntdrive.term.keys import encode_key_list, encode_keys
 from ntdrive.term.session import TermSession
 
@@ -103,6 +103,15 @@ class ListParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     vm: str | None = Field(default=None, description="Only sessions of this VM")
+    include_closed: bool = Field(
+        default=False,
+        description=(
+            "Also list closed and disconnected sessions. They pile up because every snap_revert "
+            "and reboot replaces the open ones, so by default only usable sessions are listed and "
+            "the rest are counted. term_prune forgets them for good"
+        ),
+    )
+    limit: int = Field(default=50, ge=1, le=500, description="Cap on how many sessions are listed")
 
 
 class PruneParams(BaseModel):
@@ -190,7 +199,23 @@ async def term_send(service: NtDriveService, p: SendParams) -> dict[str, Any]:
         raise NtDriveError(INVALID_ARGS, "nothing to send", "give text or keys")
     sent = session.send(data, source="agent")
     _touch(service, session)
-    return {"session_id": p.session_id, "bytes_sent": sent, "state": session.state}
+    result: dict[str, Any] = {
+        "session_id": p.session_id,
+        "bytes_sent": sent,
+        "shell": session.shell,
+        "state": session.state,
+    }
+    if "{ctrl+c}" in p.text.lower() or any("ctrl+c" in k.lower() for k in p.keys):
+        # Ctrl+C is a console control event, not a kill: a program that handles or ignores it keeps
+        # running, and it then owns this shell's input so every later term_exec queues behind it.
+        # That desync once read as "the command is slow" for a whole session, so say it here.
+        result["note"] = (
+            "ctrl+c asks the foreground program to stop, it does not kill it. A program that "
+            "ignores it keeps running and holds this shell, and later term_exec calls queue behind "
+            "it: confirm with term_read, and if it is still alive kill it from a second session "
+            "(term_open, then taskkill /F /IM <exe>)"
+        )
+    return result
 
 
 @tool(
@@ -244,6 +269,16 @@ async def term_read(service: NtDriveService, p: ReadParams) -> dict[str, Any]:
 async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     """Marker-delimited one-shot command."""
     session = _session(service, p.session_id)
+    if session.exec_in_flight:
+        # Typing a second command now just queues it behind the first one in the shell's input, so
+        # this call could only ever report a timeout while the output of the two interleaves.
+        raise NtDriveError(
+            SESSION_BUSY,
+            f"session {p.session_id} is already running a term_exec",
+            "wait for that call, or read the session with term_read. For a command started with "
+            "term_send that will not end, send {ctrl+c}, and if the program ignores it kill it "
+            "from a second session (term_open, then taskkill /F /IM <exe>)",
+        )
     marker = f"__NTDRIVE_{secrets.token_hex(4)}__"
     # The PTY echoes what we type, so the typed line must not contain the marker: the shell
     # assembles it at run time (PowerShell concatenates, cmd drops the ^ escape). Seen live: a
@@ -262,23 +297,31 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
         line = f'$global:LASTEXITCODE = $null; {p.cmd}; Write-Output ({typed} $LASTEXITCODE")\r'
     start_cursor = session.ring.end
     started = time.monotonic()
-    session.send(line.encode("utf-8"), source="agent")
-    # The marker line ends the command: marker, a space, the exit code if the shell has one, end
-    # of line. PowerShell prints no number before the first external program ran.
-    result = await session.wait_until(
-        rf"{re.escape(marker)} (-?\d*)[ \t]*\r?(?:\n|$)",
-        p.timeout,
-        cursor=start_cursor,
-        clean=True,
-        abort=_frozen(service, session),
-    )
+    session.exec_in_flight = True
+    try:
+        session.send(line.encode("utf-8"), source="agent")
+        # The marker line ends the command: marker, a space, the exit code if the shell has one, end
+        # of line. PowerShell prints no number before the first external program ran.
+        result = await session.wait_until(
+            rf"{re.escape(marker)} (-?\d*)[ \t]*\r?(?:\n|$)",
+            p.timeout,
+            cursor=start_cursor,
+            clean=True,
+            abort=_frozen(service, session),
+        )
+    finally:
+        session.exec_in_flight = False
     text: str = result.get("text", "")
     if result.get("matched") is None:
         raise NtDriveError(
             TIMEOUT,
             f"command did not finish within {p.timeout:.0f}s",
-            "read the session with term_read or send {ctrl+c}",
+            "read the session with term_read to see where it got to. If the command is still "
+            "running send {ctrl+c}; a console program that ignores it keeps running in this shell "
+            "and every later term_exec queues behind it, so kill it from a second session "
+            "(term_open, then taskkill /F /IM <exe>) rather than retrying here",
             output=text[-p.max_bytes :],
+            shell=session.shell,
         )
     # Only the shell's own marker line carries the marker in one piece.
     matches = list(re.finditer(rf"{re.escape(marker)} (-?\d+)", text))
@@ -307,6 +350,10 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
         # con_run in the interactive account, and a silent mismatch (a per-user resource created by
         # the wrong one) is hard to spot, so the account is never left implicit.
         "account": session.account,
+        # Which shell parsed the command. A cmd line typed at PowerShell (where `&` is reserved)
+        # fails with a parser error that reads like the command's own, so the shell is never left
+        # implicit either.
+        "shell": session.shell,
         "output": output[: p.max_bytes],
         "exit_code": exit_code,
         "state": session.state,
@@ -350,20 +397,43 @@ async def term_close(service: NtDriveService, p: SessionParams) -> dict[str, Any
 
 @tool(
     "term_list",
-    "List terminal sessions (the usable ids in open) and the CoView page that mirrors them "
-    "live in a browser (#<session_id> selects one).",
+    "List the usable terminal sessions (their ids are in open, with each one's shell) and the "
+    "CoView page that mirrors them live in a browser (#<session_id> selects one). Closed and "
+    "disconnected sessions are only counted, not listed: they pile up as snap_revert and reboot "
+    "replace the open ones, and dumping hundreds of them once cost a caller its whole token "
+    "budget. include_closed=true lists them, term_prune forgets them.",
     ListParams,
     positional=("vm",),
     effect="read",
 )
 async def term_list(service: NtDriveService, p: ListParams) -> dict[str, Any]:
-    """List."""
-    sessions = service.term.sessions(p.vm)
-    return {
-        "sessions": sessions,
-        "open": [s["session_id"] for s in sessions if s.get("state") == "open"],
+    """List, usable sessions first and the dead ones counted rather than dumped."""
+    every = service.term.sessions(p.vm)
+    counts: dict[str, int] = {}
+    for info in every:
+        state = str(info.get("state"))
+        counts[state] = counts.get(state, 0) + 1
+    listed = every if p.include_closed else [s for s in every if s.get("state") == "open"]
+    shown = listed[: p.limit]
+    result: dict[str, Any] = {
+        "sessions": shown,
+        "open": [s["session_id"] for s in every if s.get("state") == "open"],
+        # Which shell each usable session runs, so a cmd line is not typed at PowerShell (`&` is
+        # reserved there) or the other way round.
+        "shells": {s["session_id"]: s.get("shell") for s in every if s.get("state") == "open"},
+        "counts": counts,
+        "total": len(every),
+        "listed": len(shown),
+        "truncated": len(shown) < len(listed),
         "coview": service.term.coview_base,
     }
+    hidden = len(every) - len(listed)
+    if hidden:
+        result["note"] = (
+            f"{hidden} closed or disconnected session(s) are counted in counts but not listed. "
+            "term_prune forgets them, include_closed=true lists them"
+        )
+    return result
 
 
 @tool(

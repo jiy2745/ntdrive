@@ -560,8 +560,9 @@ class KdSession:
         # The usual offender: over a network symbol path the first lookup during a processor switch
         # (~Ns) or a symbol-heavy command blocks on the symbol server. The guest's cache cures it.
         sympath_hint = (
-            "A processor switch (processor=/~Ns) or a symbol-heavy command (x, u, ln, !analyze) "
-            "over a network symbol path wedges on the first lookup: set a cache-only path with "
+            "A processor switch (processor=/~Ns) or a symbol-heavy command (x, u, ln, lm, "
+            "!analyze) over a network symbol path wedges on the first lookup: set a cache-only "
+            "path with "
             r".sympath cache*C:\symbols once symbols are cached, or pre-fetch with .reload /f "
             "while broken, then retry."
         )

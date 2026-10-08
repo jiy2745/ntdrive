@@ -189,8 +189,18 @@ async def test_term_list_names_the_open_sessions_and_prune_drops_the_rest(
     second = (await service.call("term_open", {"vm": "win11-dev"}))["session_id"]
     await service.call("term_close", {"session_id": first})
     listed = await service.call("term_list", {"vm": "win11-dev"})
-    assert {s["session_id"] for s in listed["sessions"]} == {first, second}
-    assert listed["open"] == [second]
+    # Closed and disconnected sessions are counted, not listed. They pile up (every snap_revert
+    # and reboot replaces the open ones) and a live host reached 265 of them, 61KB of payload that
+    # blew a caller's token budget.
+    assert [s["session_id"] for s in listed["sessions"]] == [second]
+    assert listed["open"] == [second] and listed["counts"] == {"open": 1, "closed": 1}
+    assert listed["total"] == 2 and listed["listed"] == 1
+    # Each usable session's shell is called out, so a cmd line is not typed at PowerShell.
+    assert listed["shells"][second] == listed["sessions"][0]["shell"]
+    assert "term_prune" in listed["note"]
+    full = await service.call("term_list", {"vm": "win11-dev", "include_closed": True})
+    assert {s["session_id"] for s in full["sessions"]} == {first, second}
+    assert "note" not in full
     pruned = await service.call("term_prune", {"vm": "win11-dev"})
     assert pruned == {"pruned": [first], "remaining": 1}
     # A dropped session (reboot, revert) is stale bookkeeping too once nobody needs its successor.
@@ -201,6 +211,37 @@ async def test_term_list_names_the_open_sessions_and_prune_drops_the_rest(
     with pytest.raises(NtDriveError) as exc:
         await service.call("term_read", {"session_id": second})
     assert exc.value.code == "session_not_found"
+
+
+async def test_term_exec_refuses_a_busy_session_instead_of_queuing(
+    service: NtDriveService,
+) -> None:
+    # A second term_exec would type its line behind the first command and could only ever report a
+    # timeout while the two outputs interleave. A caller read that as "the round is slow" for a
+    # whole session, so it is refused with the way out instead.
+    await service.call("vm_start", {"vm": "win11-dev"})
+    sid = (await service.call("term_open", {"vm": "win11-dev"}))["session_id"]
+    service.term.get(sid).exec_in_flight = True
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("term_exec", {"session_id": sid, "cmd": "echo hi", "timeout": 1})
+    assert exc.value.code == "session_busy"
+    assert "taskkill" in exc.value.hint and "term_read" in exc.value.hint
+    # The flag is cleared once the real call finishes, so the session is usable again.
+    service.term.get(sid).exec_in_flight = False
+
+
+async def test_term_send_says_ctrl_c_is_not_a_kill(service: NtDriveService) -> None:
+    # ctrl+c is a console control event: a program that ignores it keeps running and holds the
+    # shell, which desyncs every later term_exec. Saying so is the whole fix at this layer.
+    await service.call("vm_start", {"vm": "win11-dev"})
+    sid = (await service.call("term_open", {"vm": "win11-dev"}))["session_id"]
+    sent = await service.call(
+        "term_send", {"session_id": sid, "keys": ["{ctrl+c}"], "enter": False}
+    )
+    assert "does not kill it" in sent["note"] and "taskkill" in sent["note"]
+    assert sent["shell"]  # which shell parsed it is never left implicit
+    plain = await service.call("term_send", {"session_id": sid, "text": "echo hi"})
+    assert "note" not in plain
 
 
 async def test_term_exec_ignores_an_echo_chunk_that_ends_at_the_marker(

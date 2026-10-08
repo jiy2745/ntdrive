@@ -377,6 +377,25 @@ async def test_kd_bugcheck_classifies_without_analyze(
     assert not any("analyze" in c for c in kd_procs[-1].commands)
 
 
+async def test_kd_exec_warns_about_a_breakpoint_that_resumes_itself(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # A conditional breakpoint that resumes the target itself costs a KDNET round trip per hit; on
+    # a hot path that NMIs the guest with bugcheck 0x80 and has cost live sessions two snapshots.
+    # The breakpoint is set by the time this returns, so the warning must ride the result the
+    # caller reads before kd_go lets it fire.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    hot = "bp nt!NtCreateFile \"j (@rcx=0) 'gc'; 'gc'\""
+    risky = await service.call("kd_exec", {"vm": "win11-dev", "cmd": hot})
+    assert "bugcheck 0x80" in risky["warning"] and "kd_sample" in risky["warning"]
+    assert "bc" in risky["warning"]
+    # A plain breakpoint, and a listing, carry no warning: only self-resuming ones flood the link.
+    for safe_cmd in ("bp nt!NtCreateFile", "bl", "bc *", "g"):
+        out = await service.call("kd_exec", {"vm": "win11-dev", "cmd": safe_cmd})
+        assert "warning" not in out, safe_cmd
+
+
 async def test_kd_capture_fault_automates_the_trap_and_stack(
     service: NtDriveService, kd_procs: list[FakeKdProcess]
 ) -> None:

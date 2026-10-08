@@ -18,6 +18,7 @@ KD_ALREADY_ATTACHED = "kd_already_attached"
 KD_NOT_BROKEN = "kd_not_broken"
 SESSION_NOT_FOUND = "session_not_found"
 SESSION_DISCONNECTED = "session_disconnected"
+SESSION_BUSY = "session_busy"
 CONFIRM_REQUIRED = "confirm_required"
 POLICY_DENIED = "policy_denied"
 BACKEND_UNSUPPORTED = "backend_unsupported"
@@ -54,6 +55,7 @@ HTTP_STATUS: dict[str, int] = {
     KD_NOT_BROKEN: 409,
     SESSION_NOT_FOUND: 404,
     SESSION_DISCONNECTED: 409,
+    SESSION_BUSY: 409,
     CONFIRM_REQUIRED: 428,
     POLICY_DENIED: 403,
     BACKEND_UNSUPPORTED: 400,

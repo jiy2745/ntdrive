@@ -106,6 +106,9 @@ class TermSession:
         self.opened_at = time.time()
         self.last_activity = self.opened_at
         self.connected = False
+        # True while a term_exec is waiting for its marker. A second one would type its line behind
+        # the first command and only ever report a timeout, so it is refused instead.
+        self.exec_in_flight = False
         self.successor: str | None = None
         self._channel: TermChannel | None = None
         self._changed = asyncio.Condition()

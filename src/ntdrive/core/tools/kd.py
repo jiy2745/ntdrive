@@ -529,16 +529,27 @@ async def kd_go(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     return {"vm": p.vm, **status}
 
 
+# A breakpoint that resumes the target itself: `bp addr "j (c) '.printf ..;gc'; 'gc'"`.
+_BP_SET_RE = re.compile(r"^\s*b[pmua]\d*\s", re.IGNORECASE)
+_AUTO_RESUME_RE = re.compile(r"\bgc\b|'\s*g\s*'|\"\s*g\s*\"", re.IGNORECASE)
+
+
+def _auto_resume_bps(cmds: list[str]) -> list[str]:
+    """Breakpoint commands that resume the target themselves, the KDNET round-trip flood."""
+    return [c for c in cmds if _BP_SET_RE.match(c) and _AUTO_RESUME_RE.search(c)]
+
+
 @tool(
     "kd_exec",
     "Run one or more debugger commands at the kd> prompt and return each command's output. A "
     "running target (right after kd_attach, or after kd_go) is broken into first, so the first "
-    "command no longer fails with kd_not_broken. A symbol-heavy command (x, u, ln, a first "
+    "command no longer fails with kd_not_broken. A symbol-heavy command (x, u, ln, lm, a first "
     "!extension) or a processor switch can be slow while symbols download: over a network symbol "
     "path the first lookup blocks on the server, so set a cache-only path "
     "(.sympath cache*C:\\symbols) or pre-fetch (.reload /f) once symbols are cached. Raise the "
     "timeout, and if one wedges ntdrive interrupts it so the next kd_exec works (at a bugcheck the "
-    "interrupt keeps the break, but do not kd_detach there: detaching resumes and reboots).",
+    "interrupt keeps the break, but do not kd_detach there: detaching resumes and reboots). A "
+    "breakpoint that resumes itself (gc) on a hot path NMIs the guest over KDNET: use kd_sample.",
     ExecParams,
     positional=("vm", "cmd"),
     effect="destructive",
@@ -570,6 +581,17 @@ async def kd_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     result: dict[str, Any] = {"vm": p.vm, "outputs": outputs, "state": str(session.state)}
     if broke_in:
         result["note"] = "the target was running, so kd_exec broke in first. kd_go resumes it"
+    risky = _auto_resume_bps(cmds)
+    if risky:
+        # The breakpoint is already set by the time this returns, so the warning rides the result
+        # the caller reads before it calls kd_go and lets the thing fire.
+        result["warning"] = (
+            "a breakpoint that resumes the target itself (gc) costs one KDNET round trip per hit. "
+            "On a hot path that floods the link and NMIs the guest with bugcheck 0x80, which has "
+            f"already cost live sessions their snapshots: {risky}. kd_sample does the same job "
+            "safely, with a plain breakpoint and the condition evaluated on the host. Clear this "
+            "one with bc before kd_go if the address is hit often"
+        )
     return result
 
 
