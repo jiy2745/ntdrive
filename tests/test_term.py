@@ -225,7 +225,7 @@ async def test_term_exec_refuses_a_busy_session_instead_of_queuing(
     with pytest.raises(NtDriveError) as exc:
         await service.call("term_exec", {"session_id": sid, "cmd": "echo hi", "timeout": 1})
     assert exc.value.code == "session_busy"
-    assert "taskkill" in exc.value.hint and "term_read" in exc.value.hint
+    assert "term_kill" in exc.value.hint and "term_read" in exc.value.hint
     # The flag is cleared once the real call finishes, so the session is usable again.
     service.term.get(sid).exec_in_flight = False
 
@@ -238,10 +238,57 @@ async def test_term_send_says_ctrl_c_is_not_a_kill(service: NtDriveService) -> N
     sent = await service.call(
         "term_send", {"session_id": sid, "keys": ["{ctrl+c}"], "enter": False}
     )
-    assert "does not kill it" in sent["note"] and "taskkill" in sent["note"]
+    assert "does not kill it" in sent["note"] and "term_kill" in sent["note"]
     assert sent["shell"]  # which shell parsed it is never left implicit
     plain = await service.call("term_send", {"session_id": sid, "text": "echo hi"})
     assert "note" not in plain
+
+
+async def test_term_kill_stops_the_shells_children_and_keeps_the_session(
+    service: NtDriveService, fake_transport: FakeTransport
+) -> None:
+    # ctrl+c is a control event a program may ignore, and one that ignores it keeps holding the
+    # shell. term_kill stops each child with its whole tree (so a run that spawned workers leaves
+    # no orphan) over a second SSH channel, because this session's PTY is busy with the very
+    # command that has to die. The shell itself is never a target.
+    await service.call("vm_start", {"vm": "win11-dev"})
+    opened = await service.call("term_open", {"vm": "win11-dev"})
+    sid = opened["session_id"]
+    # The PID is probed at open, because at kill time the PTY cannot answer.
+    assert opened["shell_pid"] == 4321
+    fake_transport.exec_responses["$kids"] = (
+        "NTDRIVE_KILLED 7788 crash.exe\r\nNTDRIVE_KILLED 7790 worker.exe\r\n"
+    )
+    killed = await service.call("term_kill", {"session_id": sid})
+    assert killed["killed"] == [
+        {"pid": 7788, "name": "crash.exe"},
+        {"pid": 7790, "name": "worker.exe"},
+    ]
+    assert killed["shell_pid"] == 4321 and killed["state"] == "open"
+    assert "term_exec works again" in killed["note"]
+    # The shell's own PID is what children are looked up by, and /T takes each child's tree.
+    script = fake_transport.exec_log[-1]
+    assert "ParentProcessId=4321" in script and "taskkill /F /T /PID" in script
+    # An idle shell has no children: say so rather than implying something was stopped, and point
+    # at con_run, whose work runs in a scheduled task and not in this shell at all.
+    fake_transport.exec_responses["$kids"] = "NTDRIVE_NONE\r\n"
+    idle = await service.call("term_kill", {"session_id": sid})
+    assert idle["killed"] == [] and "no child process" in idle["note"]
+    assert "con_run" in idle["note"]
+
+
+async def test_term_kill_says_so_when_the_shell_pid_is_unknown(
+    service: NtDriveService,
+) -> None:
+    # The probe can fail on a slow or odd shell. The session stays fully usable, so the refusal
+    # names the fallback instead of pretending the session is broken.
+    await service.call("vm_start", {"vm": "win11-dev"})
+    sid = (await service.call("term_open", {"vm": "win11-dev"}))["session_id"]
+    service.term.get(sid).shell_pid = None
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("term_kill", {"session_id": sid})
+    assert exc.value.code == "backend_error" and "probed once" in exc.value.hint
+    assert "taskkill /F /T /IM" in exc.value.hint
 
 
 async def test_term_exec_ignores_an_echo_chunk_that_ends_at_the_marker(

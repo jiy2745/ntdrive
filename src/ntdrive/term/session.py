@@ -109,6 +109,10 @@ class TermSession:
         # True while a term_exec is waiting for its marker. A second one would type its line behind
         # the first command and only ever report a timeout, so it is refused instead.
         self.exec_in_flight = False
+        # PID of the shell this PTY runs, probed once at open. term_kill needs it to find the
+        # children to stop, because ctrl+c is a control event a program is free to ignore. None
+        # when the probe did not answer: the session is still fully usable, term_kill is not.
+        self.shell_pid: int | None = None
         self.successor: str | None = None
         self._channel: TermChannel | None = None
         self._changed = asyncio.Condition()

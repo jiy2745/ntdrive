@@ -222,6 +222,10 @@ class FakeChannel(TermChannel):
         if b"Clear-Host" in data:
             # Like a real shell: the setup line runs, the screen clears, a fresh prompt appears.
             self._on_data(b"\x1b[2J\x1b[H" + b"PS C:\\Users\\dev> ")
+        if b"_PID__" in data:
+            # The shell answering the open-time PID probe. The echo above carries the marker in two
+            # halves, so only this answer matches and the session learns its shell PID.
+            self._on_data(b"__NTDRIVE_PID__4321\r\nPS C:\\Users\\dev> ")
         self._transport.react(self, data)
 
     def resize(self, cols: int, rows: int) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import secrets
 from collections.abc import Callable
 from pathlib import Path
@@ -25,6 +26,26 @@ PSREADLINE_OFF = "Remove-Module PSReadLine -ErrorAction SilentlyContinue; Clear-
 # A PowerShell prompt at the end of the output means the shell is ready for the next line.
 PROMPT_READY = r"^PS [^\r\n]*> ?$"
 SHELL_READY_TIMEOUT = 5.0
+
+# term_kill stops the shell's children, so it needs the shell's own PID. The PTY echoes whatever is
+# typed, so the probe builds the marker from two halves: the echoed line never carries it whole and
+# only the shell's answer matches. PowerShell has $PID; cmd has no such variable, so one PowerShell
+# call reports its own parent, which is that cmd.
+PID_MARKER = "__NTDRIVE_PID__"
+PID_PATTERN = PID_MARKER + r"(\d+)"
+# A healthy shell echoes this back in milliseconds. Kept short because a shell that will not answer
+# must not add its whole wait to every term_open: losing the PID only costs term_kill.
+PID_PROBE_TIMEOUT = 3.0
+_PS_PID_PROBE = 'Write-Output ("__NTDRIVE" + "_PID__" + $PID)\r'
+_CMD_PID_PROBE = (
+    "powershell -NoProfile -Command \"('__NTDRIVE' + '_PID__' + "
+    "(Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID)).ParentProcessId)\"\r"
+)
+PID_PROBES = {
+    "powershell": _PS_PID_PROBE,
+    "pwsh": _PS_PID_PROBE,
+    "cmd": _CMD_PID_PROBE,
+}
 
 
 def default_transport_factory(host: HostConfig) -> TransportFactory:
@@ -164,7 +185,29 @@ class TermManager:
                 ready = await session.wait_until(PROMPT_READY, SHELL_READY_TIMEOUT, cursor=start)
                 if ready.get("matched"):
                     session.cursor = ready["cursor"]
+        await self._probe_shell_pid(session, shell)
         return session
+
+    async def _probe_shell_pid(self, session: TermSession, shell: str) -> None:
+        """Ask the fresh shell for its own PID, so term_kill can stop its children later.
+
+        Done at open on purpose: at kill time the PTY is busy with the very command that has to
+        die, so it could not answer, and working the PID out from the process tree is ambiguous
+        once a VM has several sessions. Any failure is swallowed, because a session that cannot
+        report its PID is still a perfectly good session: only term_kill needs it.
+        """
+        probe = PID_PROBES.get(shell)
+        if probe is None:
+            return
+        with contextlib.suppress(NtDriveError, ValueError, KeyError):
+            start = session.ring.end
+            session.send(probe.encode(), source="system")
+            answer = await session.wait_until(PID_PATTERN, PID_PROBE_TIMEOUT, cursor=start)
+            found = re.search(PID_PATTERN, str(answer.get("matched") or ""))
+            if found:
+                session.shell_pid = int(found.group(1))
+                # Hand the session over past the probe, so the caller's first read stays clean.
+                session.cursor = answer["cursor"]
 
     def _on_channel_closed(self, session: TermSession) -> None:
         session.on_close_threadsafe()

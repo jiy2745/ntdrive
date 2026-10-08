@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ntdrive.core.registry import tool
 from ntdrive.core.tools.common import VmParams
-from ntdrive.errors import INVALID_ARGS, SESSION_BUSY, TIMEOUT, NtDriveError
+from ntdrive.errors import BACKEND_ERROR, INVALID_ARGS, SESSION_BUSY, TIMEOUT, NtDriveError
 from ntdrive.term.keys import encode_key_list, encode_keys
 from ntdrive.term.session import TermSession
 
@@ -174,6 +174,9 @@ async def term_open(service: NtDriveService, p: OpenParams) -> dict[str, Any]:
         "coview_url": info.coview_url if info else "",
         "cols": p.cols,
         "rows": p.rows,
+        # Probed once here, because at kill time the PTY is busy with the command that has to die.
+        # null means term_kill cannot work on this session, nothing else is affected.
+        "shell_pid": session.shell_pid,
     }
 
 
@@ -212,8 +215,7 @@ async def term_send(service: NtDriveService, p: SendParams) -> dict[str, Any]:
         result["note"] = (
             "ctrl+c asks the foreground program to stop, it does not kill it. A program that "
             "ignores it keeps running and holds this shell, and later term_exec calls queue behind "
-            "it: confirm with term_read, and if it is still alive kill it from a second session "
-            "(term_open, then taskkill /F /IM <exe>)"
+            "it: confirm with term_read, and if it is still alive call term_kill"
         )
     return result
 
@@ -276,8 +278,8 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
             SESSION_BUSY,
             f"session {p.session_id} is already running a term_exec",
             "wait for that call, or read the session with term_read. For a command started with "
-            "term_send that will not end, send {ctrl+c}, and if the program ignores it kill it "
-            "from a second session (term_open, then taskkill /F /IM <exe>)",
+            "term_send that will not end, send {ctrl+c}, and if the program ignores it call "
+            "term_kill, which stops the shell's children and leaves the session open",
         )
     marker = f"__NTDRIVE_{secrets.token_hex(4)}__"
     # The PTY echoes what we type, so the typed line must not contain the marker: the shell
@@ -318,8 +320,8 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
             f"command did not finish within {p.timeout:.0f}s",
             "read the session with term_read to see where it got to. If the command is still "
             "running send {ctrl+c}; a console program that ignores it keeps running in this shell "
-            "and every later term_exec queues behind it, so kill it from a second session "
-            "(term_open, then taskkill /F /IM <exe>) rather than retrying here",
+            "and every later term_exec queues behind it, so call term_kill rather than retrying "
+            "here",
             output=text[-p.max_bytes :],
             shell=session.shell,
         )
@@ -367,6 +369,90 @@ async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
         result["note"] = (
             "no numeric exit code came back (PowerShell sets $LASTEXITCODE only after an external "
             "program ran). state says whether the shell is still connected"
+        )
+    return result
+
+
+class KillParams(SessionParams):
+    """term_kill."""
+
+    timeout: float = Field(
+        default=30, ge=1, description="Seconds to wait for the kill to report back"
+    )
+
+
+# Each direct child of the shell is killed with its own tree (/T), so a run that spawned workers
+# leaves no orphan, while the shell itself is never a target and the session stays open.
+_KILL_SCRIPT = (
+    "$kids = @(Get-CimInstance Win32_Process -Filter 'ParentProcessId={pid}' | "
+    "Select-Object ProcessId,Name); "
+    "if ($kids.Count -eq 0) {{ 'NTDRIVE_NONE' }} else {{ foreach ($k in $kids) {{ "
+    "taskkill /F /T /PID $k.ProcessId > $null 2>&1; "
+    "'NTDRIVE_KILLED ' + $k.ProcessId + ' ' + $k.Name }} }}"
+)
+
+
+@tool(
+    "term_kill",
+    "Stop whatever the session's shell is running, keeping the session open. Use it when a "
+    "command will not end and {ctrl+c} did not help: ctrl+c is a console control event that a "
+    "program may ignore, and a program that ignores it keeps holding the shell so every later "
+    "term_exec queues behind it. Each direct child of the shell is killed with its whole tree, so "
+    "a run that spawned workers leaves no orphan. The shell itself is never killed. It runs over a "
+    "separate SSH channel, so a busy PTY does not block it.",
+    KillParams,
+    positional=("session_id",),
+    touches_guest=True,
+    long_poll=True,
+    effect="destructive",
+)
+async def term_kill(service: NtDriveService, p: KillParams) -> dict[str, Any]:
+    """Kill the shell's children over a second channel, because the PTY itself is busy."""
+    session = _session(service, p.session_id)
+    if session.shell_pid is None:
+        raise NtDriveError(
+            BACKEND_ERROR,
+            f"session {p.session_id} has no known shell PID, so its children cannot be found",
+            "the PID is probed once when the session is opened and that probe did not answer. "
+            "Open a fresh session with term_open and use that one, or kill the process by name "
+            "from a second session (term_exec with taskkill /F /T /IM <exe>)",
+        )
+    cfg = service.vm_cfg(session.vm)
+    transport = service.term.transport_for(cfg, session.account)  # type: ignore[arg-type]
+    if transport is None or not hasattr(transport, "exec_once"):
+        raise NtDriveError(
+            BACKEND_ERROR,
+            f"no live SSH transport for {session.vm} as {session.account}",
+            "the guest may have rebooted: term_open a session again",
+        )
+    code, out = await transport.exec_once(
+        _KILL_SCRIPT.format(pid=session.shell_pid), timeout=p.timeout
+    )
+    killed = [
+        {"pid": int(m.group(1)), "name": m.group(2)}
+        for m in re.finditer(r"NTDRIVE_KILLED (\d+) (\S+)", out)
+    ]
+    service.state.record_event(session.vm, "term_kill", session_id=p.session_id, killed=len(killed))
+    result: dict[str, Any] = {
+        "session_id": p.session_id,
+        "vm": session.vm,
+        "account": session.account,
+        "shell": session.shell,
+        "shell_pid": session.shell_pid,
+        "killed": killed,
+        "exit_code": code,
+        "state": session.state,
+    }
+    if not killed:
+        result["note"] = (
+            "the shell had no child process, so nothing was killed: the command had already "
+            "ended, or it runs somewhere other than this shell. term_read shows where the "
+            "session stands, and con_run work runs in its own scheduled task, not here"
+        )
+    else:
+        result["note"] = (
+            "the shell is still open and at a prompt, so term_exec works again. Anything the "
+            "killed run had half written is still half written: it was stopped, not undone"
         )
     return result
 
