@@ -238,6 +238,7 @@ class TermSession:
         clean: bool = True,
         max_bytes: int | None = None,
         abort: Callable[[], bool] | None = None,
+        skip_first_line: bool = False,
     ) -> dict[str, Any]:
         """Block until `pattern` matches output after `cursor` or the timeout expires.
 
@@ -245,6 +246,11 @@ class TermSession:
         is polled on every wake: once it returns true the wait ends at once with
         guest_frozen_by_debugger and the output so far, instead of running to the timeout
         while the guest cannot answer.
+
+        `skip_first_line` starts matching after the first newline. The PTY echoes whatever was
+        typed, so a pattern that the sent command line also contains (`echo ===END===` waited on
+        with `===END===`) matches its own echo and returns before the command has produced
+        anything. Until that newline arrives there is nothing to match, so the wait continues.
         """
         regex = re.compile(pattern, re.MULTILINE)
         start = self.cursor if cursor is None else cursor
@@ -252,7 +258,12 @@ class TermSession:
         while True:
             raw = self.ring.slice_from(self._scan_from(start))
             haystack = clean_text(raw) if clean else raw.decode("utf-8", errors="replace")
-            match = regex.search(haystack)
+            search_from = 0
+            if skip_first_line:
+                newline = haystack.find("\n")
+                # No newline yet means the echoed line is still being typed back: nothing to match.
+                search_from = -1 if newline < 0 else newline + 1
+            match = regex.search(haystack, search_from) if search_from >= 0 else None
             if match:
                 cap = self.ring.end - start + 1 if max_bytes is None else max_bytes
                 result = self.read_delta(cursor, max_bytes=cap, clean=clean)

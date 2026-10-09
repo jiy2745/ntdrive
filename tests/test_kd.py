@@ -377,6 +377,99 @@ async def test_kd_bugcheck_classifies_without_analyze(
     assert not any("analyze" in c for c in kd_procs[-1].commands)
 
 
+async def test_kd_exec_flags_a_deferred_breakpoint_that_will_never_fire(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # The most expensive misdiagnosis this project has had: bp on a symbol whose module is not
+    # mapped is accepted silently, stays deferred, never fires, and the caller concludes the code
+    # path is not taken. Every bp is now checked with bl and a deferred one is called out.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    proc = kd_procs[-1]
+    proc.bl_override = " 0 eu             0001 (0001) (cldflt!HsmpRpParseBuffer)\r\n"
+    out = await service.call("kd_exec", {"vm": "win11-dev", "cmd": "bp cldflt!HsmpRpParseBuffer"})
+    assert out["breakpoints"] == [
+        {
+            "id": "0",
+            "status": "eu",
+            "deferred": True,
+            "location": "0001 (0001) (cldflt!HsmpRpParseBuffer)",
+        }
+    ]
+    assert "will NOT fire" in out["warning"] and "module is not mapped" in out["warning"]
+    assert "sxe ld:" in out["warning"]  # the way to catch the module load is named
+    # A bound breakpoint says so instead of warning, so "no warning" is not silence.
+    proc.bl_override = " 0 e Disable Clear  fffff800`00001000  nt!NtCreateFile\r\n"
+    bound = await service.call("kd_exec", {"vm": "win11-dev", "cmd": "bp nt!NtCreateFile"})
+    assert bound["breakpoints"][0]["deferred"] is False
+    assert "warning" not in bound and "bound and will fire" in bound["note"]
+    # A command that sets no breakpoint pays no bl round trip.
+    proc.commands.clear()
+    await service.call("kd_exec", {"vm": "win11-dev", "cmd": "r rip"})
+    assert "bl" not in proc.commands
+
+
+async def test_kd_exec_refuses_commands_that_resume_the_target(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # `g` hands the target back to the CPU, so no prompt returns and kd_exec can only time out.
+    # kd_go is the same thing with the bookkeeping, and the habit of typing g is easy to fall into.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    for resumer in ("g", "gc", " gh ", "gn 0x1000"):
+        with pytest.raises(NtDriveError) as exc:
+            await service.call("kd_exec", {"vm": "win11-dev", "cmd": resumer})
+        assert exc.value.code == "invalid_args", resumer
+        assert "kd_go" in exc.value.hint and "kd_wait_event" in exc.value.hint
+    # Stepping commands do come back to the prompt, so they stay allowed, and a bp whose action
+    # string merely contains 'gc' is a breakpoint, not a continue.
+    for fine in ("p", "t", "gu", "bp nt!Foo \"j (@rcx=0) 'gc'; 'gc'\""):
+        out = await service.call("kd_exec", {"vm": "win11-dev", "cmd": fine})
+        assert out["outputs"], fine
+
+
+async def test_kd_symcheck_tells_missing_types_from_missing_symbols(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # A cached PDB with function names but no type information fails dt, !pool and !process at
+    # once, which reads as the commands being wrong. symcheck separates the two cases.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    proc = kd_procs[-1]
+    proc.responses = {
+        ".sympath": "Symbol search path is: srv*C:\\symbols*https://msdl.microsoft.com\r\n",
+        "dt nt!_LIST_ENTRY": "   +0x000 Flink : Ptr64 _LIST_ENTRY\r\n",
+        "x nt!KeBugCheckEx": "fffff800`00112233 nt!KeBugCheckEx (void)\r\n",
+    }
+    good = await service.call("kd_symcheck", {"vm": "win11-dev"})
+    assert good["types_ok"] is True and good["names_ok"] is True
+    assert "srv*C:\\symbols" in good["symbol_path"] and "can work" in good["note"]
+
+    # Names resolve, types do not: the corrupt-cache case, and the cure is a FRESH cache dir.
+    proc.responses["dt nt!_LIST_ENTRY"] = "Symbol nt!_LIST_ENTRY not found.\r\n"
+    broken = await service.call("kd_symcheck", {"vm": "win11-dev"})
+    assert broken["types_ok"] is False and broken["names_ok"] is True
+    assert "NO type information" in broken["note"] and "symbols2" in broken["note"]
+
+    # Nothing resolves: the PDB is missing, not incomplete.
+    proc.responses["x nt!KeBugCheckEx"] = "Couldn't resolve error at 'nt!KeBugCheckEx'\r\n"
+    gone = await service.call("kd_symcheck", {"vm": "win11-dev"})
+    assert gone["names_ok"] is False and "missing rather than incomplete" in gone["note"]
+
+
+async def test_kd_exec_names_a_symbol_error_as_a_bad_pdb(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # The banner reads like the command was wrong, so say it is the PDB and name the cure.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    kd_procs[-1].responses = {
+        "!pool ffffd000": "Either you specified an unqualified symbol, or bad symbols\r\n"
+    }
+    out = await service.call("kd_exec", {"vm": "win11-dev", "cmd": "!pool ffffd000"})
+    assert "PDB is incomplete" in out["warning"] and "kd_symcheck" in out["warning"]
+
+
 async def test_kd_exec_warns_about_a_breakpoint_that_resumes_itself(
     service: NtDriveService, kd_procs: list[FakeKdProcess]
 ) -> None:
@@ -391,7 +484,8 @@ async def test_kd_exec_warns_about_a_breakpoint_that_resumes_itself(
     assert "bugcheck 0x80" in risky["warning"] and "kd_sample" in risky["warning"]
     assert "bc" in risky["warning"]
     # A plain breakpoint, and a listing, carry no warning: only self-resuming ones flood the link.
-    for safe_cmd in ("bp nt!NtCreateFile", "bl", "bc *", "g"):
+    # `g` is not in the list because kd_exec refuses it outright now (it never returns a prompt).
+    for safe_cmd in ("bp nt!NtCreateFile", "bl", "bc *"):
         out = await service.call("kd_exec", {"vm": "win11-dev", "cmd": safe_cmd})
         assert "warning" not in out, safe_cmd
 

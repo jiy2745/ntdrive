@@ -86,6 +86,7 @@ READ_ONLY = {
     "snap_list",
     "kd_wait_event",
     "kd_bugcheck",
+    "kd_symcheck",
     "kd_state",
     "kd_log_tail",
     "term_read",

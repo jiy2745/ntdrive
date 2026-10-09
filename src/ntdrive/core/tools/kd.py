@@ -127,6 +127,19 @@ class ExecParams(VmParams):
     )
 
 
+class SymcheckParams(VmParams):
+    """kd_symcheck."""
+
+    type_probe: str = Field(
+        default="nt!_LIST_ENTRY",
+        description=(
+            "Type to resolve as the probe. The default is a tiny kernel struct every real PDB has, "
+            "so a failure means the symbols, not the type"
+        ),
+    )
+    timeout: float = Field(default=30, ge=1, description="Seconds per debugger command")
+
+
 class CaptureFaultParams(VmParams):
     """kd_capture_fault."""
 
@@ -540,11 +553,52 @@ async def kd_go(service: NtDriveService, p: VmParams) -> dict[str, Any]:
 # A breakpoint that resumes the target itself: `bp addr "j (c) '.printf ..;gc'; 'gc'"`.
 _BP_SET_RE = re.compile(r"^\s*b[pmua]\d*\s", re.IGNORECASE)
 _AUTO_RESUME_RE = re.compile(r"\bgc\b|'\s*g\s*'|\"\s*g\s*\"", re.IGNORECASE)
+# A whole command that just resumes the target: g, gc, gh, gn, with an optional address. It never
+# returns to the prompt, so it can only ever time out here. A bp whose action string contains 'gc'
+# does not match, because the command has to BE the continue, not carry one.
+_CONTINUE_ONLY_RE = re.compile(r"^\s*g[chn]?(?:\s+[^\s;]+)?\s*$", re.IGNORECASE)
+# `bl` marks an unresolved (deferred) breakpoint by putting u in its status field, as in
+# `0 eu  0001 (0001) (cldflt!Foo)`. A bound one carries a real address instead.
+_BL_ROW_RE = re.compile(r"^\s*(\d+)\s+([edu]+)\s+(.*)$", re.IGNORECASE)
+# What kd says when the PDB it loaded cannot answer. Seen live from a cached ntkrnlmp.pdb that had
+# function names but no type information, which made !pool, !process and dt all fail at once.
+_SYMBOL_TROUBLE_RE = re.compile(
+    r"unqualified symbol|type information missing|bad symbols", re.IGNORECASE
+)
+SYMBOL_REFRESH_FIX = (
+    r"point at a FRESH cache directory and re-download, for example .sympath "
+    r"srv*C:\symbols2*https://msdl.microsoft.com/download/symbols then .reload /f nt. Deleting the "
+    "bad PDB out of the old cache works too. kd_symcheck says whether type information is loaded"
+)
 
 
 def _auto_resume_bps(cmds: list[str]) -> list[str]:
     """Breakpoint commands that resume the target themselves, the KDNET round-trip flood."""
     return [c for c in cmds if _BP_SET_RE.match(c) and _AUTO_RESUME_RE.search(c)]
+
+
+def parse_breakpoints(listing: str) -> list[dict[str, Any]]:
+    """Rows of `bl` output as {id, status, deferred, location}.
+
+    A breakpoint set on a symbol in a module that is not mapped yet stays deferred: kd accepts it,
+    prints nothing, and it never fires. Reading that as "the code path is not taken" is the single
+    most expensive misdiagnosis this project has seen, so every bp is checked against this.
+    """
+    rows: list[dict[str, Any]] = []
+    for line in listing.splitlines():
+        m = _BL_ROW_RE.match(line)
+        if not m:
+            continue
+        status = m.group(2).lower()
+        rows.append(
+            {
+                "id": m.group(1),
+                "status": status,
+                "deferred": "u" in status,
+                "location": m.group(3).strip(),
+            }
+        )
+    return rows
 
 
 @tool(
@@ -569,6 +623,18 @@ async def kd_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
         cmds.insert(0, p.cmd)
     if not cmds:
         raise NtDriveError(INVALID_ARGS, "kd_exec needs cmd or cmds")
+    resumers = [c for c in cmds if _CONTINUE_ONLY_RE.match(c)]
+    if resumers:
+        # `g` hands the target back to the CPU, so no prompt comes until the next break and this
+        # call can only time out and then interrupt. kd_go is the same thing with the right
+        # bookkeeping (state, guest_frozen), and kd_wait_event is how to wait for what comes next.
+        raise NtDriveError(
+            INVALID_ARGS,
+            f"{resumers} resumes the target, so no prompt comes back and kd_exec would time out",
+            "use kd_go to resume, then kd_wait_event to wait for the next break. To run and "
+            "collect in one call use kd_sample. Stepping commands (p, t, gu) do return and are "
+            "fine here",
+        )
     if p.processor is not None:
         # Run where the caller asked. kd resets the implicit process and processor at every break,
         # so anything that needs a context (`.process /r /p` for session space) must set it in the
@@ -589,17 +655,51 @@ async def kd_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     result: dict[str, Any] = {"vm": p.vm, "outputs": outputs, "state": str(session.state)}
     if broke_in:
         result["note"] = "the target was running, so kd_exec broke in first. kd_go resumes it"
+    warnings: list[str] = []
     risky = _auto_resume_bps(cmds)
     if risky:
         # The breakpoint is already set by the time this returns, so the warning rides the result
         # the caller reads before it calls kd_go and lets the thing fire.
-        result["warning"] = (
+        warnings.append(
             "a breakpoint that resumes the target itself (gc) costs one KDNET round trip per hit. "
             "On a hot path that floods the link and NMIs the guest with bugcheck 0x80, which has "
             f"already cost live sessions their snapshots: {risky}. kd_sample does the same job "
             "safely, with a plain breakpoint and the condition evaluated on the host. Clear this "
             "one with bc before kd_go if the address is hit often"
         )
+    if any(_BP_SET_RE.match(c) for c in cmds):
+        # Verify what the breakpoint actually became. kd accepts a bp on a symbol whose module is
+        # not mapped yet, prints nothing, and leaves it deferred so it never fires. A caller then
+        # runs the code, sees no hit, and concludes the path is not taken: the most expensive
+        # misdiagnosis this project has had. One bl is cheap enough to pay on every bp.
+        with contextlib.suppress(NtDriveError):
+            listing = (await session.exec(["bl"], timeout=p.timeout, max_bytes=8192))[0]["output"]
+            rows = parse_breakpoints(str(listing))
+            result["breakpoints"] = rows
+            deferred = [r for r in rows if r["deferred"]]
+            if deferred:
+                where = ", ".join(f"{r['id']} {r['location']}" for r in deferred)
+                warnings.append(
+                    f"deferred breakpoint(s), which will NOT fire as they stand: {where}. kd took "
+                    "the address but the module is not mapped yet, so nothing happens when the "
+                    "code runs and that reads exactly like a code path never being taken. Either "
+                    "wait for the module (sxe ld:<module>, kd_go, then set it once loaded) or "
+                    "break on an address that is mapped now. bl shows u in the status of a "
+                    "deferred one"
+                )
+            elif rows:
+                result["note"] = (result.get("note", "") + " ").strip() + (
+                    f" {len(rows)} breakpoint(s) are bound and will fire"
+                ).strip()
+    if any(_SYMBOL_TROUBLE_RE.search(str(o.get("output", ""))) for o in outputs):
+        # A PDB that loaded but cannot answer looks like the command being wrong, so name it.
+        warnings.append(
+            "a command answered with a symbol or type error, so the loaded PDB is incomplete "
+            "rather than the command being wrong. A cached PDB with function names but no type "
+            "information fails !pool, !process and dt all at once: " + SYMBOL_REFRESH_FIX
+        )
+    if warnings:
+        result["warning"] = " | ".join(warnings)
     return result
 
 
@@ -630,6 +730,59 @@ async def kd_bugcheck(service: NtDriveService, p: VmParams) -> dict[str, Any]:
         result["note"] = (
             ".bugcheck reported no code, so the target is probably not in a bugcheck. "
             "kd_wait_event returns the code and arguments directly when it catches one"
+        )
+    return result
+
+
+@tool(
+    "kd_symcheck",
+    "Say whether the loaded symbols can actually answer: resolves a type (dt) and a function name "
+    "(x) and reports each separately, with the current symbol path. A cached PDB that has function "
+    "names but no type information makes !pool, !process and dt all fail with bad symbols at once, "
+    "which reads like the commands being wrong rather than the PDB being incomplete. Run this the "
+    "first time a symbol-dependent command misbehaves. Over a network symbol path the first lookup "
+    "can block, so attach with symbol_path=cache*C:\\symbols on a host with no symbol server.",
+    SymcheckParams,
+    effect="read",
+)
+async def kd_symcheck(service: NtDriveService, p: SymcheckParams) -> dict[str, Any]:
+    """Prove the symbols resolve types as well as names, and name the cure when they do not."""
+    cfg = service.vm_cfg(p.vm)
+    session = service.kd_session(cfg)
+    probe = f"dt {p.type_probe}"
+    outputs = await session.exec(
+        [".sympath", probe, "x nt!KeBugCheckEx"], timeout=p.timeout, max_bytes=8192
+    )
+    by_cmd = {str(o["cmd"]): str(o["output"]).strip() for o in outputs}
+    type_out = by_cmd.get(probe, "")
+    name_out = by_cmd.get("x nt!KeBugCheckEx", "")
+    # dt prints a field list with offsets when the type really resolved.
+    types_ok = "+0x" in type_out
+    # x prints the address of the match; no address means the name did not resolve either.
+    names_ok = bool(re.search(r"[0-9a-f]{8}", name_out, re.IGNORECASE))
+    result: dict[str, Any] = {
+        "vm": p.vm,
+        "types_ok": types_ok,
+        "names_ok": names_ok,
+        "symbol_path": by_cmd.get(".sympath", ""),
+        "type_probe": p.type_probe,
+        "type_output": type_out[:2000],
+        "name_output": name_out[:2000],
+        "state": str(session.state),
+    }
+    if types_ok and names_ok:
+        result["note"] = "symbols resolve both names and types, so dt, !pool and !process can work"
+    elif names_ok:
+        result["note"] = (
+            "the PDB has function names but NO type information, the corrupt-cache case: dt, "
+            "!pool, !process and anything that reads a struct will fail with bad symbols while "
+            "stack traces still look fine. Cure: " + SYMBOL_REFRESH_FIX
+        )
+    else:
+        result["note"] = (
+            "no symbols resolved at all, so the PDB is missing rather than incomplete. Check "
+            "symbol_path above, then .reload /f nt. On a host with no symbol-server access attach "
+            r"with symbol_path=cache*C:\symbols and make sure the cache really holds the PDB"
         )
     return result
 

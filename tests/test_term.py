@@ -244,6 +244,54 @@ async def test_term_send_says_ctrl_c_is_not_a_kill(service: NtDriveService) -> N
     assert "note" not in plain
 
 
+async def test_term_read_until_can_skip_the_command_echo(
+    service: NtDriveService, fake_transport: FakeTransport
+) -> None:
+    # The PTY echoes what was typed, so waiting for a marker the command line itself names matched
+    # the echo and returned before the command had run: a caller read truncated output as complete.
+    await service.call("vm_start", {"vm": "win11-dev"})
+    sid = (await service.call("term_open", {"vm": "win11-dev"}))["session_id"]
+    chan = fake_transport.channels[-1]
+    # Everything up to here is already consumed, so the delta starts at the echo, which is how a
+    # real caller reads right after term_send.
+    base = service.term.get(sid).ring.end
+    await service.call("term_send", {"session_id": sid, "text": "clp.exe & echo ===END==="})
+    await settle()
+    # Only the echo is on screen so far. Without skip_echo the wait is satisfied by it.
+    early = await service.call(
+        "term_read", {"session_id": sid, "until": "===END===", "timeout": 1, "cursor": base}
+    )
+    assert early["matched"] == "===END===" and "clp.exe" in early["text"]
+    # With skip_echo the same wait does not settle for the echo: it times out while the command is
+    # still running rather than reporting a result that has not arrived.
+    waiting = await service.call(
+        "term_read",
+        {"session_id": sid, "until": "===END===", "timeout": 1, "skip_echo": True, "cursor": base},
+    )
+    assert waiting["matched"] is None
+    # Once the command really finishes, the marker on its own line matches.
+    chan.emit(b"clp output line\r\n===END===\r\n")
+    await settle()
+    done = await service.call(
+        "term_read",
+        {"session_id": sid, "until": "===END===", "timeout": 2, "skip_echo": True, "cursor": base},
+    )
+    assert done["matched"] == "===END===" and "clp output line" in done["text"]
+
+
+async def test_session_tools_accept_vm_as_a_cross_check(service: NtDriveService) -> None:
+    # kd_* all require vm, so reaching for it on a session tool is a natural mistake. It used to be
+    # a validation error; now it is accepted and verified, which also catches the real mistake of
+    # driving the wrong VM's session.
+    await service.call("vm_start", {"vm": "win11-dev"})
+    sid = (await service.call("term_open", {"vm": "win11-dev"}))["session_id"]
+    ok = await service.call("term_send", {"session_id": sid, "text": "echo hi", "vm": "win11-dev"})
+    assert ok["bytes_sent"] > 0
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("term_read", {"session_id": sid, "vm": "other-vm"})
+    assert exc.value.code == "invalid_args" and "belongs to win11-dev" in exc.value.message
+
+
 async def test_term_kill_stops_the_shells_children_and_keeps_the_session(
     service: NtDriveService, fake_transport: FakeTransport
 ) -> None:

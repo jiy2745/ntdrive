@@ -54,6 +54,15 @@ class SessionParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_id: str = Field(description="Session id from term_open")
+    vm: str | None = Field(
+        default=None,
+        description=(
+            "Optional. A session id already names its VM, so this is not needed; passing it checks "
+            "that the session really belongs to that VM and fails if it does not, which catches "
+            "acting on the wrong VM's session. It is accepted because the kd_* tools all require "
+            "vm and reaching for it here is a natural mistake"
+        ),
+    )
 
 
 class SendParams(SessionParams):
@@ -72,6 +81,15 @@ class ReadParams(SessionParams):
         description="delta: output since the cursor. screen: the rendered screen a person sees",
     )
     until: str | None = Field(default=None, description="Regex to wait for (delta mode)")
+    skip_echo: bool = Field(
+        default=False,
+        description=(
+            "Ignore the first line when matching until. The PTY echoes what was typed, so a "
+            "command that names its own end marker (echo ===END===) matches on its echo and "
+            "returns before the command has run. Set this when until looks for something the "
+            "sent command line also contains"
+        ),
+    )
     timeout: float = Field(default=0, ge=0, description="Seconds to wait when until is set")
     max_bytes: int = Field(
         default=65536, ge=256, le=1 << 20, description="Cap on the returned text (truncated says)"
@@ -122,8 +140,15 @@ class PruneParams(BaseModel):
     vm: str | None = Field(default=None, description="Only sessions of this VM")
 
 
-def _session(service: NtDriveService, session_id: str) -> TermSession:
+def _session(service: NtDriveService, session_id: str, vm: str | None = None) -> TermSession:
     session = service.term.get(session_id)
+    if vm is not None and vm != session.vm:
+        raise NtDriveError(
+            INVALID_ARGS,
+            f"session {session_id} belongs to {session.vm}, not {vm}",
+            "drop vm (the session id already names its VM) or pass the right one. term_list shows "
+            "which VM each session belongs to",
+        )
     service.ensure_not_frozen(session.vm)
     return session
 
@@ -192,7 +217,7 @@ async def term_open(service: NtDriveService, p: OpenParams) -> dict[str, Any]:
 )
 async def term_send(service: NtDriveService, p: SendParams) -> dict[str, Any]:
     """Send input."""
-    session = _session(service, p.session_id)
+    session = _session(service, p.session_id, p.vm)
     data = encode_keys(p.text) if p.text else b""
     if p.keys:
         data += encode_key_list(p.keys)
@@ -223,7 +248,11 @@ async def term_send(service: NtDriveService, p: SendParams) -> dict[str, Any]:
 @tool(
     "term_read",
     "Read new output (delta), wait for a regex (until), or render the screen (mode=screen). "
-    "A wait ends with guest_frozen_by_debugger when the target stops at kd>.",
+    "A wait ends with guest_frozen_by_debugger when the target stops at kd>. The PTY echoes what "
+    "was typed, so an until that the sent command line also contains (echo ===END=== waited on "
+    "with ===END===) matches that echo and returns before the command ran: pass skip_echo=true, "
+    "or let term_exec frame the command, which it does by splitting its marker so the echo cannot "
+    "carry it.",
     ReadParams,
     positional=("session_id",),
     long_poll=True,
@@ -231,7 +260,7 @@ async def term_send(service: NtDriveService, p: SendParams) -> dict[str, Any]:
 )
 async def term_read(service: NtDriveService, p: ReadParams) -> dict[str, Any]:
     """Read output."""
-    session = _session(service, p.session_id)
+    session = _session(service, p.session_id, p.vm)
     if p.mode == "screen":
         return {
             "session_id": p.session_id,
@@ -250,6 +279,7 @@ async def term_read(service: NtDriveService, p: ReadParams) -> dict[str, Any]:
             clean=p.clean,
             max_bytes=p.max_bytes,
             abort=_frozen(service, session),
+            skip_first_line=p.skip_echo,
         )
     else:
         result = session.read_delta(cursor=p.cursor, max_bytes=p.max_bytes, clean=p.clean)
@@ -270,7 +300,7 @@ async def term_read(service: NtDriveService, p: ReadParams) -> dict[str, Any]:
 )
 async def term_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
     """Marker-delimited one-shot command."""
-    session = _session(service, p.session_id)
+    session = _session(service, p.session_id, p.vm)
     if session.exec_in_flight:
         # Typing a second command now just queues it behind the first one in the shell's input, so
         # this call could only ever report a timeout while the output of the two interleaves.
@@ -408,7 +438,7 @@ _KILL_SCRIPT = (
 )
 async def term_kill(service: NtDriveService, p: KillParams) -> dict[str, Any]:
     """Kill the shell's children over a second channel, because the PTY itself is busy."""
-    session = _session(service, p.session_id)
+    session = _session(service, p.session_id, p.vm)
     if session.shell_pid is None:
         raise NtDriveError(
             BACKEND_ERROR,
@@ -467,7 +497,7 @@ async def term_kill(service: NtDriveService, p: KillParams) -> dict[str, Any]:
 )
 async def term_resize(service: NtDriveService, p: ResizeParams) -> dict[str, Any]:
     """Resize."""
-    session = _session(service, p.session_id)
+    session = _session(service, p.session_id, p.vm)
     session.resize(p.cols, p.rows)
     return {"session_id": p.session_id, "cols": p.cols, "rows": p.rows}
 
@@ -477,8 +507,17 @@ async def term_resize(service: NtDriveService, p: ResizeParams) -> dict[str, Any
 )
 async def term_close(service: NtDriveService, p: SessionParams) -> dict[str, Any]:
     """Close."""
+    # Checked the same way as the other session tools, so a vm passed by habit cannot make this
+    # close someone else's session. A frozen guest is no reason not to close, so get() is direct.
+    session = service.term.get(p.session_id)
+    if p.vm is not None and p.vm != session.vm:
+        raise NtDriveError(
+            INVALID_ARGS,
+            f"session {p.session_id} belongs to {session.vm}, not {p.vm}",
+            "drop vm (the session id already names its VM) or pass the right one",
+        )
     await service.term.close(p.session_id)
-    return {"session_id": p.session_id, "state": "closed"}
+    return {"session_id": p.session_id, "vm": session.vm, "state": "closed"}
 
 
 @tool(

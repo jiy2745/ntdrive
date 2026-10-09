@@ -397,6 +397,8 @@ class FakeKdProcess:
         self.break_on_go = False  # when True a `g` is followed by a breakpoint hit
         self.wedge_on: str | None = None  # a command that never returns, to test interrupt recovery
         self._swallow_echo = False
+        self.bl_override: str | None = None  # canned `bl` listing, for deferred-breakpoint tests
+        self.responses: dict[str, str] = {}  # exact command -> output, for symbol-state tests
         self.eval_value = 1  # what `? <expr>` evaluates to, for condition tests
         self.bps: list[str] = []
         self._next_bp = 0
@@ -416,6 +418,9 @@ class FakeKdProcess:
             # so the caller times out and has to interrupt (break_in), just like a real wedge.
             self._swallow_echo = True
             return
+        if line.strip() in self.responses:
+            self.inject(self.responses[line.strip()].encode() + b"kd> ")
+            return
         if line.strip() == "g":
             self.broken = False
             if self.break_on_go:
@@ -427,6 +432,9 @@ class FakeKdProcess:
             self.inject(b"kd> ")  # bp itself prints nothing
             return
         if line.strip() == "bl":
+            if self.bl_override is not None:
+                self.inject(self.bl_override.encode() + b"kd> ")
+                return
             listing = "".join(
                 f" {bp} e Disable Clear  fffff800`00001000  mod!Sym\r\n" for bp in self.bps
             )
