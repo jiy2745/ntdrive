@@ -348,6 +348,14 @@ async def test_revert_flow_restores_kd_and_terminal(
     old_info = service.state.term(opened["session_id"])
     assert old_info.state == "disconnected" and old_info.successor == new_sid
     assert fake_vmrun.running
+    # The guest comes back RUNNING, not frozen at a kd> prompt. The attach probes by breaking in
+    # and resuming, and over KDNET the target sometimes breaks in again by itself right after,
+    # which left a reverted guest broken about half the time and made the file_push that always
+    # follows a revert fail with guest_frozen_by_debugger.
+    assert result["kd"]["state"] == "running"
+    assert (await service.call("kd_state", {"vm": "win11-dev"}))["state"] == "running"
+    assert service.runtime("win11-dev").guest_frozen is False
+
     listing = await service.call("term_list", {})
     # A revert is exactly what piles dead sessions up, so the disconnected predecessor is counted
     # rather than listed. Its successor link is still there for whoever asks for the full list.
@@ -789,3 +797,32 @@ async def test_vm_start_names_a_stale_saved_state_and_discards_it(
     with pytest.raises(NtDriveError) as exc:
         await service.call("vm_start", {"vm": "win11-dev", "discard_saved_state": True})
     assert exc.value.code == "invalid_args"
+
+
+async def test_revert_resumes_a_guest_that_breaks_in_again_after_the_reattach(
+    service: NtDriveService,
+    fake_vmrun: FakeVmrun,
+    kd_procs: list[FakeKdProcess],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revert must hand the guest back running even when the target re-breaks after the probe.
+
+    The attach probes for the target by breaking in and resuming. Over KDNET the target sometimes
+    breaks in again by itself right after that resume, which left a reverted guest at a kd> prompt
+    about half the time, nondeterministically. The file_push or con_run that always follows a
+    revert then failed with guest_frozen_by_debugger and needed a manual kd_go first.
+    """
+    await service.call("vm_start", {"vm": "win11-dev"})
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("snap_take", {"vm": "win11-dev", "name": "staged"})
+    # The revert spawns a fresh kd.exe, so this is armed for the NEXT process: shortly after it
+    # connects, the target breaks in by itself, which is the KDNET behaviour being guarded against.
+    monkeypatch.setattr(FakeKdProcess, "spontaneous_break_default", 0.05)
+    result = await service.call("snap_revert", {"vm": "win11-dev", "name": "staged", "timeout": 10})
+    assert all(s["ok"] for s in result["steps"])
+    # It landed broken and was resumed, deterministically, and it says that it did.
+    assert result["kd"]["state"] == "running"
+    assert result["kd"]["resumed_after_attach"] is True
+    assert (await service.call("kd_state", {"vm": "win11-dev"}))["state"] == "running"
+    # So the guest is not frozen and a file push works without a kd_go first.
+    assert service.runtime("win11-dev").guest_frozen is False

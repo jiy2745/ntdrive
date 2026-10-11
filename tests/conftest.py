@@ -386,6 +386,11 @@ class _FakeStdin:
 class FakeKdProcess:
     """Behaves like kd.exe: connects, answers sentinel-framed commands, breaks on request."""
 
+    # Applied to every process created from here on, because a revert or reboot spawns a fresh
+    # kd.exe the test cannot reach before the flow runs. This many seconds after connecting the
+    # target breaks in by itself: the KDNET behaviour that left a reverted guest frozen.
+    spontaneous_break_default: float | None = None
+
     def __init__(self, argv: list[str]) -> None:
         self.argv = argv
         self.pid = 4242
@@ -398,6 +403,7 @@ class FakeKdProcess:
         self.wedge_on: str | None = None  # a command that never returns, to test interrupt recovery
         self._swallow_echo = False
         self.bl_override: str | None = None  # canned `bl` listing, for deferred-breakpoint tests
+        self.wedge_once = False  # clear wedge_on after one hit, like a transient KDNET drop
         self.responses: dict[str, str] = {}  # exact command -> output, for symbol-state tests
         self.eval_value = 1  # what `? <expr>` evaluates to, for condition tests
         self.bps: list[str] = []
@@ -407,6 +413,8 @@ class FakeKdProcess:
             self.inject,
             args=(b"Connected to Windows 11 26100 x64 target at (Wed Sep 10 2026), ptr64 TRUE\n",),
         ).start()
+        if FakeKdProcess.spontaneous_break_default is not None:
+            threading.Timer(FakeKdProcess.spontaneous_break_default, self.break_in).start()
 
     def inject(self, data: bytes) -> None:
         self.stdout.q.put(data)
@@ -417,6 +425,9 @@ class FakeKdProcess:
             # kd is stuck on this command: print nothing and eat the sentinel .echo that follows,
             # so the caller times out and has to interrupt (break_in), just like a real wedge.
             self._swallow_echo = True
+            if self.wedge_once:
+                # A transient drop swallows one attempt; the identical retry goes through.
+                self.wedge_on = None
             return
         if line.strip() in self.responses:
             self.inject(self.responses[line.strip()].encode() + b"kd> ")

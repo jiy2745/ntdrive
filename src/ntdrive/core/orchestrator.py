@@ -6,6 +6,7 @@ Each flow returns a `steps` list so the caller can see exactly what ran and what
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -61,6 +62,32 @@ async def _reattach_kd(
         "kd_attach", session.attach(wait_for_target=True, timeout=timeout)
     )
     return status
+
+
+async def _ensure_kd_running(
+    service: NtDriveService, vm: VmConfig, kd_status: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Leave the guest running rather than frozen at a kd> prompt, once the flow is otherwise done.
+
+    The attach probes for the target by breaking in and resuming, and over KDNET the target
+    sometimes breaks in again by itself shortly after. That left a reverted guest at a prompt about
+    half the time, nondeterministically, so the file_push or con_run that always follows a revert
+    failed with guest_frozen_by_debugger and needed a kd_go first. Checked here, at the end, rather
+    than right after the attach: a break that lands a moment later would slip past that check and
+    leave the guest frozen anyway. A flow that also reopens terminals exists to hand back a usable
+    guest, so it resumes and says so. kd_break freezes it again, deterministically.
+    """
+    session = service.kd_sessions.get(vm.name)
+    if kd_status is None or session is None or not session.attached:
+        return kd_status
+    if session.state != KdState.BROKEN:
+        return kd_status
+    with contextlib.suppress(NtDriveError):
+        resumed = await session.go()
+        resumed["resumed_after_attach"] = True
+        service.runtime(vm.name)  # keep guest_frozen in step with the resume
+        return resumed
+    return kd_status
 
 
 async def _reopen_terms(
@@ -120,6 +147,7 @@ async def revert_flow(
         term_info = await _reopen_terms(service, vm, dropped, steps, timeout)
     else:
         steps.add("term_reopen", True, skipped="not requested")
+    kd_status = await _ensure_kd_running(service, vm, kd_status)
     service.state.record_event(vm.name, "snapshot_revert", snapshot=name)
     return {
         "steps": steps.items,
@@ -285,5 +313,6 @@ async def reboot_flow(
     # `power = RUNNING`, so a reboot that ended with the VM off was reported as running and nothing
     # noticed until a later tool failed with "the virtual machine is not powered on".
     power = await service.refresh_power(vm)
+    kd_status = await _ensure_kd_running(service, vm, kd_status)
     service.state.record_event(vm.name, "reboot", mode=mode)
     return {"steps": steps.items, "kd": kd_status, "term": term_info, "power": str(power)}

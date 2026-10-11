@@ -255,7 +255,8 @@ async def vm_stop(service: NtDriveService, p: StopParams) -> dict[str, Any]:
 @tool(
     "vm_reboot",
     "Reboot the guest (soft, hard or from the debugger) and bring kd and terminals back, the "
-    "terminals under new session ids. hard needs confirm=true.",
+    "terminals under new session ids. The guest comes back running rather than frozen at a "
+    "kd> prompt, so file_* and con_run work straight away. hard needs confirm=true.",
     RebootParams,
     destructive=True,
     long_poll=True,

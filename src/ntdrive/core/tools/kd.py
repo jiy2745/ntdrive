@@ -162,8 +162,10 @@ class CaptureFaultParams(VmParams):
     context_record: str | None = Field(
         default=None,
         description=(
-            "A CONTEXT pointer to .cxr instead of searching the stack, for bugchecks that pass one "
-            "(0x3B / 0x7E Arg3). Takes precedence over fault_rip"
+            "A CONTEXT pointer for bugchecks that pass one (0x3B / 0x7E Arg3). Its registers are "
+            "read straight out of the record with dq, never with .cxr, which wedges kd over "
+            "KDNET. Takes precedence over fault_rip, but the call stack is then the bugcheck's "
+            "rather than unwound from the fault"
         ),
     )
     trap_offset: int = Field(
@@ -691,6 +693,13 @@ async def kd_exec(service: NtDriveService, p: ExecParams) -> dict[str, Any]:
                 result["note"] = (result.get("note", "") + " ").strip() + (
                     f" {len(rows)} breakpoint(s) are bound and will fire"
                 ).strip()
+    batched = [c for c in cmds if _batched(c)]
+    if batched:
+        warnings.append(
+            "semicolon-batched command(s) wedge kd over KDNET, and an interrupt there can resume "
+            f"the target and lose a bugcheck to AutoReboot: {batched}. Pass them as separate cmds "
+            "entries instead, which ntdrive frames and sends one at a time"
+        )
     if any(_SYMBOL_TROUBLE_RE.search(str(o.get("output", ""))) for o in outputs):
         # A PDB that loaded but cannot answer looks like the command being wrong, so name it.
         warnings.append(
@@ -787,6 +796,50 @@ async def kd_symcheck(service: NtDriveService, p: SymcheckParams) -> dict[str, A
     return result
 
 
+# x64 CONTEXT: the general purpose registers run from +0x78 (Rax) to +0xF8 (Rip) as 17 qwords in
+# this order. Reading them with dq is how a fault's registers come back over KDNET, because .cxr on
+# a bugcheck context record wedges the debugger there (confirmed live on 0x3B).
+CONTEXT_GPR_OFFSET = 0x78
+CONTEXT_GPRS = (
+    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rip",
+)  # fmt: skip
+
+
+def decode_context_gprs(dump: str) -> dict[str, str]:
+    """Map `dq <ctx>+0x78 L11` output onto the x64 CONTEXT register names, in order.
+
+    Each dq row leads with the address it is dumping, so that first token is skipped and only the
+    values are taken. A short dump simply yields fewer registers rather than a wrong mapping.
+    """
+    values: list[str] = []
+    for line in dump.splitlines():
+        tokens = line.split()
+        for token in tokens[1:]:  # tokens[0] is the row address dq echoes
+            raw = token.replace("`", "")
+            if re.fullmatch(r"[0-9a-fA-F]{16}", raw):
+                values.append("0x" + raw.lower())
+    return dict(zip(CONTEXT_GPRS, values, strict=False))
+
+
+def _batched(cmd: str) -> bool:
+    """True when one command batches several with a semicolon outside quotes.
+
+    kd takes it, but over KDNET a batched line wedges the debugger, and an interrupt there can
+    resume the target and lose a bugcheck to AutoReboot. The `cmds` list is the safe equivalent:
+    ntdrive frames and sends each command on its own.
+    """
+    single = double = False
+    for ch in cmd:
+        if ch == "'" and not double:
+            single = not single
+        elif ch == '"' and not single:
+            double = not double
+        elif ch == ";" and not single and not double:
+            return True
+    return False
+
+
 def _local_symbol_cache(sympath: str) -> str:
     r"""The local cache directory out of a symbol path, for a cache-only .sympath.
 
@@ -878,9 +931,30 @@ async def kd_capture_fault(service: NtDriveService, p: CaptureFaultParams) -> di
     args = parsed["arguments"]
     rip_cmd = "u @rip L1"
     if p.context_record:
-        await session.exec([f".cxr {p.context_record}"], timeout=p.timeout, max_bytes=2048)
-        result["mode"] = "cxr"
+        # NOT .cxr: on a bugcheck context record that wedges kd over KDNET every time. The GPRs sit
+        # at a fixed offset in CONTEXT, so one short dq read gets them with no symbol work and no
+        # wedge. The cost is that the stack is not unwound from them, which the note says.
+        dump = (
+            await session.exec(
+                [f"dq {p.context_record}+{CONTEXT_GPR_OFFSET:#x} L11"],
+                timeout=p.timeout,
+                max_bytes=4096,
+            )
+        )[0]["output"]
+        registers = decode_context_gprs(str(dump))
+        result["mode"] = "context"
         result["context_record"] = p.context_record
+        result["registers"] = registers
+        if registers.get("rip"):
+            result["fault_rip"] = registers["rip"]
+            rip_cmd = f"u {registers['rip']} L1"
+        if registers.get("rsp"):
+            # The raw stack from the fault's own rsp. dq, not dps: dps resolves a symbol per slot
+            # and that is exactly what wedges over KDNET.
+            stack_dump = await session.exec(
+                [f"dq {registers['rsp']} L10"], timeout=p.timeout, max_bytes=4096
+            )
+            result["stack_words"] = str(stack_dump[0]["output"]).strip()
     else:
         fault_rip = p.fault_rip or (args[2] if len(args) >= 3 else None)
         if not fault_rip:
@@ -923,10 +997,21 @@ async def kd_capture_fault(service: NtDriveService, p: CaptureFaultParams) -> di
     result["faulting_instruction"] = by_cmd.get(rip_cmd, "")
     result["modules"] = by_cmd.get("lm k", "")
     result["state"] = str(session.state)
-    result["note"] = (
-        "the register context is left at the fault (.trap/.cxr) for more kd_exec, and resets on "
-        "the next break. Do not kd_detach or kd_go to leave: both resume and complete the crash"
-    )
+    leave = " Do not kd_detach or kd_go to leave: both resume and complete the crash."
+    if result["mode"] == "context":
+        # Be explicit that kb here is the bugcheck's stack, not the fault's. Saying otherwise would
+        # hand back a call stack that looks authoritative and is not.
+        result["note"] = (
+            "registers come from the CONTEXT record read directly, because .cxr wedges kd over "
+            "KDNET. They are the fault's, but stack is NOT unwound from them: it is the bugcheck "
+            "stack, with stack_words holding the raw qwords at the fault's rsp. For an unwound "
+            "fault stack omit context_record and let the trap-frame search run instead." + leave
+        )
+    else:
+        result["note"] = (
+            "the register context is left at the fault (.trap) for more kd_exec, and resets on "
+            "the next break." + leave
+        )
     service.state.record_event(p.vm, "kd_capture_fault", bugcheck=parsed.get("code"))
     return result
 

@@ -64,6 +64,13 @@ def generate_kdnet_key() -> str:
     return ".".join(words)
 
 
+# Commands worth retrying once when a wedge was interrupted. A short memory or register read fails
+# about a third of the time over KDNET on an identical call, and the very next one always works, so
+# a transient drop swallowed it rather than the command being bad. Only pure reads are listed: a
+# second bp, .reload, eb or g would act twice. dt and dps are left out on purpose, they resolve
+# symbols and so can wedge for real, and retrying would just double the wait.
+_RETRY_SAFE_RE = re.compile(r"^\s*(?:d[bwdqcayu]|r|\.bugcheck|bl)(?:\s|$)", re.IGNORECASE)
+
 BUGCHECK_CODE_RE = re.compile(
     r"(?:bugcheck code|fatal system error:)\s*0?x?([0-9a-f]{1,8})", re.IGNORECASE
 )
@@ -536,8 +543,6 @@ class KdSession:
     async def _interrupt_wedged_command(
         self,
         cmd: str,
-        sentinel: str,
-        start: int,
         timeout: float,
         original: NtDriveError,
         at_bugcheck: bool = False,
@@ -560,11 +565,13 @@ class KdSession:
         # The usual offender: over a network symbol path the first lookup during a processor switch
         # (~Ns) or a symbol-heavy command blocks on the symbol server. The guest's cache cures it.
         sympath_hint = (
-            "A processor switch (processor=/~Ns) or a symbol-heavy command (x, u, ln, lm, "
-            "!analyze) over a network symbol path wedges on the first lookup: set a cache-only "
-            "path with "
-            r".sympath cache*C:\symbols once symbols are cached, or pre-fetch with .reload /f "
-            "while broken, then retry."
+            "A processor switch (processor=/~Ns) or a symbol-heavy command (x, u, ln, lm, kv, kn, "
+            "uf, .reload /f, !analyze) over a network symbol path wedges on the first lookup: set "
+            r"a cache-only path with .sympath cache*C:\symbols once symbols are cached, or "
+            "pre-fetch with .reload /f while broken, then retry. Several commands batched with "
+            "semicolons wedge too: pass them as separate cmds entries instead. Setting AutoReboot "
+            "to 0 in the guest's CrashControl keeps a wedge at a bugcheck from losing the context "
+            "to an automatic reboot."
         )
         if recovered:
             if at_bugcheck:
@@ -619,18 +626,39 @@ class KdSession:
         # loudly rather than quietly cost the crash context. Read it before any command overwrites
         # last_event (the break the interrupt itself raises classifies as a user_break).
         at_bugcheck = bool(self.last_event and self.last_event.get("event") == "bugcheck")
+
+        async def run_once(cmd: str) -> dict[str, Any]:
+            """Write one command, wait for its sentinel, and parse what it printed."""
+            sentinel = f"__NTDRIVE_END_{secrets.token_hex(4)}__"
+            start = self._base + len(self._buf)
+            started = time.monotonic()
+            # The sentinel goes on its own line, not after `; `, because a line-eating meta
+            # command (`.sympath`, `.reload`, ...) consumes to end of line and would swallow
+            # `.echo` and the sentinel with it. On a separate line every command is framed.
+            self._write(f"{cmd}\n.echo {sentinel}\n")
+            idx = await self._wait_for_bytes(sentinel.encode(), start, timeout)
+            raw = bytes(self._buf[start - self._base : idx - self._base])
+            text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
+            text = re.sub(r"(?m)^(?:\d+: )?kd> ?$", "", text).strip("\n")
+            truncated = len(text.encode("utf-8")) > max_bytes
+            if truncated:
+                text = text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+            return {
+                "cmd": cmd,
+                "output": text,
+                # The sentinel was matched, so the command definitely ran. Say so when it
+                # printed nothing: `.reload /f mod.sys` returns empty, and a caller could
+                # not tell that from output the framing had swallowed.
+                "printed_nothing": not text,
+                "truncated": truncated,
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            }
+
         results: list[dict[str, Any]] = []
         async with self._lock:
             for cmd in cmds:
-                sentinel = f"__NTDRIVE_END_{secrets.token_hex(4)}__"
-                start = self._base + len(self._buf)
-                started = time.monotonic()
-                # The sentinel goes on its own line, not after `; `, because a line-eating meta
-                # command (`.sympath`, `.reload`, ...) consumes to end of line and would swallow
-                # `.echo` and the sentinel with it. On a separate line every command is framed.
-                self._write(f"{cmd}\n.echo {sentinel}\n")
                 try:
-                    idx = await self._wait_for_bytes(sentinel.encode(), start, timeout)
+                    entry = await run_once(cmd)
                 except NtDriveError as exc:
                     if exc.code != TIMEOUT:
                         raise
@@ -638,28 +666,21 @@ class KdSession:
                     # prompt dead, so every later command timed out and only kd_detach recovered.
                     # CTRL_BREAK goes to kd.exe, not the target, which is how WinDbg interrupts a
                     # running extension. Try it once so the session stays usable.
-                    recovery = await self._interrupt_wedged_command(
-                        cmd, sentinel, start, timeout, exc, at_bugcheck
-                    )
-                    raise recovery from exc
-                raw = bytes(self._buf[start - self._base : idx - self._base])
-                text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
-                text = re.sub(r"(?m)^(?:\d+: )?kd> ?$", "", text).strip("\n")
-                truncated = len(text.encode("utf-8")) > max_bytes
-                if truncated:
-                    text = text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
-                results.append(
-                    {
-                        "cmd": cmd,
-                        "output": text,
-                        # The sentinel was matched, so the command definitely ran. Say so when it
-                        # printed nothing: `.reload /f mod.sys` returns empty, and a caller could
-                        # not tell that from output the framing had swallowed.
-                        "printed_nothing": not text,
-                        "truncated": truncated,
-                        "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
-                    }
-                )
+                    recovery = await self._interrupt_wedged_command(cmd, timeout, exc, at_bugcheck)
+                    # A short read swallowed by a transient KDNET drop is the most common wedge
+                    # there is, and the identical call right after it always works. Spend the one
+                    # retry here instead of making the caller pay a round trip and read a scary
+                    # timeout, but only for a pure read (see _RETRY_SAFE_RE).
+                    if not (recovery.extra.get("interrupted") and _RETRY_SAFE_RE.match(cmd)):
+                        raise recovery from exc
+                    try:
+                        entry = await run_once(cmd)
+                    except NtDriveError:
+                        # It wedged twice, so it is the command and not the link. Report the
+                        # original wedge with its advice rather than a bare second timeout.
+                        raise recovery from exc
+                    entry["retried_after_wedge"] = True
+                results.append(entry)
                 # Let the prompt come back before the next command.
                 await self._wait_state({KdState.BROKEN}, timeout, allow_timeout=True)
         return results

@@ -519,7 +519,7 @@ async def test_kd_capture_fault_automates_the_trap_and_stack(
 async def test_kd_capture_fault_can_use_a_context_record(
     service: NtDriveService, kd_procs: list[FakeKdProcess]
 ) -> None:
-    # A bugcheck that carries a CONTEXT pointer (0x3B / 0x7E Arg3) skips the stack search and .cxr it.
+    # A bugcheck that carries a CONTEXT pointer (0x3B / 0x7E Arg3) skips the stack search.
     await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
     kd_procs[-1].bugcheck()
     await service.call("kd_wait_event", {"vm": "win11-dev", "timeout": 5})
@@ -527,9 +527,11 @@ async def test_kd_capture_fault_can_use_a_context_record(
         "kd_capture_fault",
         {"vm": "win11-dev", "context_record": "0xffffd00011112222", "cache_symbols": False},
     )
-    assert result["mode"] == "cxr" and result["context_record"] == "0xffffd00011112222"
+    assert result["mode"] == "context" and result["context_record"] == "0xffffd00011112222"
     cmds = kd_procs[-1].commands
-    assert ".cxr 0xffffd00011112222" in cmds
+    # The registers come out of CONTEXT with dq. .cxr would wedge kd over KDNET every time.
+    assert "dq 0xffffd00011112222+0x78 L11" in cmds
+    assert not any(c.startswith(".cxr") for c in cmds)
     assert not any(c.startswith("s -q") for c in cmds)  # no stack search
     assert not any(c.startswith(".sympath") for c in cmds)  # cache_symbols was off
 
@@ -808,3 +810,103 @@ async def test_kd_attach_passes_a_normalized_symbol_path(
     assert (
         argv[argv.index("-y") + 1] == r"srv*C:\symbols*https://msdl.microsoft.com/download/symbols"
     )
+
+
+async def test_kd_exec_retries_a_short_read_once_after_a_wedge(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # A short memory read fails about a third of the time over KDNET on an identical call and the
+    # very next one always works, so the drop swallowed it. One silent retry saves the caller a
+    # round trip and a timeout that reads like a real failure.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    proc = kd_procs[-1]
+    proc.wedge_on = "dq ffffd000 L4"
+    proc.wedge_once = True  # like the live case: only the first attempt is swallowed
+    out = await service.call("kd_exec", {"vm": "win11-dev", "cmd": "dq ffffd000 L4", "timeout": 1})
+    assert out["outputs"][0]["retried_after_wedge"] is True
+    assert "output of [dq ffffd000 L4]" in out["outputs"][0]["output"]
+
+
+async def test_kd_exec_does_not_retry_a_command_with_side_effects(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # Re-running a breakpoint, a reload or a symbol-heavy command would act twice or just double
+    # the wait, so only pure short reads are retried.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    proc = kd_procs[-1]
+    for unsafe in ("bp nt!NtCreateFile", ".reload /f nt", "dt nt!_EPROCESS", "dps @rsp L10"):
+        proc.wedge_on = unsafe
+        proc.wedge_once = True
+        with pytest.raises(NtDriveError) as exc:
+            await service.call("kd_exec", {"vm": "win11-dev", "cmd": unsafe, "timeout": 1})
+        assert exc.value.code == TIMEOUT, unsafe
+        assert exc.value.extra["interrupted"] is True, unsafe
+
+
+async def test_kd_exec_warns_about_semicolon_batched_commands(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # A batched line wedges kd over KDNET, and an interrupt there can resume the target and lose a
+    # bugcheck to AutoReboot. cmds is the safe equivalent, so the warning names it.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    await service.call("kd_break", {"vm": "win11-dev"})
+    out = await service.call("kd_exec", {"vm": "win11-dev", "cmd": "r rip; r rsp"})
+    assert "semicolon-batched" in out["warning"] and "separate cmds entries" in out["warning"]
+    # A semicolon inside a breakpoint's quoted action is not a batch.
+    quoted = await service.call(
+        "kd_exec", {"vm": "win11-dev", "cmd": "bp nt!Foo \"j (@rcx=0) '.echo a; .echo b'\""}
+    )
+    assert "semicolon-batched" not in str(quoted.get("warning", ""))
+
+
+def test_decode_context_gprs_maps_the_x64_offsets() -> None:
+    from ntdrive.core.tools.kd import decode_context_gprs
+
+    # Two qwords per dq row, each row led by the address being dumped (which must not be read as a
+    # value). 0x78 is Rax, so the order is Rax, Rcx, Rdx, Rbx, Rsp, ... and Rip last.
+    dump = (
+        "ffffd000`00000078  00000000`0000aaaa 00000000`0000cccc\n"
+        "ffffd000`00000088  00000000`0000dddd 00000000`0000bbbb\n"
+        "ffffd000`00000098  ffffd000`11112222 ffffd000`33334444\n"
+    )
+    regs = decode_context_gprs(dump)
+    assert regs["rax"] == "0x000000000000aaaa"
+    assert regs["rcx"] == "0x000000000000cccc"
+    assert regs["rdx"] == "0x000000000000dddd"
+    assert regs["rbx"] == "0x000000000000bbbb"
+    assert regs["rsp"] == "0xffffd00011112222"
+    assert regs["rbp"] == "0xffffd00033334444"
+    # A short dump yields fewer registers rather than a wrong mapping.
+    assert "rip" not in regs and len(regs) == 6
+
+
+async def test_kd_capture_fault_reads_a_context_record_without_cxr(
+    service: NtDriveService, kd_procs: list[FakeKdProcess]
+) -> None:
+    # .cxr on a bugcheck context record wedges kd over KDNET every time, so the GPRs are read out
+    # of CONTEXT with one dq instead. The stack is then NOT the fault's, and the note says so.
+    await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    kd_procs[-1].bugcheck()
+    await service.call("kd_wait_event", {"vm": "win11-dev", "timeout": 5})
+    proc = kd_procs[-1]
+    proc.responses = {
+        "dq 0xffffd00011112222+0x78 L11": (
+            "ffffd000`00000078  00000000`0000aaaa 00000000`0000cccc\r\n"
+            "ffffd000`00000088  00000000`0000dddd 00000000`0000bbbb\r\n"
+            "ffffd000`00000098  ffffd000`cafe0000 ffffd000`33334444\r\n"
+        )
+    }
+    out = await service.call(
+        "kd_capture_fault",
+        {"vm": "win11-dev", "context_record": "0xffffd00011112222", "cache_symbols": False},
+    )
+    assert out["mode"] == "context"
+    assert out["registers"]["rax"] == "0x000000000000aaaa"
+    assert out["registers"]["rsp"] == "0xffffd000cafe0000"
+    # The raw stack is read from the fault's own rsp, with dq (dps would resolve a symbol per slot
+    # and that is what wedges).
+    assert "dq 0xffffd000cafe0000 L10" in proc.commands
+    assert not any(c.startswith(".cxr") for c in proc.commands)
+    assert "NOT unwound" in out["note"] and "stack_words" in out["note"]

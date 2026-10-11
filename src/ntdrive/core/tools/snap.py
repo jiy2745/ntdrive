@@ -380,7 +380,9 @@ async def snap_take(service: NtDriveService, p: SnapTakeParams) -> dict[str, Any
 
 @tool(
     "snap_revert",
-    "Revert to a snapshot: detach kd, revert, start, reattach kd, reopen terminals.",
+    "Revert to a snapshot: detach kd, revert, start, reattach kd, reopen terminals. The guest "
+    "comes back running, not frozen at a kd> prompt, so the file_push and con_run that follow "
+    "a revert work straight away (kd_break freezes it again when that is what you want).",
     SnapRevertParams,
     positional=("vm", "name"),
     long_poll=True,

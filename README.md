@@ -218,7 +218,7 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `vm_wait_ready` | read | Wait until the guest is back up: block until SSH answers, or the timeout passes. For after a reboot or a bugcheck's auto-restart, so no manual polling loop is needed. |
 | `vm_start` | additive | Power on (or resume) a VM without the GUI by default. discard_saved_state boots fresh when a stale saved state blocks the resume. |
 | `vm_stop` | destructive | Stop the VM: mode soft, hard or kill. hard and kill need confirm=true. |
-| `vm_reboot` | destructive | Reboot the guest (soft, hard or from the debugger) and bring kd and terminals back, the terminals under new session ids. hard needs confirm=true. |
+| `vm_reboot` | destructive | Reboot the guest (soft, hard or from the debugger) and bring kd and terminals back, the terminals under new session ids. The guest comes back running rather than frozen at a kd> prompt, so file_* and con_run work straight away. hard needs confirm=true. |
 | `vm_suspend` | additive | Suspend the VM to disk. |
 | `vm_resume` | additive | Resume a suspended VM (same as vm_start). |
 | `vm_config` | additive | Read or change the VM hardware in the vmx: cpus, memory_mb, nic. Without arguments it reports the current values. A change needs the VM powered off. |
@@ -228,7 +228,7 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `vm_delete` | destructive | Delete a VM and its files (a clone, usually), and drop its vms.yaml entry. Powers it off first. Needs confirm=true. When the VM's files are already gone (moved or deleted by hand) it just removes the stale entry. A base VM with linked clones cannot be deleted until the clones are gone. |
 | `snap_list` | read | Snapshot tree of a VM plus the current snapshot and stored metadata. |
 | `snap_take` | additive | Take a snapshot (memory included while running), record description and kd state, and return the snapshot list. A name that already exists is reported with created=false instead of erroring, and replace=true deletes it and retakes. |
-| `snap_revert` | destructive | Revert to a snapshot: detach kd, revert, start, reattach kd, reopen terminals. |
+| `snap_revert` | destructive | Revert to a snapshot: detach kd, revert, start, reattach kd, reopen terminals. The guest comes back running, not frozen at a kd> prompt, so the file_push and con_run that follow a revert work straight away (kd_break freezes it again when that is what you want). |
 | `snap_delete` | destructive | Delete a snapshot (and optionally its children). Needs confirm=true. |
 | `kd_setup_host` | additive | Prepare the host side of the kd transport: serial adds the named-pipe COM port to the vmx (VM must be off), net checks the host firewall for kd.exe and repairs it through one UAC prompt. |
 | `kd_setup_guest` | additive | Enable kernel debugging in the guest with bcdedit over SSH (serial or KDNET per kd_transport) and save the KDNET port and key to vms.yaml. Settings that already point at this host are read back, not rewritten. |
