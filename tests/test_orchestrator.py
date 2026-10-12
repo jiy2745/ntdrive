@@ -815,9 +815,10 @@ async def test_revert_resumes_a_guest_that_breaks_in_again_after_the_reattach(
     await service.call("vm_start", {"vm": "win11-dev"})
     await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
     await service.call("snap_take", {"vm": "win11-dev", "name": "staged"})
-    # The revert spawns a fresh kd.exe, so this is armed for the NEXT process: shortly after it
-    # connects, the target breaks in by itself, which is the KDNET behaviour being guarded against.
-    monkeypatch.setattr(FakeKdProcess, "spontaneous_break_default", 0.05)
+    # The revert spawns a fresh kd.exe, so this is armed for the NEXT process: as it comes up the
+    # target breaks in by itself, which is the KDNET behaviour being guarded against. Deterministic
+    # on purpose, an earlier timer-based version of this raced the flow and passed by luck.
+    monkeypatch.setattr(FakeKdProcess, "break_on_connect_default", True)
     result = await service.call("snap_revert", {"vm": "win11-dev", "name": "staged", "timeout": 10})
     assert all(s["ok"] for s in result["steps"])
     # It landed broken and was resumed, deterministically, and it says that it did.
@@ -826,3 +827,45 @@ async def test_revert_resumes_a_guest_that_breaks_in_again_after_the_reattach(
     assert (await service.call("kd_state", {"vm": "win11-dev"}))["state"] == "running"
     # So the guest is not frozen and a file push works without a kd_go first.
     assert service.runtime("win11-dev").guest_frozen is False
+    # Close the session this test left attached, so its kd transcript handle does not outlive the
+    # test: a leaked one surfaces later as an unraisable ResourceWarning against some other test.
+    await service.call("kd_detach", {"vm": "win11-dev"})
+
+
+async def test_snap_revert_recovers_a_saved_state_it_cannot_restore(
+    service: NtDriveService, fake_vmrun: FakeVmrun
+) -> None:
+    """Repeated reverts of a suspend-resume memory snapshot can leave the vmx naming a .vmss that
+    is not there, and then every start fails. Dropping it boots, but COLD, so it is opt-in.
+    """
+    await service.call("vm_start", {"vm": "win11-dev"})
+    await service.call("snap_take", {"vm": "win11-dev", "name": "serial-clean2"})
+    vmx = Path(service.config.vms["win11-dev"].vmx)
+    stale = 'checkpoint.vmState = "windows-11-serial-Snapshot2.vmsn"\n'
+    revert = {
+        "vm": "win11-dev",
+        "name": "serial-clean2",
+        "reattach_kd": False,
+        "reopen_term": False,
+        "timeout": 10,
+    }
+
+    # Off by default: the warm memory is the point of a memory snapshot, so it is not thrown away
+    # silently. The error names the flag that does it, inside the revert.
+    vmx.write_text(vmx.read_text(encoding="latin-1") + stale, encoding="latin-1")
+    fake_vmrun.fail_next = {"start": 1}
+    with pytest.raises(NtDriveError) as exc:
+        await service.call("snap_revert", revert)
+    assert exc.value.reason == "saved_state_stale"
+    assert "snap_revert discard_stale_saved_state=true" in exc.value.hint
+
+    # Asked for: the stale state is dropped, the start is retried, and the cold boot is reported
+    # rather than left to be noticed from a changed kernel base.
+    vmx.write_text(vmx.read_text(encoding="latin-1") + stale, encoding="latin-1")
+    fake_vmrun.fail_next = {"start": 1}
+    result = await service.call("snap_revert", {**revert, "discard_stale_saved_state": True})
+    assert result["started_via"] == "cold_boot_after_discard"
+    assert [s["step"] for s in result["steps"]].count("start") == 2
+    assert any(s["step"] == "discard_saved_state" and s["ok"] for s in result["steps"])
+    assert "COLD booted" in result["note"] and "kernel_base" in result["note"]
+    assert "checkpoint" not in vmx.read_text(encoding="latin-1").lower()

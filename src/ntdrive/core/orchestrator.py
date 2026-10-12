@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from ntdrive.config import VmConfig
 from ntdrive.core.state import KdState, PowerState
-from ntdrive.errors import KD_NOT_BROKEN, NtDriveError
+from ntdrive.errors import KD_NOT_BROKEN, REASON_SAVED_STATE_STALE, NtDriveError
 
 if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
@@ -105,6 +105,35 @@ async def _reopen_terms(
     ]
 
 
+async def _start_after_revert(
+    service: NtDriveService, vm: VmConfig, steps: Steps, discard_stale: bool
+) -> str:
+    """Start the reverted VM, recovering from a saved state the vmx names but cannot restore.
+
+    Reverting a memory snapshot that was taken through suspend-resume can leave the vmx naming a
+    saved state with no .vmss beside it, and then every start fails. Dropping it boots fine but
+    cold, losing the warm desktop and a kernel base, so it is never done silently: either the
+    caller asked for it, or the error names the flag that does it.
+    """
+    adapter = service.adapter_for(vm)
+    try:
+        await steps.run("start", adapter.start(vm))
+        return "resumed"
+    except NtDriveError as exc:
+        if exc.reason != REASON_SAVED_STATE_STALE or not discard_stale:
+            if exc.reason == REASON_SAVED_STATE_STALE:
+                exc.hint = (
+                    f"{exc.hint} snap_revert discard_stale_saved_state=true does this as part of "
+                    "the revert, then reattaches kd and reopens the terminals."
+                )
+            raise
+        dropped = await steps.run(
+            "discard_saved_state", adapter.discard_saved_state(vm), reason="saved_state_stale"
+        )
+        await steps.run("start", adapter.start(vm), after="discard_saved_state", dropped=dropped)
+        return "cold_boot_after_discard"
+
+
 async def revert_flow(
     service: NtDriveService,
     vm: VmConfig,
@@ -114,6 +143,7 @@ async def revert_flow(
     reattach_kd: bool,
     reopen_term: bool,
     timeout: float,
+    discard_stale_saved_state: bool = False,
 ) -> dict[str, Any]:
     """Kd detach -> drop terminals -> revert -> start -> kd attach -> reopen terminals."""
     steps = Steps()
@@ -130,8 +160,9 @@ async def revert_flow(
     await steps.run("snapshot_revert", adapter.snapshot_revert(vm, name), snapshot=name)
     runtime = service.state.vm(vm.name)
     runtime.current_snapshot = name
+    started_via = ""
     if start:
-        await steps.run("start", adapter.start(vm))
+        started_via = await _start_after_revert(service, vm, steps, discard_stale_saved_state)
         runtime.power = PowerState.RUNNING
     else:
         runtime.power = await adapter.power_state(vm)
@@ -149,15 +180,25 @@ async def revert_flow(
         steps.add("term_reopen", True, skipped="not requested")
     kd_status = await _ensure_kd_running(service, vm, kd_status)
     service.state.record_event(vm.name, "snapshot_revert", snapshot=name)
+    note = (
+        f"the disk went back to {name} too, so anything written to the guest after that "
+        "snapshot is gone: re-push tools and test files built since then (file_push)"
+    )
+    if started_via == "cold_boot_after_discard":
+        # The warm state is the whole point of a memory snapshot, so losing it is said plainly
+        # rather than left for the caller to notice from a changed kernel base.
+        note += (
+            ". The vmx named a saved state it could not restore, so it was dropped and the guest "
+            "COLD booted: the snapshot's warm memory is gone, the desktop is back at the lock "
+            "screen, and ASLR gave the kernel a new base (kd_state reports kernel_base)"
+        )
     return {
         "steps": steps.items,
         "kd": kd_status,
         "term": term_info,
         "power": str(runtime.power),
-        "note": (
-            f"the disk went back to {name} too, so anything written to the guest after that "
-            "snapshot is gone: re-push tools and test files built since then (file_push)"
-        ),
+        "started_via": started_via or None,
+        "note": note,
     }
 
 

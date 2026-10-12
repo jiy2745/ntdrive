@@ -191,7 +191,10 @@ def find_vmx_processes(vmx: str) -> list[Any]:
     target = _norm(vmx)
     found: list[Any] = []
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-        info = proc.info
+        # Reading another user's (or an elevated) process can be refused; such a process is simply
+        # not one of ours to report.
+        if (info := getattr(proc, "info", None)) is None:
+            continue
         if (info.get("name") or "").lower() not in VMX_PROCESS_NAMES:
             continue
         if any(_norm(arg) == target for arg in (info.get("cmdline") or []) if arg):
@@ -869,7 +872,13 @@ class VmwareAdapter(HypervisorAdapter):
                 else:
                     denied.append(proc.pid)
         for proc in procs:
-            with contextlib.suppress(psutil.NoSuchProcess, psutil.TimeoutExpired):
+            # AccessDenied belongs here too. Without it an unelevated daemon raised psutil's own
+            # AccessDenied out of kill() the moment it waited on a process it could not kill, which
+            # escaped before the vmrun fallback below and reached the caller as a bare
+            # "AccessDenied: (pid=..., name='vmware-vmx.exe')" with none of the advice.
+            with contextlib.suppress(
+                psutil.NoSuchProcess, psutil.TimeoutExpired, psutil.AccessDenied
+            ):
                 await asyncio.to_thread(proc.wait, 10)
         if denied and not killed:
             # Last resort before giving up: ask vmrun to cut the power instead.

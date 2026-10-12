@@ -218,6 +218,15 @@ class SnapRevertParams(SnapNameParams):
     start: bool = Field(default=True, description="Power the VM on after the revert")
     reattach_kd: bool = Field(default=True, description="Reattach the kernel debugger")
     reopen_term: bool = Field(default=True, description="Reopen dropped terminal sessions")
+    discard_stale_saved_state: bool = Field(
+        default=False,
+        description=(
+            "When the reverted vmx names a saved state it cannot restore (a .vmss that is not "
+            "there, which repeated reverts of a suspend-resume memory snapshot can leave), drop it "
+            "and boot anyway. Off by default because that boot is COLD: the snapshot's warm "
+            "memory, the logged-in desktop and the kernel base are all lost"
+        ),
+    )
     timeout: float = Field(default=180, ge=1, description="Seconds to wait for kd and ssh")
 
 
@@ -407,6 +416,7 @@ async def snap_revert(service: NtDriveService, p: SnapRevertParams) -> dict[str,
         reattach_kd=p.reattach_kd,
         reopen_term=p.reopen_term,
         timeout=p.timeout,
+        discard_stale_saved_state=p.discard_stale_saved_state,
     )
     if p.start and not p.reattach_kd and kd_at_snapshot in ("running", "broken", "waiting"):
         # This snapshot froze a guest that had the debugger attached. Restoring it with nothing on

@@ -48,6 +48,11 @@ PROMPT_RE = re.compile(rb"(?:^|\r?\n)(?:\d+: )?kd> ?\Z")
 # later command runs wherever kd is focused, so the caller needs to know which one that was.
 PROC_PROMPT_RE = re.compile(rb"(?:^|\r?\n)(\d+): kd> ?\Z")
 CONNECTED_RE = re.compile(rb"Connected to (Windows[^\r\n]*)")
+# kd prints `Kernel base = 0xfffff800`12000000 PsLoadedModuleList = ...` when it connects and again
+# after a reload. ASLR moves it on every cold boot, and a caller that has to re-set a `-base` had to
+# spend a break on vertarget to learn it. Reading it out of the transcript costs nothing, so it
+# rides kd_state instead.
+KERNEL_BASE_RE = re.compile(rb"Kernel base\s*=\s*([0-9a-fA-F`x]+)")
 BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 
@@ -258,6 +263,13 @@ class KdSession:
         self._base = 0
         self.state = KdState.DETACHED
         self.target_info = ""
+        # The kernel's loaded base, parsed from kd's own output. Empty until kd prints it.
+        self.kernel_base = ""
+        # True once the target has actually answered: the connect banner arrived, or a break reached
+        # a prompt. `attached` only means kd.exe is alive, and over a serial pipe kd reports running
+        # without having heard anything from the target, which read as a working session and then
+        # failed at the first command with [no_debuggee].
+        self.target_confirmed = False
         self.last_event: dict[str, Any] | None = None
         self._changed = asyncio.Condition()
         self._reader: threading.Thread | None = None
@@ -299,6 +311,8 @@ class KdSession:
         self._base = 0
         self.last_event = None
         self.target_info = ""
+        self.kernel_base = ""
+        self.target_confirmed = False
         try:
             self._proc = self._spawn(self.argv())
         except OSError as exc:
@@ -423,9 +437,17 @@ class KdSession:
             # KDNET prints this as soon as the target boots; a serial pipe prints it on the first
             # sync (usually the first break), so capture it whatever the state.
             self.target_info = m.group(1).decode("utf-8", errors="replace").strip()
+            # The banner is the target speaking, so from here on it is known to be there.
+            self.target_confirmed = True
             if self.state == KdState.WAITING:
                 self.state = KdState.RUNNING
+        base = KERNEL_BASE_RE.search(data)
+        if base:
+            raw = base.group(1).decode("utf-8", errors="replace").replace("`", "").lower()
+            self.kernel_base = raw if raw.startswith("0x") else "0x" + raw
         if PROMPT_RE.search(self._buf[-64:]):
+            # A prompt means the target stopped for us, so it is there whatever the banner did.
+            self.target_confirmed = True
             if self.state in (KdState.RUNNING, KdState.WAITING):
                 tail = self._buf[-4096:].decode("utf-8", errors="replace")
                 kind = classify_break(tail)
@@ -781,9 +803,14 @@ class KdSession:
         # The process is the truth. Between kd.exe dying and the reader thread reporting it,
         # self.state can still say broken, which once sent an agent to kd_exec and kd_not_attached.
         attached = self.attached
-        return {
+        status: dict[str, Any] = {
             "attached": attached,
             "state": str(self.state) if attached else str(KdState.DETACHED),
+            # Whether the TARGET has actually answered, which `attached` does not say: that is only
+            # kd.exe being alive. Over a serial pipe kd reports running before it has heard
+            # anything, so a session could look healthy and then fail with [no_debuggee].
+            "target_confirmed": attached and self.target_confirmed,
+            "kernel_base": self.kernel_base,
             "transport": self.transport,
             "port": self.port if self.transport == "net" else None,
             "serial_pipe": self.serial_pipe if self.transport == "serial" else None,
@@ -792,6 +819,15 @@ class KdSession:
             "log_path": str(self.log_path),
             "pid": self._proc.pid if self._proc is not None else None,
         }
+        if attached and not self.target_confirmed:
+            status["note"] = (
+                "kd.exe is up but the target has not answered yet (target_confirmed=false), so "
+                "state is about the debugger, not the guest: a command here fails with "
+                "[no_debuggee]. A target that booted before kd was listening does not reconnect "
+                "by itself. Recovery, with the VM off: vm_start, vm_wait_ready, then kd_attach "
+                "with wait_for_target=false, and kd_exec vertarget to confirm the link"
+            )
+        return status
 
     def log_tail(self, nbytes: int = 16384) -> str:
         """Last bytes of the session transcript."""

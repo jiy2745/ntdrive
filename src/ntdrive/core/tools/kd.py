@@ -568,9 +568,13 @@ _SYMBOL_TROUBLE_RE = re.compile(
     r"unqualified symbol|type information missing|bad symbols", re.IGNORECASE
 )
 SYMBOL_REFRESH_FIX = (
-    r"point at a FRESH cache directory and re-download, for example .sympath "
-    r"srv*C:\symbols2*https://msdl.microsoft.com/download/symbols then .reload /f nt. Deleting the "
-    "bad PDB out of the old cache works too. kd_symcheck says whether type information is loaded"
+    # The exact two-step a live session confirmed. Fetching into a FRESH directory matters: the
+    # half-built PDB in the old cache is what keeps being served otherwise.
+    r"point at a FRESH cache directory and re-download, then go cache-only. Step 1: .sympath "
+    r"srv*C:\symbols2*https://msdl.microsoft.com/download/symbols then .reload /f nt (this one "
+    r"needs the network and is slow). Step 2: .sympath cache*C:\symbols2, which keeps the full "
+    "PDB and stops every later lookup from reaching for the network. Deleting the bad PDB out of "
+    "the old cache works too. kd_symcheck says whether type information is loaded"
 )
 
 
@@ -780,7 +784,12 @@ async def kd_symcheck(service: NtDriveService, p: SymcheckParams) -> dict[str, A
         "state": str(session.state),
     }
     if types_ok and names_ok:
-        result["note"] = "symbols resolve both names and types, so dt, !pool and !process can work"
+        result["note"] = (
+            "symbols resolve both names and types, so dt, !pool and !process can work. Over a "
+            "serial pipe those extensions are still slow enough to hit a timeout (!pool and "
+            "!process have taken over 90s): reading the struct with dq at a known offset is the "
+            "practical way there, and kd_capture_fault does exactly that for a fault CONTEXT"
+        )
     elif names_ok:
         result["note"] = (
             "the PDB has function names but NO type information, the corrupt-cache case: dt, "
@@ -1168,8 +1177,13 @@ async def kd_state(service: NtDriveService, p: VmParams) -> dict[str, Any]:
         return result
     # kd.exe is gone. What the previous session saw (its target banner, its last break) must
     # not read as the present, so it moves under previous_session and the live fields go blank.
-    previous = {"target_info": status["target_info"], "last_event": status["last_event"]}
-    status.update(target_info="", last_event=None, pid=None)
+    previous = {
+        "target_info": status["target_info"],
+        "last_event": status["last_event"],
+        # ASLR moves it on every boot, so the base the dead session saw is not this guest's now.
+        "kernel_base": status.get("kernel_base", ""),
+    }
+    status.update(target_info="", last_event=None, pid=None, kernel_base="")
     return {
         "vm": p.vm,
         **status,

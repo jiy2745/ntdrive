@@ -377,8 +377,18 @@ async def con_screenshot(service: NtDriveService, p: ScreenshotParams) -> dict[s
         try:
             saved = await adapter.screenshot(cfg, _out_path(service, p.vm))
             via = "guest"
-        except NtDriveError:
-            if p.method == "guest" or endpoint is None:
+        except NtDriveError as exc:
+            if p.method == "guest":
+                raise
+            if endpoint is None:
+                # auto wanted to fall back and had nowhere to go. vmrun can hang for the whole
+                # timeout when the VM is wedged, and the bare error read as "screenshots are
+                # broken" rather than "the login-free path was never turned on".
+                exc.hint = (
+                    f"{exc.hint} There is no VNC fallback configured for this VM, so auto had "
+                    "nothing to fall back to: run con_enable_vnc with the VM off, start it, and "
+                    "con_screenshot works without a guest login even when vmrun does not answer."
+                ).strip()
                 raise
             saved, via = await by_vnc()  # auto: fall back to the login-free path
         else:

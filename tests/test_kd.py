@@ -910,3 +910,48 @@ async def test_kd_capture_fault_reads_a_context_record_without_cxr(
     assert "dq 0xffffd000cafe0000 L10" in proc.commands
     assert not any(c.startswith(".cxr") for c in proc.commands)
     assert "NOT unwound" in out["note"] and "stack_words" in out["note"]
+
+
+async def test_kd_state_reports_target_confirmed_and_the_kernel_base(
+    service: NtDriveService, kd_procs: list[FakeKdProcess], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `attached` only means kd.exe is alive. Over a serial pipe kd reports running before it has
+    # heard anything, so a session looked healthy and then failed at the first command with
+    # [no_debuggee]. target_confirmed says whether the TARGET actually answered.
+    service.config.vms["win11-dev"].kd_transport = "serial"
+    service.kd_sessions.clear()
+    # Over a serial pipe kd prints no connect banner until it syncs, so nothing has been heard
+    # from the target when attach returns.
+    monkeypatch.setattr(FakeKdProcess, "announce_default", False)
+    attached = await service.call("kd_attach", {"vm": "win11-dev", "timeout": 5})
+    assert attached["attached"] is True and attached["state"] == "running"
+    assert attached["target_confirmed"] is False  # nothing has come back from the guest yet
+    assert "no_debuggee" in attached["note"] and "wait_for_target=false" in attached["note"]
+
+    # The connect banner is the target speaking, and kd prints the kernel base with it. ASLR moves
+    # that base every cold boot, so carrying it here saves a break spent on vertarget.
+    kd_procs[-1].inject(
+        b"Connected to Windows 11 26100 x64 target at (Mon Oct 13 2026), ptr64 TRUE\r\n"
+        b"Kernel base = 0xfffff802`aa600000 PsLoadedModuleList = 0xfffff802`ab2a2b0\r\n"
+    )
+    await settle()
+    live = await service.call("kd_state", {"vm": "win11-dev"})
+    assert live["target_confirmed"] is True and "note" not in live
+    assert live["kernel_base"] == "0xfffff802aa600000"
+
+    # Once kd.exe is gone the base belongs to the previous session: ASLR means it is not this
+    # guest's base any more, so it must not read as current.
+    kd_procs[-1].stop(0)
+    await settle()
+    dead = await service.call("kd_state", {"vm": "win11-dev"})
+    assert dead["kernel_base"] == "" and dead["target_confirmed"] is False
+    assert dead["previous_session"]["kernel_base"] == "0xfffff802aa600000"
+
+
+def test_kernel_base_regex_reads_both_forms() -> None:
+    from ntdrive.kd.session import KERNEL_BASE_RE
+
+    # kd splits a 64-bit value with a backtick, and prints it with or without 0x.
+    assert KERNEL_BASE_RE.search(b"Kernel base = 0xfffff802`aa600000 Ps...")
+    assert KERNEL_BASE_RE.search(b"Kernel base = fffff80678200000 Ps...")
+    assert KERNEL_BASE_RE.search(b"Connected to Windows") is None

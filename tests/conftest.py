@@ -387,9 +387,13 @@ class FakeKdProcess:
     """Behaves like kd.exe: connects, answers sentinel-framed commands, breaks on request."""
 
     # Applied to every process created from here on, because a revert or reboot spawns a fresh
-    # kd.exe the test cannot reach before the flow runs. This many seconds after connecting the
-    # target breaks in by itself: the KDNET behaviour that left a reverted guest frozen.
-    spontaneous_break_default: float | None = None
+    # kd.exe the test cannot reach before the flow runs. The target breaks in by itself as soon
+    # as it comes up: the KDNET behaviour that left a reverted guest frozen. Injected at once
+    # rather than on a timer, so the test does not race the flow it is checking.
+    break_on_connect_default = False
+    # Over a serial pipe kd does NOT print the connect banner until it syncs, which is usually
+    # the first break. A test that needs that reality turns the banner off.
+    announce_default = True
 
     def __init__(self, argv: list[str]) -> None:
         self.argv = argv
@@ -408,13 +412,16 @@ class FakeKdProcess:
         self.eval_value = 1  # what `? <expr>` evaluates to, for condition tests
         self.bps: list[str] = []
         self._next_bp = 0
-        threading.Timer(
-            0.05,
-            self.inject,
-            args=(b"Connected to Windows 11 26100 x64 target at (Wed Sep 10 2026), ptr64 TRUE\n",),
-        ).start()
-        if FakeKdProcess.spontaneous_break_default is not None:
-            threading.Timer(FakeKdProcess.spontaneous_break_default, self.break_in).start()
+        if FakeKdProcess.announce_default:
+            threading.Timer(
+                0.05,
+                self.inject,
+                args=(
+                    b"Connected to Windows 11 26100 x64 target at (Wed Sep 10 2026), ptr64 TRUE\n",
+                ),
+            ).start()
+        if FakeKdProcess.break_on_connect_default:
+            self.break_in()
 
     def inject(self, data: bytes) -> None:
         self.stdout.q.put(data)
