@@ -11,7 +11,6 @@ from pydantic import Field
 
 from ntdrive.config import (
     KdnetConfig,
-    VmConfig,
     add_vm_config,
     next_kdnet_port,
     remove_vm_config,
@@ -20,7 +19,7 @@ from ntdrive.core.orchestrator import reboot_flow
 from ntdrive.core.registry import tool
 from ntdrive.core.state import PowerState
 from ntdrive.core.tools.common import ConfirmMixin, NoParams, VmParams
-from ntdrive.errors import INVALID_ARGS, SNAPSHOT_NOT_FOUND, VM_NOT_RUNNING, NtDriveError
+from ntdrive.errors import INVALID_ARGS, VM_NOT_RUNNING, NtDriveError
 
 if TYPE_CHECKING:
     from ntdrive.core.service import NtDriveService
@@ -352,143 +351,6 @@ async def vm_config(service: NtDriveService, p: ConfigParams) -> dict[str, Any]:
     }
 
 
-class CloneParams(VmParams):
-    """vm_clone."""
-
-    name: str = Field(description="Name for the new clone (its config key and vmx folder)")
-    snapshot: str | None = Field(
-        default=None, description="Source snapshot to clone from; the current one when omitted"
-    )
-    linked: bool = Field(
-        default=True,
-        description=(
-            "Linked clone (shares the base disk, only its own changes take space) or a full copy. "
-            "A running clone still uses its own RAM, so run only as many as the host has memory for"
-        ),
-    )
-
-
-def _register_clone(
-    service: NtDriveService, src: VmConfig, name: str, dst_vmx: str, keep_encryption: bool
-) -> VmConfig:
-    """Add a vms.yaml entry for a clone: the source's config, a new vmx, a fresh KDNET port."""
-    clone = src.model_copy(deep=True)
-    clone.name = name
-    clone.vmx = dst_vmx
-    clone.serial_pipe = ""  # re-derives from the new name
-    if not keep_encryption:
-        clone.encryption_password = ""
-        clone.encryption_password_env = ""
-    if clone.kd_transport == "net":
-        clone.kdnet = KdnetConfig(port=next_kdnet_port(service.config), key=clone.kdnet.key)
-    add_vm_config(service.config, clone)
-    return clone
-
-
-async def _clone_encrypted(
-    service: NtDriveService, src: VmConfig, adapter: Any, p: CloneParams
-) -> dict[str, Any]:
-    """Clone an encrypted VM by copying its files. vmrun cannot clone an encrypted VM.
-
-    Powered off, the whole current disk state is copied. Running, only the frozen snapshot chain is
-    copied (skipping the live delta), so the clone is the most recent snapshot state and the running
-    VM, which another agent may be using, is never touched or interrupted.
-    """
-    dst_vmx = str(Path(src.vmx).parent.parent / "ntdrive-clones" / p.name / f"{p.name}.vmx")
-    if await service.refresh_power(src) == PowerState.RUNNING:
-        copied = await adapter.clone_encrypted_online(src, dst_vmx, p.name)
-        state_note = (
-            "cloned live from the source's most recent snapshot (the frozen disk chain), so the "
-            "running VM was not touched. The clone is that snapshot state, not the source's "
-            "in-progress writes"
-        )
-    else:
-        copied = await adapter.clone_encrypted_offline(src, dst_vmx, p.name)
-        state_note = "cloned the powered-off source's full current disk state"
-    # The copy keeps the same encryption, so the clone reuses the source's encryption_password_env.
-    clone = _register_clone(service, src, p.name, dst_vmx, keep_encryption=True)
-    service.state.record_event(p.name, "vm_clone", source=p.vm, via=copied["via"])
-    return {
-        "vm": p.name,
-        "source": p.vm,
-        "vmx": dst_vmx,
-        "via": copied["via"],
-        "encrypted": True,
-        "linked": False,
-        "files_copied": copied["files_copied"],
-        "kd_transport": clone.kd_transport,
-        "kdnet_port": clone.kdnet.port if clone.kd_transport == "net" else None,
-        "note": (
-            "a file copy of the encrypted VM, keeping its disks, vTPM and password with a new "
-            f"identity (UUID and MAC): {state_note}. Run kd_setup_guest then vm_reboot mode=soft "
-            "before kd_attach, since it has its own KDNET port. If the guest had BitLocker bound "
-            "to the TPM the new UUID may prompt for the recovery key."
-        ),
-    }
-
-
-@tool(
-    "vm_clone",
-    "Clone a VM into a new registered VM, for giving each agent its own guest. An unencrypted VM "
-    "is cloned from a snapshot with vmrun (linked shares the base disk, full copies it). An "
-    "ENCRYPTED VM is cloned by copying its files instead, which vmrun cannot do, keeping the "
-    "encryption and vTPM and reusing the same password: powered off it copies the whole current "
-    "state, running it copies the frozen snapshot chain (needs a snapshot) without touching the "
-    "live VM. The clone gets its own KDNET port, so run kd_setup_guest and reboot it before "
-    "kd_attach.",
-    CloneParams,
-    positional=("vm", "name"),
-    effect="additive",
-)
-async def vm_clone(service: NtDriveService, p: CloneParams) -> dict[str, Any]:
-    """Create a clone from a snapshot and register it as a new VM in vms.yaml."""
-    src = service.vm_cfg(p.vm)
-    if not _CLONE_NAME.match(p.name):
-        raise NtDriveError(
-            INVALID_ARGS, "clone name may use letters, digits, dot, dash and underscore only"
-        )
-    if p.name in service.config.vms:
-        raise NtDriveError(INVALID_ARGS, f"a VM named {p.name} is already registered")
-    adapter = service.adapter_for(src)
-    if src.resolve_encryption_password():
-        # vmrun cannot clone an encrypted VM, so ntdrive copies the files itself. This is a full
-        # copy of a powered-off source, keeping the encryption intact, so it needs no GUI and no
-        # reinstall. See _clone_encrypted below.
-        return await _clone_encrypted(service, src, adapter, p)
-    tree = await adapter.snapshot_list(src)
-    snapshot = p.snapshot or tree.current
-    if not snapshot:
-        raise NtDriveError(
-            INVALID_ARGS,
-            f"{p.vm} has no snapshot to clone from",
-            "snap_take a snapshot first, or pass snapshot=",
-        )
-    if snapshot not in tree.names():
-        raise NtDriveError(
-            SNAPSHOT_NOT_FOUND,
-            f"{p.vm} has no snapshot named {snapshot}",
-            f"known snapshots: {', '.join(tree.names()) or '(none)'}",
-        )
-    dst_vmx = str(Path(src.vmx).parent / "ntdrive-clones" / p.name / f"{p.name}.vmx")
-    await adapter.clone(src, dst_vmx, p.name, snapshot, p.linked)
-    clone = _register_clone(service, src, p.name, dst_vmx, keep_encryption=True)
-    service.state.record_event(p.name, "vm_clone", source=p.vm, linked=p.linked)
-    return {
-        "vm": p.name,
-        "source": p.vm,
-        "vmx": dst_vmx,
-        "linked": p.linked,
-        "snapshot": snapshot,
-        "kd_transport": clone.kd_transport,
-        "kdnet_port": clone.kdnet.port if clone.kd_transport == "net" else None,
-        "note": (
-            "the clone shares the base guest, so its accounts and disk match. It has its own KDNET "
-            "port (net) or pipe (serial), but the guest still points at the base's, so run "
-            "kd_setup_guest on the clone then vm_reboot mode=soft before kd_attach"
-        ),
-    }
-
-
 class CreateParams(VmParams):
     """vm_create. `vm` is the template to inherit guest and debugger config from."""
 
@@ -507,9 +369,9 @@ class CreateParams(VmParams):
 @tool(
     "vm_create",
     "Create a new, unencrypted VM (empty 64 GB disk, UEFI, e1000e NIC for KDNET) and register it, "
-    "optionally booting an installer ISO. This is how to get a guest that vmrun CAN clone: no "
-    "encryption and no vTPM, unlike an encrypted base. Install the OS into it once, then vm_clone "
-    "it freely.",
+    "optionally booting an installer ISO. It has no encryption and no vTPM, unlike an encrypted "
+    "base, so it can be copied by hand in the VMware GUI without re-encryption and the copy "
+    "added with vm_register. Install the OS into it once.",
     CreateParams,
     positional=("vm", "name"),
     effect="additive",
@@ -562,7 +424,7 @@ async def vm_create(service: NtDriveService, p: CreateParams) -> dict[str, Any]:
             "vm_start gui=true and install the OS from the ISO (Windows 11 setup refuses without a "
             "TPM, so use the setup LabConfig BypassTPMCheck/BypassSecureBootCheck registry keys), "
             "then run scripts/setup-guest.cmd in the guest for SSH and KDNET. After that this VM "
-            "is unencrypted, so vm_clone works on it."
+            "is unencrypted, so a GUI copy of it needs no re-encryption."
         ),
     }
 

@@ -89,12 +89,6 @@ class HypervisorAdapter(ABC):
         """Suspend to disk."""
 
     @abstractmethod
-    async def clone(
-        self, source: VmConfig, dst_vmx: str, name: str, snapshot: str, linked: bool
-    ) -> None:
-        """Create a clone at dst_vmx from the source's snapshot (linked shares the base disk)."""
-
-    @abstractmethod
     async def create_vm(
         self,
         dst_vmx: str,
@@ -112,18 +106,6 @@ class HypervisorAdapter(ABC):
         Default None so a backend without process visibility simply omits the signal.
         """
         return None
-
-    @abstractmethod
-    async def clone_encrypted_offline(
-        self, source: VmConfig, dst_vmx: str, name: str
-    ) -> dict[str, Any]:
-        """Clone an encrypted VM by copying its files (the source must be powered off)."""
-
-    @abstractmethod
-    async def clone_encrypted_online(
-        self, source: VmConfig, dst_vmx: str, name: str
-    ) -> dict[str, Any]:
-        """Clone a running encrypted VM from its frozen snapshot state (it needs a snapshot)."""
 
     @abstractmethod
     async def delete_vm(self, vm: VmConfig) -> None:

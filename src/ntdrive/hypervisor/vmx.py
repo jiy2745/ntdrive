@@ -69,22 +69,6 @@ _DISK_VMDK = re.compile(
 )
 
 
-def parent_hint(descriptor_text: str) -> str | None:
-    """The parent disk a delta descriptor points at, or None for a base disk."""
-    m = _PARENT_HINT.search(descriptor_text)
-    return m.group(1) if m else None
-
-
-def extent_files(descriptor_text: str) -> list[str]:
-    """The extent (-sNNN) filenames a .vmdk descriptor lists."""
-    return _EXTENT.findall(descriptor_text)
-
-
-def disk_vmdks(vmx_text: str) -> list[tuple[str, str]]:
-    """(key, filename) for each virtual disk in a vmx: the .vmdk disks, not a CD-ROM ISO."""
-    return _DISK_VMDK.findall(vmx_text)
-
-
 def _new_bios_uuid() -> str:
     """A fresh SMBIOS UUID in the byte-pair form VMware writes: 8 pairs, a dash, 8 pairs."""
     pairs = [f"{b:02x}" for b in secrets.token_bytes(16)]
@@ -96,35 +80,6 @@ def _new_generated_mac() -> str:
     return "00:0c:29:" + ":".join(f"{secrets.randbelow(256):02x}" for _ in range(3))
 
 
-def clone_identity(text: str, display_name: str) -> str:
-    """Rewrite a byte-for-byte copy of a vmx so it is a distinct VM from its source.
-
-    A file-copy clone starts as an exact duplicate, which would collide with the source on the
-    SMBIOS UUID and the MAC and would make VMware prompt "did you move or copy this?" on first
-    power-on. This gives it a new uuid.bios, uuid.location and generated MAC, sets uuid.action=keep
-    so the prompt is suppressed for a headless start, drops any saved-state pointer, and names it.
-    Encryption
-    (encryption.keySafe/data) and any vTPM are left untouched, so the copy still opens with the same
-    password: this changes identity, not encryption.
-    """
-    text, _ = drop_saved_state(text)
-    text, _ = upsert_settings(
-        text,
-        {
-            "displayName": display_name,
-            "uuid.bios": _new_bios_uuid(),
-            "uuid.location": _new_bios_uuid(),
-            "uuid.action": "keep",
-            "ethernet0.addressType": "generated",
-            "ethernet0.generatedAddress": _new_generated_mac(),
-        },
-    )
-    return text
-
-
-# Hardware exposed by vm_config and the vmx keys behind it. cpus writes both numvcpus and
-# cpuid.coresPerSocket, so the guest sees one socket with that many cores: Windows client
-# editions accept at most one or two sockets and would ignore the rest.
 def hardware_from_settings(settings: dict[str, str]) -> dict[str, Any]:
     """cpus, cores_per_socket, memory_mb and nic from lower-cased vmx pairs (None when absent)."""
 

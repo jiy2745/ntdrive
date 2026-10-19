@@ -193,31 +193,11 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   UAC prompt (`ntdrive.kd.firewall`). KDNET is the default. The serial pipe transport avoids
   all of that for hosts where nobody can approve a prompt.
 - Win32-OpenSSH resolves `C:/x` relative to the home directory over SFTP. Paths must be `/C:/x`.
-- **Cloning an encrypted VM: `vm_clone` copies its files, because vmrun cannot.** vmrun refuses an
-  encrypted clone both ways (a linked one outright, a full one deep in reading the encrypted config,
-  behind misleading errors like "A password is required" or "should not be powered on"), vmcli has
-  no clone command, and ovftool cannot export an encrypted VM. So for an encrypted source `vm_clone`
-  takes a file-copy path (`_clone_encrypted`), keeping the disks, the nvram (vTPM state) and the
-  plaintext vmx with a rewritten identity (`clone_identity`: new `uuid.bios`/`uuid.location`, a new
-  generated MAC, `uuid.action=keep` so no moved/copied prompt blocks a headless start). This changes
-  identity, not encryption: the copy opens with the same password, like a GUI clone minus the
-  re-encryption. There are two variants:
-  - **off:** `clone_encrypted_offline` copies every `*.vmdk` and the nvram, so the clone is the
-    source's full current disk state.
-  - **running:** `clone_encrypted_online` copies only the FROZEN disk chain. A running VM writes
-    only to the top delta named in the vmx, and once a snapshot exists every disk below it is
-    read-only, so it walks the plaintext descriptors (`parent_hint`/`extent_files`/`disk_vmdks` in
-    vmx.py) from the parent of the live delta down to the base, copies those plus the nvram, skips
-    the live delta, and repoints the clone's disk at the frozen delta. The clone is the most recent
-    snapshot state, taken with no interruption to the running VM, so a base another agent is using
-    can be cloned without touching it. It needs a snapshot to exist (a frozen delta to clone).
-  Verified live 2026-09-28 on throwaway VMs: the offline copy and the online copy each start under
-  vmrun with no prompt, and for the online one the source and the clone run at the same time. The
-  keySafe-copied-verbatim step opening with the same password is confirmed on the encrypted base
-  once it can be powered off or has a snapshot.
-- `vm_create` is the other route: a fresh UNENCRYPTED VM (`vmcli VM Create`, then `create_vm` wires
-  up the disk, UEFI, an e1000e NIC and the ISO) for when there is no encrypted source to copy, or
-  to avoid a vTPM entirely. `vm_register` adds an existing vmx (for a VM cloned by hand in the GUI).
+- **There is no clone tool, on purpose.** These VMs are encrypted (vTPM), so vmrun cannot
+  clone them and the old `vm_clone` copied the files itself: tens of gigabytes per clone. Agents
+  cloning freely filled the host disk, so the tool was removed (2026-10-20). To give an agent
+  its own guest use `vm_create` (a fresh unencrypted VM from an ISO) or copy a VM in the VMware
+  GUI and add it with `vm_register`. Do not reintroduce a clone tool without a disk guard.
 - **Never wait for the KDNET banner as the way to detect a target.** kd prints "Connected to" only
   on its first sync, so a target that reconnected after a reboot or a revert is there and silent.
   Waiting for the banner cost the full timeout (240 s measured live) while a `kd_break` answered

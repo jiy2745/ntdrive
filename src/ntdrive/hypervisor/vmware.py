@@ -42,12 +42,8 @@ from ntdrive.hostproc import run_hidden
 from ntdrive.hypervisor.base import HypervisorAdapter, SnapshotNode, SnapshotTree
 from ntdrive.hypervisor.vmx import (
     apply_hardware,
-    clone_identity,
-    disk_vmdks,
     drop_saved_state,
-    extent_files,
     hardware_from_settings,
-    parent_hint,
     saved_state,
     saved_state_is_stale,
     upsert_settings,
@@ -430,114 +426,6 @@ class VmwareAdapter(HypervisorAdapter):
     async def suspend(self, vm: VmConfig) -> None:
         """Suspend to disk."""
         await self._exec("suspend", vm, "hard", timeout=180)
-
-    async def clone(
-        self, source: VmConfig, dst_vmx: str, name: str, snapshot: str, linked: bool
-    ) -> None:
-        """`vmrun clone`: a linked clone shares the source disk, a full clone copies it whole."""
-        mode = "linked" if linked else "full"
-        await self._exec(
-            "clone",
-            source,
-            dst_vmx,
-            mode,
-            f"-snapshot={snapshot}",
-            f"-cloneName={name}",
-            timeout=600,
-        )
-
-    # File suffixes that carry the disk chain, the vTPM and firmware state a bootable copy needs.
-    _CLONE_COPY_SUFFIXES = frozenset({".vmdk", ".nvram"})
-
-    async def clone_encrypted_offline(
-        self, source: VmConfig, dst_vmx: str, name: str
-    ) -> dict[str, Any]:
-        """Clone an encrypted VM by copying its files, which vmrun cannot do.
-
-        The source must be powered off, so the copy is consistent. The disks and the nvram (which
-        holds the vTPM state) are copied byte for byte, so the encryption stays intact and the copy
-        opens with the same password, exactly as a VMware GUI clone does minus the re-encryption
-        step. The vmx is plaintext, so it is copied with a rewritten identity (new UUID and MAC,
-        uuid.action=keep) to make it a distinct VM. This is a full copy: `linked` does not apply.
-        """
-        src_vmx = Path(source.vmx)
-        src_dir = src_vmx.parent
-        dst = Path(dst_vmx)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-
-        def copy_payload() -> int:
-            count = 0
-            for entry in src_dir.iterdir():
-                if entry.is_file() and entry.suffix.lower() in self._CLONE_COPY_SUFFIXES:
-                    shutil.copy2(entry, dst.parent / entry.name)
-                    count += 1
-            return count
-
-        copied = await asyncio.to_thread(copy_payload)
-        if copied == 0:
-            raise NtDriveError(
-                BACKEND_ERROR,
-                f"no disk files found next to {src_vmx}",
-                "check the source vmx path",
-            )
-        rewritten = clone_identity(src_vmx.read_text(encoding="latin-1"), name)
-        dst.write_text(rewritten, encoding="latin-1")
-        log.info("offline-cloned encrypted VM %s to %s (%s disk files)", source.name, dst, copied)
-        return {"vmx": str(dst), "files_copied": copied, "via": "offline-copy"}
-
-    async def clone_encrypted_online(
-        self, source: VmConfig, dst_vmx: str, name: str
-    ) -> dict[str, Any]:
-        """Clone an encrypted VM WITHOUT powering it off, from its current snapshot state.
-
-        A running VM writes only to the top delta named in the vmx. Once a snapshot exists, every
-        disk below that live delta is frozen and read-only, so this copies that frozen chain (the
-        parent of the live delta down to the base) plus the nvram, skipping the live delta. The copy
-        is a consistent point-in-time, the most recent snapshot, taken with no interruption to the
-        running VM. The clone's disk is repointed to the frozen delta, which becomes its writable
-        top. It needs the VM to have a snapshot, so there is a frozen delta to clone.
-        """
-        src_vmx = Path(source.vmx)
-        src_dir = src_vmx.parent
-        dst = Path(dst_vmx)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        vmx_text = src_vmx.read_text(encoding="latin-1")
-        disks = disk_vmdks(vmx_text)
-        if not disks:
-            raise NtDriveError(BACKEND_ERROR, f"no virtual disk in {src_vmx}", "check the vmx")
-        to_copy: set[str] = set()
-        repoint: dict[str, str] = {}
-        for key, live in disks:
-            parent = parent_hint((src_dir / live).read_text(encoding="latin-1"))
-            if parent is None:
-                raise NtDriveError(
-                    INVALID_ARGS,
-                    f"{source.name} has no snapshot, so its live disk {live} is being written and "
-                    "cannot be copied while it runs",
-                    "snap_take a snapshot first, or vm_stop it and clone the powered-off state",
-                )
-            repoint[key] = parent
-            node: str | None = parent
-            while node:  # walk the frozen chain from the snapshot delta down to the base
-                desc = (src_dir / node).read_text(encoding="latin-1")
-                to_copy.add(node)
-                to_copy.update(extent_files(desc))
-                node = parent_hint(desc)
-
-        def copy_frozen() -> int:
-            for filename in to_copy:
-                shutil.copy2(src_dir / filename, dst.parent / filename)
-            for nvram in src_dir.glob("*.nvram"):
-                shutil.copy2(nvram, dst.parent / nvram.name)
-            return len(to_copy)
-
-        copied = await asyncio.to_thread(copy_frozen)
-        # Repoint each disk at the frozen snapshot delta (now the clone's writable top), then
-        # rewrite identity. The live delta and the snapshot database are deliberately not copied.
-        text, _ = upsert_settings(clone_identity(vmx_text, name), repoint)
-        dst.write_text(text, encoding="latin-1")
-        log.info("online-cloned encrypted VM %s to %s (%s frozen files)", source.name, dst, copied)
-        return {"vmx": str(dst), "files_copied": copied, "via": "online-copy"}
 
     async def delete_vm(self, vm: VmConfig) -> None:
         """`vmrun deleteVM`: unregister and delete the VM's files. The VM must be powered off."""
