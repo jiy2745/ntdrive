@@ -81,6 +81,7 @@ param(
   [int]$Port = 50000,
   [string]$Key,
   [string]$OpenSshZip = "https://github.com/PowerShell/Win32-OpenSSH/releases/latest/download/OpenSSH-Win64.zip",
+  [int]$CapabilityTimeoutSec = 180,
   [switch]$Elevated
 )
 
@@ -194,8 +195,21 @@ function Install-OpenSshCapability {
     return $true
   }
   try {
-    Running "capability" "Add-WindowsCapability $($cap.Name), this asks Windows Update"
-    Add-WindowsCapability -Online -Name $cap.Name | Out-Null
+    Running "capability" "Add-WindowsCapability $($cap.Name) (up to $CapabilityTimeoutSec s, asks Windows Update)"
+    # In a job with a deadline. A guest that cannot reach Windows Update does not get an error
+    # from this call, it gets silence: the catch below never fired, so the zip fallback was
+    # unreachable and setup sat here forever. A timeout turns that silence into a failure.
+    # Captured into a plain variable first: $using: does not reliably carry member access.
+    $capName = $cap.Name
+    $job = Start-Job -ScriptBlock { Add-WindowsCapability -Online -Name $using:capName }
+    if (-not (Wait-Job $job -Timeout $CapabilityTimeoutSec)) {
+      Stop-Job $job -ErrorAction SilentlyContinue
+      Remove-Job $job -Force -ErrorAction SilentlyContinue
+      Warn "capability" "no answer from Windows Update in $CapabilityTimeoutSec s, using the zip instead"
+      return $false
+    }
+    Receive-Job $job -ErrorAction Stop | Out-Null
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
   } catch {
     # Common on Insider builds and machines pointed at WSUS: Windows Update has no package for
     # this capability (0x800f0954 and friends). Fall back to the zip.
