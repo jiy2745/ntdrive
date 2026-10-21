@@ -193,11 +193,13 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   UAC prompt (`ntdrive.kd.firewall`). KDNET is the default. The serial pipe transport avoids
   all of that for hosts where nobody can approve a prompt.
 - Win32-OpenSSH resolves `C:/x` relative to the home directory over SFTP. Paths must be `/C:/x`.
-- **There is no clone tool, on purpose.** These VMs are encrypted (vTPM), so vmrun cannot
-  clone them and the old `vm_clone` copied the files itself: tens of gigabytes per clone. Agents
-  cloning freely filled the host disk, so the tool was removed (2026-10-20). To give an agent
-  its own guest use `vm_create` (a fresh unencrypted VM from an ISO) or copy a VM in the VMware
-  GUI and add it with `vm_register`. Do not reintroduce a clone tool without a disk guard.
+- **ntdrive cannot create, clone, register or delete a VM, on purpose.** Those tools existed
+  and were all removed (2026-10-20 and 2026-10-21). These VMs are encrypted (vTPM), so vmrun
+  cannot clone them and the clone tool copied the files itself: tens of gigabytes per call.
+  Agents reached for it freely and filled the host disk. The agent surface now stops at
+  snapshot management: drive the VMs already in `vms.yaml`, and take, list, revert and delete
+  their snapshots. Adding or removing a VM is the operator's job, in the VMware GUI and with
+  `ntdrive setup` on the host. Do not reintroduce any of it.
 - **Never wait for the KDNET banner as the way to detect a target.** kd prints "Connected to" only
   on its first sync, so a target that reconnected after a reboot or a revert is there and silent.
   Waiting for the banner cost the full timeout (240 s measured live) while a `kd_break` answered

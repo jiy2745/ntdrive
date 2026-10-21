@@ -88,16 +88,6 @@ class HypervisorAdapter(ABC):
     async def suspend(self, vm: VmConfig) -> None:
         """Suspend to disk."""
 
-    @abstractmethod
-    async def create_vm(
-        self,
-        dst_vmx: str,
-        guest_os: str = "windows11-64",
-        iso: str | None = None,
-        nic: str = "e1000e",
-    ) -> dict[str, Any]:
-        """Create a new, unencrypted VM with an empty disk, optionally booting an installer ISO."""
-
     async def host_cpu_percent(self, vm: VmConfig, interval: float = 0.5) -> float | None:
         """Host CPU of the VM's hypervisor process, or None when it cannot be read.
 
@@ -106,10 +96,6 @@ class HypervisorAdapter(ABC):
         Default None so a backend without process visibility simply omits the signal.
         """
         return None
-
-    @abstractmethod
-    async def delete_vm(self, vm: VmConfig) -> None:
-        """Unregister the VM and delete its files (the VM must be powered off)."""
 
     @abstractmethod
     async def snapshot_take(self, vm: VmConfig, name: str) -> None:

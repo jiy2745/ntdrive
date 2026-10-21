@@ -4,17 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import re
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 
-from ntdrive.config import (
-    KdnetConfig,
-    add_vm_config,
-    next_kdnet_port,
-    remove_vm_config,
-)
 from ntdrive.core.orchestrator import reboot_flow
 from ntdrive.core.registry import tool
 from ntdrive.core.state import PowerState
@@ -26,10 +19,6 @@ if TYPE_CHECKING:
 
 # A clone name is a config key and a folder name, so keep it to safe characters.
 _CLONE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
-
-
-class DeleteParams(VmParams, ConfirmMixin):
-    """vm_delete."""
 
 
 class StartParams(VmParams):
@@ -348,171 +337,4 @@ async def vm_config(service: NtDriveService, p: ConfigParams) -> dict[str, Any]:
         "hardware": result["hardware"],
         "before": before,
         "changed": result["changed"],
-    }
-
-
-class CreateParams(VmParams):
-    """vm_create. `vm` is the template to inherit guest and debugger config from."""
-
-    name: str = Field(description="Name for the new VM (its config key and folder)")
-    iso: str | None = Field(
-        default=None,
-        description="Absolute host path to an installer ISO to boot from, attached as a CD-ROM",
-    )
-    cpus: int | None = Field(default=None, ge=1, le=64, description="Virtual CPUs, default 2")
-    memory_mb: int | None = Field(
-        default=None, ge=512, le=1048576, multiple_of=4, description="Guest RAM in MB, default 4096"
-    )
-    guest_os: str = Field(default="windows11-64", description="VMware guest OS type")
-
-
-@tool(
-    "vm_create",
-    "Create a new, unencrypted VM (empty 64 GB disk, UEFI, e1000e NIC for KDNET) and register it, "
-    "optionally booting an installer ISO. It has no encryption and no vTPM, unlike an encrypted "
-    "base, so it can be copied by hand in the VMware GUI without re-encryption and the copy "
-    "added with vm_register. Install the OS into it once.",
-    CreateParams,
-    positional=("vm", "name"),
-    effect="additive",
-)
-async def vm_create(service: NtDriveService, p: CreateParams) -> dict[str, Any]:
-    """Create the VM files with vmcli, wire up the vmx, and add a vms.yaml entry."""
-    template = service.vm_cfg(p.vm)
-    if not _CLONE_NAME.match(p.name):
-        raise NtDriveError(
-            INVALID_ARGS, "name may use letters, digits, dot, dash and underscore only"
-        )
-    if p.name in service.config.vms:
-        raise NtDriveError(INVALID_ARGS, f"a VM named {p.name} is already registered")
-    if p.iso is not None and not Path(p.iso).is_file():
-        raise NtDriveError(
-            INVALID_ARGS, f"no ISO at {p.iso}", "pass an absolute host path to the installer ISO"
-        )
-    adapter = service.adapter_for(template)
-    # Sibling of the template's own folder, so VMs stay together.
-    dst_vmx = str(Path(template.vmx).parent.parent / p.name / f"{p.name}.vmx")
-    created = await adapter.create_vm(dst_vmx, guest_os=p.guest_os, iso=p.iso)
-    entry = template.model_copy(deep=True)
-    entry.name = p.name
-    entry.vmx = created["vmx"]
-    entry.serial_pipe = ""  # re-derives from the new name
-    # The whole point: this VM is NOT encrypted, so vmrun can clone it. Never inherit the
-    # template's encryption settings, or every vmrun call would pass a password it does not need.
-    entry.encryption_password = ""
-    entry.encryption_password_env = ""
-    if entry.kd_transport == "net":
-        entry.kdnet = KdnetConfig(port=next_kdnet_port(service.config), key=entry.kdnet.key)
-    add_vm_config(service.config, entry)
-    changes = {k: v for k, v in (("cpus", p.cpus), ("memory_mb", p.memory_mb)) if v is not None}
-    hardware = None
-    if changes:
-        hardware = (await adapter.set_hardware(entry, changes))["hardware"]
-    service.state.record_event(p.name, "vm_create", template=p.vm, iso=bool(p.iso))
-    return {
-        "vm": p.name,
-        "template": p.vm,
-        "vmx": created["vmx"],
-        "disk": created["disk"],
-        "guest_os": created["guest_os"],
-        "encrypted": False,
-        "iso": p.iso,
-        "hardware": hardware,
-        "kd_transport": entry.kd_transport,
-        "kdnet_port": entry.kdnet.port if entry.kd_transport == "net" else None,
-        "next": (
-            "vm_start gui=true and install the OS from the ISO (Windows 11 setup refuses without a "
-            "TPM, so use the setup LabConfig BypassTPMCheck/BypassSecureBootCheck registry keys), "
-            "then run scripts/setup-guest.cmd in the guest for SSH and KDNET. After that this VM "
-            "is unencrypted, so a GUI copy of it needs no re-encryption."
-        ),
-    }
-
-
-class RegisterParams(VmParams):
-    """vm_register. `vm` is the template to inherit config from."""
-
-    name: str = Field(description="Name for the registered VM (its config key)")
-    vmx: str = Field(description="Absolute host path to the existing VM's .vmx file")
-
-
-@tool(
-    "vm_register",
-    "Register an existing VM (a manual or GUI clone) as a new ntdrive VM, inheriting the template "
-    "VM's guest, debugger and encryption config with its own fresh KDNET port. For encrypted VMs, "
-    "which no CLI can clone: clone once in the VMware GUI, then register the copy here.",
-    RegisterParams,
-    positional=("vm", "name", "vmx"),
-    effect="additive",
-)
-async def vm_register(service: NtDriveService, p: RegisterParams) -> dict[str, Any]:
-    """Add a vms.yaml entry for an already-existing vmx, copying the template VM's settings."""
-    template = service.vm_cfg(p.vm)
-    if not _CLONE_NAME.match(p.name):
-        raise NtDriveError(
-            INVALID_ARGS, "name may use letters, digits, dot, dash and underscore only"
-        )
-    if p.name in service.config.vms:
-        raise NtDriveError(INVALID_ARGS, f"a VM named {p.name} is already registered")
-    if not Path(p.vmx).is_file():
-        raise NtDriveError(
-            INVALID_ARGS,
-            f"no vmx at {p.vmx}",
-            "pass the absolute host path to the cloned VM's .vmx file",
-        )
-    entry = template.model_copy(deep=True)
-    entry.name = p.name
-    entry.vmx = str(Path(p.vmx))
-    entry.serial_pipe = ""  # re-derives from the new name
-    if entry.kd_transport == "net":
-        entry.kdnet = KdnetConfig(port=next_kdnet_port(service.config), key=entry.kdnet.key)
-    add_vm_config(service.config, entry)
-    service.state.record_event(p.name, "vm_register", template=p.vm)
-    return {
-        "vm": p.name,
-        "template": p.vm,
-        "vmx": entry.vmx,
-        "kd_transport": entry.kd_transport,
-        "kdnet_port": entry.kdnet.port if entry.kd_transport == "net" else None,
-        "note": (
-            f"registered with {p.vm}'s guest accounts and encryption_password_env. If the GUI "
-            "clone used a different encryption password, set this VM's own env var in vms.yaml. It "
-            "has its own KDNET port, so run kd_setup_guest then vm_reboot mode=soft before "
-            "kd_attach"
-        ),
-    }
-
-
-@tool(
-    "vm_delete",
-    "Delete a VM and its files (a clone, usually), and drop its vms.yaml entry. Powers it off "
-    "first. Needs confirm=true. When the VM's files are already gone (moved or deleted by hand) "
-    "it just removes the stale entry. A base VM with linked clones cannot be deleted until the "
-    "clones are gone.",
-    DeleteParams,
-    destructive=True,
-    effect="destructive",
-)
-async def vm_delete(service: NtDriveService, p: DeleteParams) -> dict[str, Any]:
-    """Detach the debugger, drop terminals, power off, delete the VM, drop its config entry.
-
-    A stale entry whose vmx is already gone is just deregistered: vmrun cannot act on files that
-    do not exist, so the config entry would otherwise be stuck (seen live after a VM was deleted
-    in VMware but left in vms.yaml).
-    """
-    cfg = service.vm_cfg(p.vm)
-    adapter = service.adapter_for(cfg)
-    released = await service.release_guest(p.vm)
-    files_present = bool(cfg.vmx) and Path(cfg.vmx).is_file()
-    if files_present:
-        if await service.refresh_power(cfg) != PowerState.OFF:
-            await adapter.stop(cfg, hard=True)
-        await adapter.delete_vm(cfg)
-    remove_vm_config(service.config, p.vm)
-    service.state.record_event(p.vm, "vm_delete", files_removed=files_present)
-    return {
-        "vm": p.vm,
-        "deleted": True,
-        "files_removed": files_present,
-        "terms_dropped": released["terms_dropped"],
     }
