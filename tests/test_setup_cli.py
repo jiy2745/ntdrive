@@ -248,3 +248,25 @@ def test_setup_stores_an_optional_standard_account(env: dict[str, Any]) -> None:
     vm = load_config(env["config"]).vms["dev"]
     assert vm.guest.standard_user == "" and vm.guest.standard_password_env == ""
     assert "run setup-guest.cmd -NoStandard (OpenSSH and KDNET" in dropped.output
+
+
+def test_env_var_guard_only_fires_on_a_real_name_clash() -> None:
+    """Two names that reduce to one variable clash. Pointing at another VM's variable does not.
+
+    An encrypted copy keeps its source's encryption password on purpose, so its config references
+    the source's variable. Reading that as a clash refused to set up the VM the variable is named
+    after: windows-11-x64 was blocked because its copy windows-11-serial referenced
+    NTDRIVE_WINDOWS_11_X64_PW.
+    """
+    shared = setup_mod.env_name("windows-11-x64", "VMPW")
+    vms = {
+        # The copy shares the base's encryption password, which is the intended case.
+        "windows-11-serial": {"encryption_password_env": shared},
+        "win-11": {},
+    }
+    assert setup_mod._other_vm_claiming(vms, "windows-11-x64", "VMPW") is None
+    assert setup_mod._other_vm_claiming(vms, "windows-11-x64", "PW") is None
+    # A genuine clash: both names reduce to the same variable, so one would overwrite the other.
+    assert setup_mod._other_vm_claiming(vms, "win.11", "PW") == "win-11"
+    # A VM never clashes with itself.
+    assert setup_mod._other_vm_claiming(vms, "win-11", "PW") is None

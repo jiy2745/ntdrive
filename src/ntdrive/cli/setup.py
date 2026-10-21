@@ -134,18 +134,21 @@ def _name_for_vmx(vms: dict[str, Any], vmx: str) -> str | None:
     return None
 
 
-def _other_vm_using(vms: dict[str, Any], var: str, name: str) -> str | None:
-    """Name of another VM whose passwords already live in environment variable `var`."""
+def _other_vm_claiming(vms: dict[str, Any], name: str, suffix: str) -> str | None:
+    """Another VM whose OWN name derives the same variable, so the two would fight over it.
+
+    Only a name clash counts, which is what this guard is for: `win-11` and `win.11` both reduce
+    to NTDRIVE_WIN_11_PW and would overwrite each other's password. A VM that merely POINTS at
+    another's variable is sharing a secret on purpose, which an encrypted copy does because it
+    keeps its source's encryption password. Treating that as a clash blocked the VM the variable
+    is named after from using its own name (seen live: setting up windows-11-x64 was refused
+    because its copy windows-11-serial referenced NTDRIVE_WINDOWS_11_X64_PW).
+    """
+    var = env_name(name, suffix)
     for other, body in vms.items():
         if other == name or not isinstance(body, dict):
             continue
-        guest = body.get("guest") or {}
-        used = (
-            guest.get("password_env"),
-            guest.get("standard_password_env"),
-            body.get("encryption_password_env"),
-        )
-        if var in used:
+        if env_name(other, suffix) == var:
             return other
     return None
 
@@ -331,12 +334,12 @@ def run_setup(
         raise NtDriveError(INVALID_ARGS, "the name may use letters, digits, dash and underscore")
     if not inline_secrets:
         for suffix in ("PW", "STDPW", "VMPW"):
-            var = env_name(name, suffix)
-            other = _other_vm_using(vms, var, name)
+            other = _other_vm_claiming(vms, name, suffix)
             if other:
                 raise NtDriveError(
                     INVALID_ARGS,
-                    f"{name} would keep its password in {var}, which VM {other} already uses",
+                    f"{name} and the configured VM {other} both reduce to "
+                    f"{env_name(name, suffix)}, so one would overwrite the other's password",
                     "pick a name that differs in more than punctuation, or use --inline-secrets",
                 )
     entry: dict[str, Any] = dict(vms.get(name) or {}) if isinstance(vms.get(name), dict) else {}
