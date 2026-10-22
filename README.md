@@ -1,4 +1,4 @@
-# ntdrive
+<img src="assets/ntdrive-wordmark.png" alt="ntdrive" width="464">
 
 **A VMware Workstation Windows guest, driven by an LLM agent: power, snapshots, kernel
 debugging with kd.exe, and a live SSH terminal, behind one daemon.**
@@ -377,7 +377,8 @@ src/ntdrive/
   mcp/ sdk/       generated front doors
   cli/            generated tool commands plus setup, verify, term attach and the daemon group
 scripts/          host and guest setup with their .cmd launchers, a guest probe, the ASCII hook,
-                  the README table generator
+                  the README table generator, the wordmark generator
+assets/           the README wordmark, drawn by scripts/make_logo.py
 tests/            unit tests with fake vmrun, fake kd.exe and fake terminal channels
 ```
 

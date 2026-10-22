@@ -1,4 +1,4 @@
-# ntdrive
+<img src="assets/ntdrive-wordmark.png" alt="ntdrive" width="464">
 
 **VMware Workstation 위의 Windows 게스트를 LLM 에이전트에서 조종합니다. 전원과 스냅샷, kd.exe 커널 디버깅,
 실시간 SSH 터미널을 하나의 데몬 뒤에.**
@@ -322,7 +322,8 @@ src/ntdrive/
   mcp/ sdk/       generated front doors
   cli/            generated tool commands plus setup, verify, term attach and the daemon group
 scripts/          host and guest setup with their .cmd launchers, a guest probe, the ASCII hook,
-                  the README table generator
+                  the README table generator, the wordmark generator
+assets/           the README wordmark, drawn by scripts/make_logo.py
 tests/            unit tests with fake vmrun, fake kd.exe and fake terminal channels
 ```
 
