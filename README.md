@@ -1,6 +1,15 @@
 # ntdrive
 
+**A VMware Workstation Windows guest, driven by an LLM agent: power, snapshots, kernel
+debugging with kd.exe, and a live SSH terminal, behind one daemon.**
+
 [![CI](https://github.com/jiy2745/ntdrive/actions/workflows/ci.yml/badge.svg)](https://github.com/jiy2745/ntdrive/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
+[![Platform](https://img.shields.io/badge/platform-Windows-blue.svg)](#setup)
+[![Interfaces](https://img.shields.io/badge/interfaces-MCP%20%7C%20CLI%20%7C%20SDK-blue.svg)](#how-it-fits-together)
+
+**English** | [Korean](README.ko.md)
 
 Drive a Windows guest on VMware Workstation from an LLM agent: power and snapshots, kernel
 debugging with kd.exe over KDNET or a serial pipe, and a real-time SSH terminal, behind one local

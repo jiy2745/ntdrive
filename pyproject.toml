@@ -95,6 +95,9 @@ pythonpath = ["src"]
 filterwarnings = ["error"]
 
 [tool.check_ascii]
-# Files that may contain non-ASCII text. Everything in the repo, PRD.md included, is now English
-# and plain ASCII, so nothing is excluded.
-exclude = []
+# Files that may contain non-ASCII text. Everything else in the repo, PRD.md included, is
+# English and plain ASCII. README.ko.md is the Korean translation of README.md, so being
+# non-ASCII is the whole point of it: the rule it would otherwise break is "every document is
+# English", and a translation is the one deliberate exception. README.md stays canonical and
+# ASCII, which is why its language nav says Korean rather than the name in Hangul.
+exclude = ["README.ko.md"]

@@ -25,7 +25,12 @@ Requirements live in `PRD.md`. Setup is in `README.md`.
 
 - English only. Code, comments, docstrings, tool descriptions, error messages, logs, docs and
   commit messages. A pre-commit hook (`scripts/check_ascii.py`) rejects any non-ASCII character
-  anywhere in the repo.
+  anywhere in the repo. The single exception is `README.ko.md`, the Korean translation of
+  `README.md`, which is listed in `[tool.check_ascii] exclude` in `pyproject.toml`. Leave it in
+  Korean: it is a translation, not a file that slipped past the rule. `README.md` is canonical, so
+  a change there belongs in the translation too, and the English file itself stays ASCII (its
+  language nav says Korean rather than the name in Hangul for that reason). Do not add further
+  translations of other documents without being asked.
 - Write plainly. No emoji, no em dashes, no decorative symbols, no box-drawing diagrams, and no
   semicolons as punctuation in prose (end the sentence instead). Semicolons inside code and
   commands are fine. Draw diagrams with `+ - | >` and write arrows as `->`. The hook checks
