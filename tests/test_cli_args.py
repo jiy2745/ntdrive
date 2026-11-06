@@ -10,6 +10,7 @@ from click.testing import CliRunner
 import ntdrive.cli.main as main_mod
 from ntdrive.cli.main import build_cli
 from ntdrive.core.registry import load_builtin_tools
+from ntdrive.errors import VERIFY_FAILED, NtDriveError
 
 
 def test_last_free_text_positional_is_one_argument(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -56,6 +57,35 @@ def test_last_free_text_positional_is_one_argument(monkeypatch: pytest.MonkeyPat
         "file_push",
         {"vm": "win11-dev", "local": "C:\\a.exe", "remote": "C:\\b.exe", "grant_users_rx": True},
     )
+
+
+def test_a_copy_that_does_not_match_exits_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A corrupt push used to print `verified: false` and exit 0. Live feedback 2026-11-06.
+
+    Every automated run drives this from a shell loop, and a loop that tests `$?` saw success.
+    verify_failed gets its own code because "copied but wrong" needs a different reaction from
+    "could not copy" (1) or "bad arguments" (2).
+    """
+
+    class FailingClient:
+        def call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+            raise NtDriveError(
+                VERIFY_FAILED,
+                "the copy on the guest does not match what was sent: C:\\b.exe",
+                "file_delete the path and push again",
+                result={"verified": False},
+            )
+
+    monkeypatch.setattr(main_mod, "client_for", lambda ctx: FailingClient())
+    cli = build_cli(load_builtin_tools())
+    result = CliRunner().invoke(cli, ["file", "push", "win11-dev", "C:\\a.exe", "C:\\b.exe"])
+    assert result.exit_code == 6
+    assert "does not match" in result.output
+    # --json keeps the per-file detail that the human line leaves out.
+    result = CliRunner().invoke(
+        cli, ["--json", "file", "push", "win11-dev", "C:\\a.exe", "C:\\b.exe"]
+    )
+    assert result.exit_code == 6 and '"verified": false' in result.output
 
 
 def test_status_is_an_alias_of_sys_state() -> None:

@@ -394,6 +394,21 @@ one suspend-resume cycle when the suspend flow is needed.
   (`via: guest_tools`). A guest-tools push is hashed too (`Get-FileHash` in the guest through the
   tools), so `verified` is true or false either way. A `null` with a `verify_error` means the hash
   could not be read.
+- **A copy that does not match raises `verify_failed`** rather than returning `verified: false`,
+  so a shell loop that only tests the exit code cannot mistake a corrupt driver for a delivered
+  one. `ntdrive file push` exits 6 and the full result is in the error's `result`. Pass
+  `require_verified=true` when an unproven copy (`verified: null`) must fail too. A short
+  `file_pull` raises the same error from a size check.
+- On a match each `copied[]` entry carries one `sha256`: log it and compare it against the
+  guest's own `Get-FileHash` later, instead of trusting a boolean. On a mismatch `sha256_local`
+  and `sha256_remote` show which side is wrong. `replaced` and `replaced_bytes` say what the push
+  overwrote, so "the file did not change" is visible.
+- **A push to a guest you are about to bugcheck is flushed to its disk** (`flushed: true`).
+  Without that, SFTP leaves the copy in the guest's page cache (it never fsyncs), verification
+  reads it back out of the same cache and matches, and then the bugcheck - a power cut as far as
+  NTFS is concerned, which journals metadata and not file data - puts the *previous* build back on
+  disk while the push reported success. If `flushed` is false or missing, do not trust a pushed
+  binary across a crash: `file_stat` it after the reboot, or push again.
 - `local` must be an absolute host path. The daemon runs in another process and does not share
   your working directory. A trailing separator on `file_pull local` means "put it in this
   directory".

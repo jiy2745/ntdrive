@@ -25,6 +25,9 @@ BACKEND_UNSUPPORTED = "backend_unsupported"
 BACKEND_ERROR = "backend_error"
 SNAPSHOT_NOT_FOUND = "snapshot_not_found"
 INVALID_ARGS = "invalid_args"
+# A copy completed and then did not match: the guest holds something other than what was sent.
+# Separate from BACKEND_ERROR ("could not copy") because the two need different reactions.
+VERIFY_FAILED = "verify_failed"
 TIMEOUT = "timeout"
 DAEMON_UNAVAILABLE = "daemon_unavailable"
 UNAUTHORIZED = "unauthorized"
@@ -62,6 +65,7 @@ HTTP_STATUS: dict[str, int] = {
     BACKEND_ERROR: 502,
     SNAPSHOT_NOT_FOUND: 404,
     INVALID_ARGS: 400,
+    VERIFY_FAILED: 409,
     TIMEOUT: 504,
     UNAUTHORIZED: 401,
     VERSION_MISMATCH: 409,

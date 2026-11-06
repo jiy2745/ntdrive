@@ -9,6 +9,7 @@ from ntdrive.errors import (
     GUEST_FROZEN_BY_DEBUGGER,
     INVALID_ARGS,
     SNAPSHOT_NOT_FOUND,
+    VERIFY_FAILED,
     NtDriveError,
 )
 
@@ -677,6 +678,164 @@ async def test_file_push_reports_verification_failure(
     assert "sftp hash failed" in pushed["copied"][0]["verify_note"]
     assert "guest tools could not hash" in pushed["copied"][0]["verify_error"]
     assert "verification failed" in pushed["note"]
+    # Unproven is not the same as wrong, so it still returns a result. The host digest is reported
+    # anyway, so the caller can check the guest themselves.
+    assert pushed["copied"][0]["sha256_local"]
+
+
+async def test_file_push_fails_when_the_copy_does_not_match(
+    service: NtDriveService, fake_transport: FakeTransport, tmp_path: Path
+) -> None:
+    """A corrupt copy must be an error, not a field in a successful result.
+
+    It used to be `verified: false` with exit code 0, so a shell loop that did not parse the JSON
+    saw a corrupt driver land as a success. Live feedback 2026-11-06.
+    """
+    await service.call("vm_start", {"vm": "win11-dev"})
+    src = tmp_path / "vbtenum.sys"
+    src.write_bytes(b"MZ new build")
+    fake_transport.corrupt_on_put = True
+    with pytest.raises(NtDriveError) as exc:
+        await service.call(
+            "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\vbt\\vbtenum.sys"}
+        )
+    assert exc.value.code == VERIFY_FAILED
+    assert "C:\\vbt\\vbtenum.sys" in exc.value.message
+    # The whole result rides along, so nothing a successful push reported is lost on the failure.
+    result = exc.value.extra["result"]
+    assert result["verified"] is False and result["verified_count"] == 0
+    entry = result["copied"][0]
+    assert entry["sha256_local"] != entry["sha256_remote"]  # which side is wrong is visible
+    assert "sha256" not in entry
+
+
+async def test_file_push_reports_the_digest_and_what_it_replaced(
+    service: NtDriveService, fake_transport: FakeTransport, tmp_path: Path
+) -> None:
+    """A boolean can only be trusted; a digest can be checked against the guest later."""
+    import hashlib
+
+    await service.call("vm_start", {"vm": "win11-dev"})
+    src = tmp_path / "a.sys"
+    src.write_bytes(b"first")
+    first = await service.call(
+        "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\vbt\\a.sys"}
+    )
+    assert first["copied"][0]["replaced"] is False  # nothing was there
+    assert first["copied"][0]["sha256"] == hashlib.sha256(b"first").hexdigest()
+
+    src.write_bytes(b"second build, longer")
+    second = await service.call(
+        "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\vbt\\a.sys"}
+    )
+    # "the file did not change" was invisible before: now the size it overwrote is in the result.
+    assert second["copied"][0]["replaced"] is True
+    assert second["copied"][0]["replaced_bytes"] == 5
+    assert second["copied"][0]["bytes"] == 20
+    assert second["copied"][0]["sha256"] == hashlib.sha256(b"second build, longer").hexdigest()
+
+
+async def test_file_push_flushes_the_guest_page_cache_before_verifying(
+    service: NtDriveService, fake_transport: FakeTransport, tmp_path: Path
+) -> None:
+    """SFTP does not fsync, so a bugcheck right after a push can restore the previous file.
+
+    Verification reads the copy back out of the same page cache that holds it, so it matches and
+    says nothing about the guest's disk. NTFS journals metadata, not file data, so after the
+    bugcheck the old build is on disk while the push reported success.
+    """
+    await service.call("vm_start", {"vm": "win11-dev"})
+    src = tmp_path / "a.sys"
+    src.write_bytes(b"MZ")
+    pushed = await service.call(
+        "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\vbt\\a.sys"}
+    )
+    assert pushed["flushed"] is True
+    flushes = [c for c in fake_transport.exec_log if "EncodedCommand" in c]
+    assert len(flushes) == 1
+    import base64
+
+    script = base64.b64decode(flushes[0].rsplit(" ", 1)[1]).decode("utf-16-le")
+    assert "C:\\vbt\\a.sys" in script and "Flush($true)" in script
+
+    fake_transport.exec_log.clear()
+    off = await service.call(
+        "file_push",
+        {"vm": "win11-dev", "local": str(src), "remote": "C:\\vbt\\a.sys", "flush": False},
+    )
+    assert "flushed" not in off
+    assert not [c for c in fake_transport.exec_log if "EncodedCommand" in c]
+
+
+async def test_file_push_require_verified_rejects_an_unproven_copy(
+    service: NtDriveService, fake_transport: FakeTransport, tmp_path: Path
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"data")
+    fake_transport.fail_hash = True  # and guest tools cannot hash it either, so: unknown
+    with pytest.raises(NtDriveError) as exc:
+        await service.call(
+            "file_push",
+            {
+                "vm": "win11-dev",
+                "local": str(src),
+                "remote": "C:\\a.bin",
+                "require_verified": True,
+            },
+        )
+    assert exc.value.code == VERIFY_FAILED and "unproven" in exc.value.message
+    assert exc.value.extra["result"]["verified"] is None
+    # Without the flag the same push returns, because unproven is not the same as wrong.
+    assert (
+        await service.call(
+            "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\a.bin"}
+        )
+    )["verified"] is None
+    with pytest.raises(NtDriveError) as exc:
+        await service.call(
+            "file_push",
+            {
+                "vm": "win11-dev",
+                "local": str(src),
+                "remote": "C:\\a.bin",
+                "verify": False,
+                "require_verified": True,
+            },
+        )
+    assert exc.value.code == INVALID_ARGS
+
+
+async def test_file_pull_fails_on_a_short_copy(
+    service: NtDriveService, fake_transport: FakeTransport, tmp_path: Path
+) -> None:
+    """A pull had no check at all: a transfer that stopped early said nothing."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    src = tmp_path / "MEMORY.DMP"
+    src.write_bytes(b"PAGEDUMP" * 100)
+    await service.call(
+        "file_push", {"vm": "win11-dev", "local": str(src), "remote": "C:\\Windows\\MEMORY.DMP"}
+    )
+    out = str(tmp_path / "dump.bin")
+    pulled = await service.call(
+        "file_pull", {"vm": "win11-dev", "remote": "C:\\Windows\\MEMORY.DMP", "local": out}
+    )
+    assert pulled["verified"] is True and pulled["verified_by"] == "size"
+    assert pulled["remote_bytes"] == 800
+
+    fake_transport.truncate_get = 64
+    with pytest.raises(NtDriveError) as exc:
+        await service.call(
+            "file_pull", {"vm": "win11-dev", "remote": "C:\\Windows\\MEMORY.DMP", "local": out}
+        )
+    assert exc.value.code == VERIFY_FAILED and "64" in exc.value.message
+    assert exc.value.extra["result"]["local"] == out  # the short copy is still named
+    # verify=false keeps the old behaviour for a file the guest is still writing.
+    loose = await service.call(
+        "file_pull",
+        {"vm": "win11-dev", "remote": "C:\\Windows\\MEMORY.DMP", "local": out, "verify": False},
+    )
+    assert loose["bytes"] == 64 and "verified" not in loose
 
 
 async def test_screenshot_and_audit(service: NtDriveService) -> None:

@@ -254,6 +254,11 @@ class FakeTransport(TermTransport):
         # When set, file ops raise this instead of NtDriveError (a raw paramiko-style failure).
         self.raw_failure: BaseException | None = None
         self.fail_hash = False  # when True, only remote_sha256 fails
+        # When True, put_file stores bytes the host file does not have: a copy that completed and
+        # is wrong, which is what verification exists to catch.
+        self.corrupt_on_put = False
+        # When set, get_file writes only this many bytes: a transfer that stopped early.
+        self.truncate_get: int | None = None
 
     async def open_channel(self, shell_cmd, cols, rows, on_data, on_close) -> TermChannel:  # type: ignore[no-untyped-def]
         chan = FakeChannel(on_data, on_close, self)
@@ -279,7 +284,7 @@ class FakeTransport(TermTransport):
     async def put_file(self, local: str, remote: str) -> int:
         self._maybe_fail("sftp put")
         data = Path(local).read_bytes()
-        self.files[remote] = data
+        self.files[remote] = b"\x00" * len(data) if self.corrupt_on_put else data
         return len(data)
 
     async def get_file(self, remote: str, local: str) -> int:
@@ -289,6 +294,8 @@ class FakeTransport(TermTransport):
 
             raise NtDriveError(BACKEND_ERROR, "sftp get failed: no such file")
         data = self.files[remote]
+        if self.truncate_get is not None:
+            data = data[: self.truncate_get]
         Path(local).write_bytes(data)
         return len(data)
 

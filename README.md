@@ -264,8 +264,8 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `con_autologon` | additive | Configure Windows automatic logon in the guest so a reboot lands on an unlocked interactive desktop (session 1), which term_* over SSH (session 0) cannot open. enabled=false clears it. needs_reboot: run vm_reboot mode=soft next. |
 | `con_run` | destructive | Run a command on the guest's interactive desktop (session 1) and return its output, for GUI or session-bound programs that SSH in session 0 cannot open. It runs through a scheduled task in the logged-on user's session, so the account must be logged in (con_autologon). A missing session fails fast at launch with that hint. shell=powershell carries the text as -EncodedCommand so $vars and quotes need no quoting. detach=true starts it and returns at once, leaving it running. |
 | `con_enable_vnc` | additive | Turn on the console VNC server in the vmx so con_screenshot method=vnc can read the screen without a guest login. Run it with the VM off, then start the VM. |
-| `file_push` | destructive | Copy a file, directory or glob from the host into the guest and verify it by SHA-256 (over SFTP, or through VMware Tools when SSH is down). |
-| `file_pull` | additive | Copy a file from the guest to the host. |
+| `file_push` | destructive | Copy a file, directory or glob from the host into the guest, flush it to the guest's disk and verify it by SHA-256 (over SFTP, or through VMware Tools when SSH is down). Fails with verify_failed when the copy does not match, so a corrupt push cannot read as success. |
+| `file_pull` | additive | Copy a file from the guest to the host and check its size, failing with verify_failed when the host copy is short. |
 | `file_stat` | read | Size, last-modified time and is_dir of a guest path, so freshness can be checked without a shell. exists=false when the path is not there. |
 | `file_ls` | read | List a guest directory (each entry name, size, modified, is_dir), without a shell. |
 | `file_delete` | destructive | Delete a guest file or directory (recurse for a non-empty directory). deleted=false when it was already absent. |

@@ -40,12 +40,22 @@ from ntdrive.errors import (
     GUEST_FROZEN_BY_DEBUGGER,
     INVALID_ARGS,
     TIMEOUT,
+    VERIFY_FAILED,
     NtDriveError,
 )
 from ntdrive.hostproc import force_utf8_stdio
 from ntdrive.paths import absolutize_local
 
-EXIT_CODES = {INVALID_ARGS: 2, CONFIRM_REQUIRED: 3, GUEST_FROZEN_BY_DEBUGGER: 4, TIMEOUT: 5}
+# Scripts branch on these, so each failure a caller can react to differently gets its own code.
+# verify_failed is deliberately not 1: "copied but wrong" needs a different reaction from
+# "could not copy", and a shell loop that only tests for zero treats them the same.
+EXIT_CODES = {
+    INVALID_ARGS: 2,
+    CONFIRM_REQUIRED: 3,
+    GUEST_FROZEN_BY_DEBUGGER: 4,
+    TIMEOUT: 5,
+    VERIFY_FAILED: 6,
+}
 
 
 # -- output ----------------------------------------------------------------------------------

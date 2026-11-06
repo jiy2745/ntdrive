@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import glob
 import hashlib
 import os
@@ -13,7 +14,7 @@ from pydantic import Field
 
 from ntdrive.core.registry import tool
 from ntdrive.core.tools.common import VmParams
-from ntdrive.errors import INVALID_ARGS, NtDriveError
+from ntdrive.errors import INVALID_ARGS, VERIFY_FAILED, NtDriveError
 from ntdrive.paths import is_absolute_local
 
 if TYPE_CHECKING:
@@ -50,6 +51,21 @@ class PushParams(VmParams):
     local: str = Field(description="Host file, directory or glob (absolute path)")
     remote: str = Field(description="Guest path; a directory when local is several files")
     verify: bool = Field(default=True, description="Compare SHA-256 after the copy")
+    require_verified: bool = Field(
+        default=False,
+        description=(
+            "Also fail when a file could not be hashed at all, not only on a mismatch. A "
+            "mismatch always fails; this turns 'unproven' into a failure too"
+        ),
+    )
+    flush: bool = Field(
+        default=True,
+        description=(
+            "Flush each copied file to the guest's disk (FlushFileBuffers) before verifying, so a "
+            "bugcheck right after the push cannot lose the write and leave the old file in place. "
+            "Needs SSH; costs one guest command per push"
+        ),
+    )
     grant_users_rx: bool = Field(
         default=False,
         description=(
@@ -65,6 +81,13 @@ class PullParams(VmParams):
     remote: str = Field(description="Guest file path")
     local: str = Field(
         description="Host file, or a directory when it ends with a separator (absolute path)"
+    )
+    verify: bool = Field(
+        default=True,
+        description=(
+            "Compare the size of the host copy against the guest file and fail on a mismatch, so "
+            "a truncated pull cannot read as success"
+        ),
     )
 
 
@@ -109,10 +132,82 @@ def _require_absolute(local: str) -> None:
         )
 
 
+# One guest command carries this many paths at most. The text is base64 of UTF-16LE inside a
+# command line, so it inflates about 2.7x, and Windows stops reading a command line at 32767
+# characters. 40 paths of ordinary length stay far below that.
+_FLUSH_BATCH = 40
+
+
+def _flush_script(remotes: list[str]) -> str:
+    """PowerShell that opens each file for writing and calls FlushFileBuffers on it."""
+    paths = ",".join("'" + remote.replace("'", "''") + "'" for remote in remotes)
+    return (
+        f"foreach ($p in @({paths})) {{ try {{ "
+        "$f = [IO.File]::Open($p, 'Open', 'Write', 'ReadWrite'); $f.Flush($true); $f.Dispose() "
+        "} catch { Write-Output ('fail ' + $p + ': ' + $_.Exception.Message) } }"
+    )
+
+
+async def _flush_to_disk(shell: Any, remotes: list[str]) -> list[str]:
+    """Force the guest to write each pushed file to its disk. Returns problems, not raising.
+
+    SFTP does not fsync: OpenSSH's sftp-server only syncs when the client asks through the
+    `fsync@openssh.com` extension, and paramiko never asks. So a pushed file can live entirely in
+    the guest's page cache. Verification then reads it straight back out of that same cache and
+    matches, which makes `verified: true` honest about the running guest but not about its disk.
+
+    On a target that is about to be bugchecked - which is most of this project's work - that gap
+    is a lost write. A bugcheck is a power cut as far as the filesystem is concerned, and NTFS
+    journals metadata, not file data, so after the reboot the *previous* build is back on disk
+    while the push reported success. Flushing before verification closes the gap and makes
+    `verified: true` mean "on the guest's disk", which is what a caller assumes it means.
+
+    Failures here are reported, never raised: the copy itself succeeded, and a file that cannot be
+    opened for writing (a driver that is already loaded, say) is a durability unknown, not a
+    broken push.
+    """
+    problems: list[str] = []
+    for start in range(0, len(remotes), _FLUSH_BATCH):
+        batch = remotes[start : start + _FLUSH_BATCH]
+        script = _flush_script(batch)
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        # The guest's default SSH shell may be cmd.exe, so call PowerShell by name and hand it
+        # the script as -EncodedCommand: no quoting layer can alter it on the way.
+        command = f"powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}"
+        try:
+            code, out = await shell.exec_once(command, timeout=60)
+        except NtDriveError as exc:
+            problems.append(exc.message)
+            continue
+        problems.extend(ln[5:].strip() for ln in out.splitlines() if ln.startswith("fail "))
+        if code != 0 and not problems:
+            problems.append(f"flush exited {code}: {out.strip()[:120]}")
+    return problems
+
+
+def _record_hashes(entry: dict[str, Any], local_hash: str, remote_hash: str) -> bool:
+    """Write the digests into one copied[] entry and say whether they matched.
+
+    On a match the single agreed digest is reported, so a caller can assert what is on the guest
+    and compare it later against the guest's own Get-FileHash. A boolean can only be trusted, a
+    digest can be checked. On a mismatch both sides are reported, because which one is wrong is
+    the first thing anyone will ask.
+    """
+    ok = local_hash == remote_hash
+    entry["verified"] = ok
+    if ok:
+        entry["sha256"] = local_hash
+    else:
+        entry["sha256_local"] = local_hash
+        entry["sha256_remote"] = remote_hash
+    return ok
+
+
 @tool(
     "file_push",
-    "Copy a file, directory or glob from the host into the guest and verify it by SHA-256 "
-    "(over SFTP, or through VMware Tools when SSH is down).",
+    "Copy a file, directory or glob from the host into the guest, flush it to the guest's disk "
+    "and verify it by SHA-256 (over SFTP, or through VMware Tools when SSH is down). Fails with "
+    "verify_failed when the copy does not match, so a corrupt push cannot read as success.",
     PushParams,
     positional=("vm", "local", "remote"),
     touches_guest=True,
@@ -124,6 +219,12 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
     cfg = service.vm_cfg(p.vm)
     service.ensure_not_frozen(p.vm)
     _require_absolute(p.local)
+    if p.require_verified and not p.verify:
+        raise NtDriveError(
+            INVALID_ARGS,
+            "require_verified=true needs verify=true",
+            "with verification off there is nothing to require; drop one of the two",
+        )
     await service.ensure_running(cfg)
     files = [(os.path.abspath(local), rel) for local, rel in _expand_local(p.local)]
     if not files:
@@ -140,10 +241,27 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
     if transport is None:
         notes.append("sftp unavailable (no ssh), copied with guest tools")
     copied: list[dict[str, Any]] = []
-    # Guest-tools copies are hashed afterwards in one batch (Get-FileHash in the guest).
+    # Copy first, then flush, then hash: verifying before the flush would only prove that the
+    # guest's page cache holds the right bytes, which a bugcheck can undo. (entry, local, remote)
+    # for each file, split by what carried it, because only SFTP copies can be hashed over SFTP.
+    sftp_copied: list[tuple[dict[str, Any], str, str]] = []
     tools_copied: list[tuple[dict[str, Any], str, str]] = []
     for local, rel in files:
         remote = _join_remote(p.remote, rel) if remote_is_dir else p.remote
+        entry: dict[str, Any] = {"local": local, "remote": remote}
+        if p.verify and transport is not None:
+            # One cheap stat before the copy, so "it was already this file" and "the thing that
+            # was there had a different size" are both visible afterwards instead of invisible.
+            # Guest tools have no cheap stat (every call is a vmrun round trip), so this is the
+            # SFTP path only.
+            try:
+                before = await transport.stat_file(remote)
+            except _SFTP_FAILURES:
+                pass  # unknown, so say nothing rather than claim it was absent
+            else:
+                entry["replaced"] = before is not None
+                if before is not None:
+                    entry["replaced_bytes"] = before.get("size")
         size: int | None = None
         if transport is not None:
             try:
@@ -158,44 +276,72 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
             await adapter.copy_to_guest(cfg, local, remote)
             size = os.path.getsize(local)
             by_tools = True
-        entry: dict[str, Any] = {"local": local, "remote": remote, "bytes": size}
-        ok: bool | None = None
-        if p.verify and by_tools:
-            tools_copied.append((entry, local, remote))  # hashed in the guest batch below
-        elif p.verify and transport is not None:
-            remote_hash = None
-            try:
-                remote_hash = await transport.remote_sha256(remote)
-            except _SFTP_FAILURES as exc:
-                # The copy may be fine but the SFTP read failed, or the copy is genuinely corrupt.
-                # Either way, do not leave it unverified: rehash through guest tools, which decides.
-                # A silent verified:null once let a corrupt pushed exe read as merely unchecked.
-                entry["verify_note"] = f"sftp hash failed ({exc}); rehashed with guest tools"
-            if remote_hash is not None:
-                ok = remote_hash == await _sha256_async(local)
-                verified += 1 if ok else 0
-            else:
-                tools_copied.append((entry, local, remote))
-        entry["verified"] = ok
+        entry["bytes"] = size
+        entry["verified"] = None
         total += size
         copied.append(entry)
-    if tools_copied:
+        (tools_copied if by_tools else sftp_copied).append((entry, local, remote))
+    if p.flush and copied:
         try:
-            hashes = await adapter.guest_sha256(cfg, [remote for _, _, remote in tools_copied])
+            shell = await service.transport(cfg)
+            if not hasattr(shell, "exec_once"):
+                raise NtDriveError(INVALID_ARGS, "the transport cannot run commands")
+            problems = await _flush_to_disk(shell, [e["remote"] for e in copied])
         except NtDriveError as exc:
-            hashes = {}
-            for entry, _, _ in tools_copied:
-                entry["verify_error"] = f"guest tools could not hash it: {exc.message}"
-            hash_failures += len(tools_copied)
+            result_flushed: bool | None = None
+            notes.append(
+                f"not flushed to the guest disk (needs SSH): {exc.message}. The copy is in the "
+                "guest's page cache, so a bugcheck before Windows writes it back restores the "
+                "previous file while this push reports success"
+            )
         else:
-            for entry, local, remote in tools_copied:
-                digest = hashes.get(remote)
-                if digest is None:
-                    entry["verify_error"] = "guest tools could not hash it"
-                    hash_failures += 1
-                    continue
-                entry["verified"] = digest == await _sha256_async(local)
-                verified += 1 if entry["verified"] else 0
+            result_flushed = not problems
+            if problems:
+                notes.append(f"could not flush {len(problems)} file(s) to disk: {problems[0]}")
+    else:
+        result_flushed = None
+    if p.verify:
+        # Files SFTP carried are hashed over SFTP; everything else, including anything whose SFTP
+        # hash failed, goes into one Get-FileHash run in the guest.
+        hash_batch: list[tuple[dict[str, Any], str, str]] = list(tools_copied)
+        for entry, local, remote in sftp_copied:
+            remote_hash: str | None = None
+            if transport is None:
+                # The link died later in the copy loop, so this file cannot be hashed over SFTP.
+                entry["verify_note"] = "sftp dropped after the copy; rehashed with guest tools"
+            else:
+                try:
+                    remote_hash = await transport.remote_sha256(remote)
+                except _SFTP_FAILURES as exc:
+                    # The copy may be fine but the SFTP read failed, or the copy is genuinely
+                    # corrupt. Either way, do not leave it unverified: rehash through guest tools,
+                    # which decides. A silent verified:null once let a corrupt pushed exe read as
+                    # merely unchecked.
+                    entry["verify_note"] = f"sftp hash failed ({exc}); rehashed with guest tools"
+            if remote_hash is None:
+                hash_batch.append((entry, local, remote))
+                continue
+            verified += 1 if _record_hashes(entry, await _sha256_async(local), remote_hash) else 0
+        if hash_batch:
+            try:
+                hashes = await adapter.guest_sha256(cfg, [remote for _, _, remote in hash_batch])
+            except NtDriveError as exc:
+                hashes = {}
+                for entry, local, _ in hash_batch:
+                    entry["verify_error"] = f"guest tools could not hash it: {exc.message}"
+                    # Still report the host digest: the caller can check the guest themselves.
+                    entry["sha256_local"] = await _sha256_async(local)
+                hash_failures += len(hash_batch)
+            else:
+                for entry, local, remote in hash_batch:
+                    digest = hashes.get(remote)
+                    local_hash = await _sha256_async(local)
+                    if digest is None:
+                        entry["verify_error"] = "guest tools could not hash it"
+                        entry["sha256_local"] = local_hash
+                        hash_failures += 1
+                        continue
+                    verified += 1 if _record_hashes(entry, local_hash, digest) else 0
     if hash_failures:
         notes.append(
             f"sha256 verification failed for {hash_failures} file(s), see copied[].verify_error"
@@ -242,16 +388,45 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
         "via": via,
         "copied": copied,
     }
+    if result_flushed is not None:
+        result["flushed"] = result_flushed
     if p.grant_users_rx:
         result["users_rx"] = users_rx
     if notes:
         result["note"] = "; ".join(notes)
+    # A verification whose answer nobody has to read is not a verification. Raising makes the one
+    # failure that matters - the guest holds bytes other than the ones that were sent - reach every
+    # front door: a non-zero CLI exit code, an MCP tool error, an HTTP 409. It used to be a field
+    # in a long successful result, and a shell loop that did not parse JSON saw exit 0.
+    if overall is False:
+        bad = [str(e["remote"]) for e in copied if e.get("verified") is False]
+        shown = ", ".join(bad[:5]) + (f" (+{len(bad) - 5} more)" if len(bad) > 5 else "")
+        raise NtDriveError(
+            VERIFY_FAILED,
+            f"the copy on the guest does not match what was sent: {shown}",
+            "the guest holds bytes other than the file that was built, so anything loaded from "
+            "that path is the wrong binary. file_delete the path and push again. verify=false "
+            "only silences the check, it does not change what is on the guest",
+            result=result,
+        )
+    if p.require_verified and overall is None:
+        raise NtDriveError(
+            VERIFY_FAILED,
+            f"the copy on the guest is unproven: {hash_failures} of {len(files)} file(s) could "
+            "not be hashed back",
+            "require_verified=true treats an unproven copy as a failure. The copy itself "
+            "succeeded; the guest could not hash it back, which usually means it is under load, "
+            "rebooting, or frozen by the debugger (kd_go first). Retry, or drop require_verified "
+            "to accept an unproven copy",
+            result=result,
+        )
     return result
 
 
 @tool(
     "file_pull",
-    "Copy a file from the guest to the host.",
+    "Copy a file from the guest to the host and check its size, failing with verify_failed when "
+    "the host copy is short.",
     PullParams,
     positional=("vm", "remote", "local"),
     touches_guest=True,
@@ -304,6 +479,32 @@ async def file_pull(service: NtDriveService, p: PullParams) -> dict[str, Any]:
         "bytes": size,
         "via": via,
     }
+    # A pull had no check of any kind: a transfer that stopped early landed a short file on the
+    # host and said nothing. Comparing the guest's size costs one stat and catches that. It is a
+    # weaker check than file_push's digest, so the result says which check ran.
+    if p.verify and transport is not None and via == transport.name:
+        remote_size: int | None = None
+        try:
+            info = await transport.stat_file(p.remote)
+        except _SFTP_FAILURES:
+            info = None
+        if info is not None:
+            remote_size = info.get("size")
+        if remote_size is None:
+            result["verified"] = None
+        else:
+            result["remote_bytes"] = remote_size
+            result["verified"] = remote_size == size
+            result["verified_by"] = "size"
+        if result["verified"] is False:
+            raise NtDriveError(
+                VERIFY_FAILED,
+                f"the host copy is {size} bytes, the guest file is {remote_size}",
+                "the pull did not bring the whole file. The short copy is on the host at the "
+                "path in result.local; pull it again. A file the guest is still writing (a live "
+                "log, a dump being saved) changes size mid-copy and mismatches for that reason",
+                result=result,
+            )
     if note:
         result["note"] = note
     return result
