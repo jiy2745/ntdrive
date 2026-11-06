@@ -50,7 +50,13 @@ class PushParams(VmParams):
 
     local: str = Field(description="Host file, directory or glob (absolute path)")
     remote: str = Field(description="Guest path; a directory when local is several files")
-    verify: bool = Field(default=True, description="Compare SHA-256 after the copy")
+    verify: bool = Field(
+        default=True,
+        description=(
+            "Hash the copy in the guest and compare it. The host-side digest is reported either "
+            "way, so verify=false still says which image was sent, it just does not ask the guest"
+        ),
+    )
     require_verified: bool = Field(
         default=False,
         description=(
@@ -192,20 +198,21 @@ async def _flush_to_disk(shell: Any, remotes: list[str]) -> list[str]:
     return problems
 
 
-def _record_hashes(entry: dict[str, Any], local_hash: str, remote_hash: str) -> bool:
-    """Write the digests into one copied[] entry and say whether they matched.
+def _record_hashes(entry: dict[str, Any], remote_hash: str) -> bool:
+    """Fold the guest's digest into one copied[] entry and say whether it matched.
 
-    On a match the single agreed digest is reported, so a caller can assert what is on the guest
-    and compare it later against the guest's own Get-FileHash. A boolean can only be trusted, a
-    digest can be checked. On a mismatch both sides are reported, because which one is wrong is
-    the first thing anyone will ask.
+    Every entry already carries `sha256_local` from the copy. On a match the two collapse into one
+    agreed `sha256`, so a caller can assert what the guest holds and compare it later against the
+    guest's own Get-FileHash. A boolean can only be trusted, a digest can be checked. On a
+    mismatch both sides stay, because which one is wrong is the first thing anyone will ask.
     """
+    local_hash = str(entry["sha256_local"])
     ok = local_hash == remote_hash
     entry["verified"] = ok
     if ok:
+        del entry["sha256_local"]
         entry["sha256"] = local_hash
     else:
-        entry["sha256_local"] = local_hash
         entry["sha256_remote"] = remote_hash
     return ok
 
@@ -285,6 +292,11 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
             by_tools = True
         entry["bytes"] = size
         entry["verified"] = None
+        # The host digest is reported for every pushed file, even with verification off and even
+        # when the guest cannot be asked. It pins which image a later guest-side Get-FileHash
+        # should match, without a second command, and it costs one local read of a file the push
+        # just read in full anyway.
+        entry["sha256_local"] = await _sha256_async(local)
         total += size
         copied.append(entry)
         (tools_copied if by_tools else sftp_copied).append((entry, local, remote))
@@ -328,27 +340,23 @@ async def file_push(service: NtDriveService, p: PushParams) -> dict[str, Any]:
             if remote_hash is None:
                 hash_batch.append((entry, local, remote))
                 continue
-            verified += 1 if _record_hashes(entry, await _sha256_async(local), remote_hash) else 0
+            verified += 1 if _record_hashes(entry, remote_hash) else 0
         if hash_batch:
             try:
                 hashes = await adapter.guest_sha256(cfg, [remote for _, _, remote in hash_batch])
             except NtDriveError as exc:
                 hashes = {}
-                for entry, local, _ in hash_batch:
+                for entry, _, _ in hash_batch:
                     entry["verify_error"] = f"guest tools could not hash it: {exc.message}"
-                    # Still report the host digest: the caller can check the guest themselves.
-                    entry["sha256_local"] = await _sha256_async(local)
                 hash_failures += len(hash_batch)
             else:
-                for entry, local, remote in hash_batch:
+                for entry, _, remote in hash_batch:
                     digest = hashes.get(remote)
-                    local_hash = await _sha256_async(local)
                     if digest is None:
                         entry["verify_error"] = "guest tools could not hash it"
-                        entry["sha256_local"] = local_hash
                         hash_failures += 1
                         continue
-                    verified += 1 if _record_hashes(entry, local_hash, digest) else 0
+                    verified += 1 if _record_hashes(entry, digest) else 0
     if hash_failures:
         notes.append(
             f"sha256 verification failed for {hash_failures} file(s), see copied[].verify_error"

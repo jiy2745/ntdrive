@@ -399,9 +399,11 @@ one suspend-resume cycle when the suspend flow is needed.
   one. `ntdrive file push` exits 6 and the full result is in the error's `result`. Pass
   `require_verified=true` when an unproven copy (`verified: null`) must fail too. A short
   `file_pull` raises the same error from a size check.
-- On a match each `copied[]` entry carries one `sha256`: log it and compare it against the
-  guest's own `Get-FileHash` later, instead of trusting a boolean. On a mismatch `sha256_local`
-  and `sha256_remote` show which side is wrong. `replaced` and `replaced_bytes` say what the push
+- Every `copied[]` entry carries the host digest as `sha256_local`, even with `verify=false` and
+  even when the guest could not be asked, so you can always pin which image a later guest-side
+  `Get-FileHash` should match without a second command. On a match the two collapse into one
+  agreed `sha256`, and on a mismatch `sha256_local` and `sha256_remote` show which side is wrong.
+  Log the digest instead of trusting a boolean. `replaced` and `replaced_bytes` say what the push
   overwrote, so "the file did not change" is visible.
 - **A push to a guest you are about to bugcheck is flushed to its disk** (`flushed: true`).
   Without that, SFTP leaves the copy in the guest's page cache (it never fsyncs), verification

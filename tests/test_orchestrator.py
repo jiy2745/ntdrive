@@ -734,6 +734,16 @@ async def test_file_push_reports_the_digest_and_what_it_replaced(
     assert second["copied"][0]["bytes"] == 20
     assert second["copied"][0]["sha256"] == hashlib.sha256(b"second build, longer").hexdigest()
 
+    # With verification off the guest is not asked, but the host digest is still reported: it pins
+    # which image a later guest-side Get-FileHash should match, without a second command.
+    off = await service.call(
+        "file_push",
+        {"vm": "win11-dev", "local": str(src), "remote": "C:\\vbt\\a.sys", "verify": False},
+    )
+    assert off["verified"] is None and "sha256" not in off["copied"][0]
+    assert off["copied"][0]["sha256_local"] == hashlib.sha256(b"second build, longer").hexdigest()
+    assert "replaced" not in off["copied"][0]  # the pre-copy stat belongs to verification
+
 
 async def test_file_push_flushes_the_guest_page_cache_before_verifying(
     service: NtDriveService, fake_transport: FakeTransport, tmp_path: Path
