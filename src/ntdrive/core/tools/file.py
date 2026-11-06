@@ -165,6 +165,13 @@ async def _flush_to_disk(shell: Any, remotes: list[str]) -> list[str]:
     Failures here are reported, never raised: the copy itself succeeded, and a file that cannot be
     opened for writing (a driver that is already loaded, say) is a durability unknown, not a
     broken push.
+
+    The script was run against real files on Windows PowerShell 5.1 (2026-11-06): a flushable
+    file prints nothing, a file held open by another process prints exactly one `fail <path>:
+    <reason>` line, a path with an apostrophe survives the quoting, and the exit code stays 0
+    either way, which is why the `fail` lines and not the exit code decide. FlushFileBuffers
+    flushing another handle's cached write is documented behaviour (the cached pages belong to the
+    file, not the handle) and is not verified here, and neither is surviving a real bugcheck.
     """
     problems: list[str] = []
     for start in range(0, len(remotes), _FLUSH_BATCH):
