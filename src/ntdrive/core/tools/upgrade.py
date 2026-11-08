@@ -683,16 +683,91 @@ async def vm_upgrade_status(service: NtDriveService, p: UpgradeStatusParams) -> 
         reachable = False
     if not reachable:
         return offline
+    repinned: dict[str, Any] | None = None
     try:
         transport = await service.transport(cfg)
         guest = await _probe(transport)
     except NtDriveError as exc:
-        # Seen live: the port answered, then the probe failed as setup took the guest down for
-        # its first reboot. That is the same state as no answer at all, not an error.
-        return {**offline, "probe_error": exc.message}
+        if "host key" not in exc.message:
+            # Seen live: the port answered, then the probe failed as setup took the guest down
+            # for its first reboot. That is the same state as no answer at all, not an error.
+            return {**offline, "probe_error": exc.message}
+        # Seen live on 29698 to 29704: the upgrade regenerated the guest's SSH host keys, so
+        # the pinned key no longer matched and every SSH tool was refused. Re-pin, but only
+        # after reading the key file inside the guest over VMware Tools, a channel bound to
+        # this VM rather than to whoever answers on its IP.
+        repinned = await _repin_from_guest(service, cfg)
+        if not repinned.get("repinned"):
+            return {
+                "vm": p.vm,
+                "status": "host_key_mismatch",
+                **repinned,
+                "note": (
+                    "SSH answers with a host key that is not the pinned one, and the key file "
+                    "inside the guest (read over VMware Tools) does not match it either, so the "
+                    "key was not re-pinned. Treat the address as untrusted and check the VM"
+                ),
+            }
+        transport = await service.transport(cfg)
+        guest = await _probe(transport)
     job = _json_or_empty(guest.get("JOB", ""))
     state = _json_or_empty(guest.get("STATE", ""))
-    return _status(p.vm, guest, job, state)
+    result = _status(p.vm, guest, job, state)
+    if repinned is not None:
+        result["host_key_repinned"] = repinned
+    return result
+
+
+_KEY_FILES = {
+    "ssh-ed25519": "ssh_host_ed25519_key.pub",
+    "ecdsa-sha2-nistp256": "ssh_host_ecdsa_key.pub",
+    "ssh-rsa": "ssh_host_rsa_key.pub",
+}
+
+
+def _offered_host_key(ip: str, port: int) -> tuple[str, str]:
+    import paramiko
+
+    transport = paramiko.Transport((ip, port))
+    try:
+        transport.start_client(timeout=15)
+        key = transport.get_remote_server_key()
+        return key.get_name(), key.get_base64()
+    finally:
+        transport.close()
+
+
+async def _repin_from_guest(service: NtDriveService, cfg: Any) -> dict[str, Any]:
+    """Pin the key sshd offers when the same key is in the guest's own key file."""
+    ip = await service.guest_ip(cfg)
+    key_type, offered = await asyncio.to_thread(_offered_host_key, ip, cfg.guest.ssh_port)
+    name = _KEY_FILES.get(key_type)
+    if name is None:
+        return {"repinned": False, "key_type": key_type, "reason": "unknown key type"}
+    with tempfile.TemporaryDirectory(prefix="ntdrive-hostkey-") as tmp:
+        local = os.path.join(tmp, name)
+        try:
+            await service.adapter_for(cfg).copy_from_guest(
+                cfg, f"C:\\ProgramData\\ssh\\{name}", local
+            )
+        except NtDriveError as exc:
+            return {"repinned": False, "key_type": key_type, "reason": exc.message}
+        with open(local, encoding="ascii", errors="replace") as handle:
+            fields = handle.read().split()
+    in_guest = fields[1] if len(fields) > 1 else ""
+    if in_guest != offered:
+        return {"repinned": False, "key_type": key_type, "reason": "guest key file differs"}
+    store = state_dir() / "hostkeys" / f"{cfg.name}.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps({"type": key_type, "key": offered}, indent=2), encoding="utf-8")
+    service.state.record_event(cfg.name, "host_key_repinned", key_type=key_type)
+    return {
+        "repinned": True,
+        "key_type": key_type,
+        "fingerprint_sha256": base64.b64encode(hashlib.sha256(base64.b64decode(offered)).digest())
+        .decode("ascii")
+        .rstrip("="),
+    }
 
 
 def _status(

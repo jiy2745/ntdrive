@@ -261,7 +261,13 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   folder is short (`C:\nx\N`) and `rd /s /q` deletes it. A healthy setup writes errors to
   setuperr.log, so status never treats that file as a verdict. A `schtasks /sc once /st 23:59`
   task fires again at 23:59: the pipeline's task has no trigger at all. `file_push` ran at about
-  1.75 MB/s, which is why the guest downloads the build itself.
+  1.75 MB/s, which is why the guest downloads the build itself. The second live run (29698 to
+  29704) added three more: a VM hard powered off from outside mid-setup (status must call that
+  interrupted, not stalled, so it compares the guest's last boot time with the pipeline's last
+  update), the retry refused for space that was all the cut-off attempt's leftovers (19.2 GB in
+  `$WINDOWS.~BT`, cleared before measuring now), and the upgrade recreating `ProgramData\ssh`,
+  so the guest came back with new SSH host keys that the pin refused. The re-pin reads the key
+  file over VMware Tools first, so it never trusts whoever answers on the IP.
 - Bash in this repo's tooling expands `$_` and `\$f` in places you would not expect (a `uv`
   shim re-expanded `$_` inside single quotes, and `"C:\uup\$f"` became the literal path
   `C:\uup$f`). Pass guest PowerShell as `-EncodedCommand` (`_encoded` in `upgrade.py`) or

@@ -360,3 +360,43 @@ async def test_upgrade_clears_the_last_attempt_before_measuring_space(
     started = await service.call("vm_upgrade", {"vm": "win11-dev", "confirm": True})
     assert started["free_gb"] == 51.8
     assert "$WINDOWS.~BT" in upgrade.PREPARE_PS and "/MIR /B" in upgrade.PREPARE_PS
+
+
+@pytest.mark.parametrize("guest_key", ["bmV3LWtleQ==", "aW1wb3N0b3I="])
+async def test_status_repins_a_host_key_the_upgrade_regenerated_only_when_the_guest_has_it(
+    service: NtDriveService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    guest_key: str,
+) -> None:
+    """29698 to 29704 recreated the ProgramData ssh folder, so sshd made new host keys."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    monkeypatch.setattr(upgrade, "state_dir", lambda: tmp_path)
+    calls = {"n": 0}
+    done_probe = _probe_output(BUILD="29698", JOB=JOB, STATE=json.dumps({"phase": "setup"}))
+
+    async def probe(transport: Any) -> dict[str, str]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise NtDriveError("backend_error", "ssh connect refused: host key for 1.2.3.4 changed")
+        return dict(line.split("=", 1) for line in done_probe.splitlines())
+
+    monkeypatch.setattr(upgrade, "_probe", probe)
+    monkeypatch.setattr(
+        upgrade, "_offered_host_key", lambda ip, port: ("ssh-ed25519", "bmV3LWtleQ==")
+    )
+
+    async def copy_from_guest(self: Any, vm: Any, remote: str, local: str) -> None:
+        assert remote == "C:\\ProgramData\\ssh\\ssh_host_ed25519_key.pub"
+        Path(local).write_text(f"ssh-ed25519 {guest_key} root@guest\n", encoding="ascii")
+
+    from ntdrive.hypervisor.vmware import VmwareAdapter
+
+    monkeypatch.setattr(VmwareAdapter, "copy_from_guest", copy_from_guest)
+    status = await service.call("vm_upgrade_status", {"vm": "win11-dev"})
+    pinned = tmp_path / "hostkeys" / "win11-dev.json"
+    if guest_key == "bmV3LWtleQ==":
+        assert status["status"] == "done" and status["host_key_repinned"]["repinned"] is True
+        assert json.loads(pinned.read_text())["key"] == "bmV3LWtleQ=="
+    else:
+        assert status["status"] == "host_key_mismatch" and not pinned.exists()

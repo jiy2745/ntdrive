@@ -426,7 +426,12 @@ Poll `vm_upgrade_status` every few minutes. It reads the pipeline's state in the
   `vm_wait_ready` blocks until SSH is back if you would rather not poll.
 - `stalled`: setup is not running and the build is still old. Normal for a moment between its
   steps. If it stays for more than about ten minutes, setup rolled back.
-- `done`: the guest runs the target build. Follow `next`.
+- `done`: the guest runs the target build. Follow `next`. When `host_key_repinned` is present,
+  the upgrade regenerated the guest's SSH host keys (live, 29698 to 29704 recreated
+  `C:\ProgramData\ssh`): the new key was pinned only after the key file inside the guest,
+  read over VMware Tools, matched what sshd offered. Terminals opened before it need `term_open`.
+- `host_key_mismatch`: SSH answers with a key that neither the pin nor the guest's own key file
+  has. Nothing was re-pinned. Treat the address as untrusted and ask the operator.
 - `failed`: `detail`, or `setup_exit` and `setup_errors` (the tail of setuperr.log). A
   `curl.exe exited` failure is an expired CDN link: call `vm_upgrade` again for fresh ones.
   Otherwise `snap_revert` to the pre-upgrade snapshot.
