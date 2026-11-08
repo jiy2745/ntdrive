@@ -107,8 +107,9 @@ def _probe_output(**overrides: str) -> str:
 
 
 @pytest.fixture
-def uup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def uup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_transport: FakeTransport) -> None:
     monkeypatch.setattr(upgrade, "_fetch_json", _api())
+    fake_transport.exec_responses[upgrade._encoded(upgrade.PREPARE_PS)] = "PREPARED=1\r\n"
     zip_path = tmp_path / upgrade.WIMLIB_ZIP
     zip_path.write_bytes(b"PK")
 
@@ -166,7 +167,7 @@ async def test_upgrade_stages_the_pipeline_and_starts_it(
     scripts = [_decoded(c) for c in fake_transport.exec_log if "EncodedCommand" in c]
     assert any("Register-ScheduledTask" in s and "SYSTEM" in s for s in scripts)
     # The work folder is wiped before the new files land, so a stale state.json cannot leak in.
-    prepare = next(i for i, s in enumerate(scripts) if "rd /s /q C:\\ntdrive-upgrade" in s)
+    prepare = next(i for i, s in enumerate(scripts) if "PREPARED=1" in s)
     start = next(i for i, s in enumerate(scripts) if "Start-ScheduledTask" in s)
     assert prepare < start
 
@@ -337,3 +338,25 @@ async def test_status_says_offline_when_the_probe_dies_mid_reboot(
     finally:
         mod._probe = original
     assert status["status"] == "offline" and "90s" in status["probe_error"]
+
+
+async def test_upgrade_clears_the_last_attempt_before_measuring_space(
+    service: NtDriveService,
+    fake_transport: FakeTransport,
+    uup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A setup cut off mid-copy left 19 GB in $WINDOWS.~BT, which a retry must not count."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    probes = iter([_probe_output(FREE_GB="27.9"), _probe_output(FREE_GB="51.8")])
+    order: list[str] = []
+
+    async def staged_probe(transport: Any) -> dict[str, str]:
+        order.append("probe")
+        return dict(line.split("=", 1) for line in next(probes).splitlines())
+
+    monkeypatch.setattr(upgrade, "_probe", staged_probe)
+    fake_transport.exec_responses[upgrade._encoded(upgrade.START_PS)] = "STARTED=1\r\n"
+    started = await service.call("vm_upgrade", {"vm": "win11-dev", "confirm": True})
+    assert started["free_gb"] == 51.8
+    assert "$WINDOWS.~BT" in upgrade.PREPARE_PS and "/MIR /B" in upgrade.PREPARE_PS

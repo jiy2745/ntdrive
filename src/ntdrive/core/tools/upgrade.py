@@ -205,8 +205,19 @@ $d = (bcdedit.exe /enum '{current}' | Select-String '^debug\s+(\S+)').Matches
 PREPARE_PS = r"""
 $ErrorActionPreference = 'Stop'
 Unregister-ScheduledTask -TaskName 'ntdrive-upgrade' -Confirm:$false -ErrorAction SilentlyContinue
-if (Test-Path 'C:\ntdrive-upgrade') { cmd.exe /c 'rd /s /q C:\ntdrive-upgrade' | Out-Null }
-if (Test-Path 'C:\nx') { cmd.exe /c 'rd /s /q C:\nx' | Out-Null }
+# The last attempt's work folder and setup's own staging folder, which a cut-off setup leaves
+# behind (19 GB live). setup is not running here, the caller checked. robocopy in backup mode
+# clears what setup's ACLs keep rd from deleting.
+New-Item -ItemType Directory -Force -Path 'C:\nx-empty' | Out-Null
+foreach ($path in 'C:\ntdrive-upgrade', 'C:\$WINDOWS.~BT', 'C:\nx') {
+  if (Test-Path -LiteralPath $path) {
+    $ErrorActionPreference = 'Continue'
+    robocopy.exe C:\nx-empty $path /MIR /B /MT:16 /R:0 /W:0 /NFL /NDL /NJH /NJS /NP | Out-Null
+    cmd.exe /c "rd /s /q `"$path`"" 2>&1 | Out-Null
+    $ErrorActionPreference = 'Stop'
+  }
+}
+cmd.exe /c 'rd /s /q C:\nx-empty' 2>&1 | Out-Null
 New-Item -ItemType Directory -Force -Path 'C:\ntdrive-upgrade' | Out-Null
 'PREPARED=1'
 """
@@ -533,19 +544,6 @@ async def vm_upgrade(service: NtDriveService, p: UpgradeParams) -> dict[str, Any
     # Deleting Windows.old is the pipeline's first step, not part of this call (it can take
     # minutes), and the pipeline checks the free space again afterwards.
     remove_old = p.remove_windows_old and guest.get("WINDOWS_OLD") == "True"
-    free = float(guest.get("FREE_GB") or 0)
-    if free < MIN_FREE_GB and not remove_old:
-        hint = "free space in the guest or grow the virtual disk"
-        if guest.get("WINDOWS_OLD") == "True":
-            hint = (
-                "C:\\Windows.old from an earlier upgrade holds about 20 GB: retry with "
-                "remove_windows_old=true (snapshot first, it is what Settings' go-back uses)"
-            )
-        raise NtDriveError(
-            INVALID_ARGS,
-            f"{p.vm} has {free:.1f} GB free on C:, the upgrade needs {MIN_FREE_GB:.0f}",
-            hint,
-        )
 
     search = _INSIDER_TITLE if p.build == "latest" else p.build.split(".")[0]
     builds = await _insider_builds(search)
@@ -592,7 +590,30 @@ async def vm_upgrade(service: NtDriveService, p: UpgradeParams) -> dict[str, Any
         "remove_windows_old": remove_old,
         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    await transport.exec_once(_encoded(PREPARE_PS), timeout=120)
+    # Everything that can be refused without touching the guest has been checked. Clearing the
+    # last attempt's leftovers comes before the space check: live, a setup cut off mid-copy left
+    # 19.2 GB in C:\$WINDOWS.~BT and 4.7 GB of media, and the retry was refused at 27.9 GB free.
+    _, out = await transport.exec_once(_encoded(PREPARE_PS), timeout=900)
+    if "PREPARED=1" not in out:
+        raise NtDriveError(
+            BACKEND_ERROR,
+            f"could not clear the previous attempt in {p.vm}: {out.strip()[-300:]}",
+            "the SSH account must be an administrator",
+        )
+    guest = await _probe(transport)
+    free = float(guest.get("FREE_GB") or 0)
+    if free < MIN_FREE_GB and not remove_old:
+        hint = "free space in the guest or grow the virtual disk"
+        if guest.get("WINDOWS_OLD") == "True":
+            hint = (
+                "C:\\Windows.old from an earlier upgrade holds about 20 GB: retry with "
+                "remove_windows_old=true (snapshot first, it is what Settings' go-back uses)"
+            )
+        raise NtDriveError(
+            INVALID_ARGS,
+            f"{p.vm} has {free:.1f} GB free on C:, the upgrade needs {MIN_FREE_GB:.0f}",
+            hint,
+        )
     with tempfile.TemporaryDirectory(prefix="ntdrive-upgrade-") as tmp:
         staged = {
             "job.json": json.dumps(job, indent=1),
