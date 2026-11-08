@@ -247,6 +247,7 @@ function RemoveTree([string]$path) {
 }
 function FreeGb { [math]::Round((Get-PSDrive C).Free / 1GB, 1) }
 try {
+  $extra['build_started'] = (Get-Date -Format o)
   New-Item -ItemType Directory -Force -Path $dl, $refs | Out-Null
   $rows = @(Import-Csv "$root\files.csv")
   $i = 0
@@ -285,7 +286,11 @@ try {
   if ($cabs.Count -gt 0) { $refArgs += "--ref=$refs\*.wim" }
   $image = "$media\sources\install.wim"
   State 'install_image' 'merging the install image, the slow step'
-  $null = Native $wimlib (@('export', $meta, '3', $image) + $refArgs)
+  # XPRESS, not the default LZX: this image is read once by setup on the same disk, and LZX
+  # compression on a 2-vCPU guest made this the longest step of the build (15 minutes).
+  $t0 = Get-Date
+  $null = Native $wimlib (@('export', $meta, '3', $image, '--compress=XPRESS') + $refArgs)
+  $extra['install_image_s'] = [int]((Get-Date) - $t0).TotalSeconds
   State 'winre' 'adding WinRE to the install image'
   $null = Native $wimlib (@('export', $meta, '2', "$root\winre.wim") + $refArgs)
   $null = Native $wimlib @('update', $image, '1', "--command=add $root\winre.wim \Windows\System32\Recovery\Winre.wim")
@@ -625,6 +630,9 @@ def _status(
         "updated": state.get("updated"),
         "debug": guest.get("DEBUG"),
     }
+    for key in ("build_started", "install_image_s", "debug_before"):
+        if key in state:
+            result[key] = state[key]
     phase = state.get("phase")
     if not job:
         result["status"] = "none"
