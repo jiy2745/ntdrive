@@ -38,6 +38,7 @@ import re
 import tempfile
 import time
 import urllib.request
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urlparse
 
@@ -198,6 +199,7 @@ $e = 'C:\$WINDOWS.~BT\Sources\Panther\setuperr.log'
 'SETUPERR=' + $(if (Test-Path -LiteralPath $e) { (Get-Content -LiteralPath $e -Tail 5) -join ' | ' } else { '' })
 $d = (bcdedit.exe /enum '{current}' | Select-String '^debug\s+(\S+)').Matches
 'DEBUG=' + $(if ($d) { $d[0].Groups[1].Value } else { '' })
+'BOOT=' + (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o')
 """
 
 PREPARE_PS = r"""
@@ -731,14 +733,37 @@ def _status(
             "lines of setuperr.log, and C:\\ntdrive-upgrade\\setup-logs the full logs"
         )
         return result
-    result["status"] = "stalled"
     result["setup_errors"] = errors
+    booted, updated = _when(guest.get("BOOT", "")), _when(str(state.get("updated", "")))
+    if booted is not None and updated is not None and booted > updated:
+        # The guest booted after the pipeline's last word and still runs the old build, with
+        # setup gone: setup was cut off (seen live: the VM was powered off mid-copy) or rolled
+        # back. Either way the next step is the same.
+        result["status"] = "interrupted"
+        result["note"] = (
+            "the guest rebooted before setup finished and still runs the old build (a power cut, "
+            "or setup rolled back). Call vm_upgrade again. If it ends here twice, setup_errors "
+            "and C:\\$WINDOWS.~BT\\Sources\\Panther\\setupact.log say why"
+        )
+        return result
+    result["status"] = "stalled"
     result["note"] = (
         "setup is not running and the guest is still on the old build. That is normal for a "
         "moment between setup's own steps, so poll again in a few minutes. If it stays, setup "
         "rolled back: C:\\$WINDOWS.~BT\\Sources\\Panther\\setupact.log says where it stopped"
     )
     return result
+
+
+def _when(text: str) -> datetime | None:
+    """A PowerShell round-trip time ('o' format, 7 fraction digits) as an aware datetime."""
+    match = re.match(
+        r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d+)?(Z|[+-]\d\d:\d\d)?$", text.strip()
+    )
+    if match is None:
+        return None
+    stamp = datetime.fromisoformat(match.group(1) + (match.group(2) or "").replace("Z", "+00:00"))
+    return stamp if stamp.tzinfo is not None else None
 
 
 def _setup_failed(code: str) -> bool:

@@ -430,7 +430,9 @@ Poll `vm_upgrade_status` every few minutes. It reads the pipeline's state in the
 - `failed`: `detail`, or `setup_exit` and `setup_errors` (the tail of setuperr.log). A
   `curl.exe exited` failure is an expired CDN link: call `vm_upgrade` again for fresh ones.
   Otherwise `snap_revert` to the pre-upgrade snapshot.
-- `interrupted`: the pipeline stopped mid-build (a reboot). Call `vm_upgrade` again.
+- `interrupted`: the pipeline stopped mid-build, or the guest rebooted before setup finished
+  and still runs the old build (seen live: the VM was powered off from outside mid-copy).
+  Call `vm_upgrade` again. It starts clean. If it ends here twice, read `setup_errors`.
 
 Do not judge the upgrade by setuperr.log alone: a healthy setup writes errors there too (a MIG
 CSIAgent "Invalid xml format" line appears mid-upgrade). Only `status` and setup's exit code

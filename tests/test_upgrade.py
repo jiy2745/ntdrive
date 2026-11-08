@@ -267,6 +267,20 @@ def test_status_reads_each_stage() -> None:
         ]
         == "stalled"
     )
+    # Booted after the pipeline's last word, setup gone, old build: setup was cut off (live, the
+    # VM was powered off from outside mid-copy).
+    cut = _status(
+        JOB=JOB,
+        BOOT="2026-11-08T08:15:02.0000000-08:00",
+        STATE=json.dumps({"phase": "setup", "updated": "2026-11-08T08:03:41.5681992-08:00"}),
+    )
+    assert cut["status"] == "interrupted" and "vm_upgrade again" in cut["note"]
+    early = _status(
+        JOB=JOB,
+        BOOT="2026-11-08T07:40:00.0000000-08:00",
+        STATE=json.dumps({"phase": "setup", "updated": "2026-11-08T08:03:41.5681992-08:00"}),
+    )
+    assert early["status"] == "stalled"
 
 
 async def test_status_says_offline_when_ssh_is_down(service: NtDriveService) -> None:
