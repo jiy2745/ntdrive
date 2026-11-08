@@ -39,6 +39,9 @@ repos:
     hooks:
       - id: prettier
         files: ^src/ntdrive/daemon/static/.*\.(html|css|js)$
+        # A pinned Node, so nodeenv never has to parse the list of the latest releases: it
+        # broke on a '0-alpha' entry there and turned CI red from 2026-11-06.
+        language_version: 22.11.0
 
   - repo: local
     hooks:
