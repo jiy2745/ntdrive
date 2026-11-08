@@ -222,6 +222,9 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 <!-- tools:start -->
 | Tool | Effect | What it does |
 |---|---|---|
+| `vm_upgrade_builds` | read | List Windows 11 Insider Preview builds (amd64) that vm_upgrade can install, newest first, from the UUP dump API. |
+| `vm_upgrade` | destructive | Upgrade a running guest in place to a Windows Insider build. The guest downloads the build from Microsoft, builds setup media and runs setup.exe as SYSTEM, which reboots it several times over 30 to 90 minutes. Returns at once: poll vm_upgrade_status. Edition and language follow the guest. Take a snapshot first, and kd_detach (refused while kd is attached). Needs 30 GB free on C:. confirm=true. |
+| `vm_upgrade_status` | read | Where a vm_upgrade stands: building (with the step), upgrading, offline (setup is between reboots), done, failed (with setup's own error lines), interrupted or none. When done it names the steps that finish the job: kd_setup_guest, vm_reboot, kd_attach, a snapshot. |
 | `vm_list` | read | List registered VMs with power, debugger and terminal state. |
 | `vm_state` | read | Power, debugger and terminal state of one VM. |
 | `vm_wait_ready` | read | Wait until the guest is back up: block until SSH answers, or the timeout passes. For after a reboot or a bugcheck's auto-restart, so no manual polling loop is needed. |
@@ -314,7 +317,8 @@ names a saved state Workstation cannot restore. What vmrun accepts is recorded i
   session, by the agent or by a person, so passwords typed interactively land there too.
 - `kd_exec` executes any debugger command, and kd's `.shell` runs commands on the host. The
   policy file can set `kd_exec: deny` for agents that should not have that.
-- Destructive actions (`snap_delete`, `vm_stop mode=hard` or `kill`, `vm_reboot mode=hard`) require
+- Destructive actions (`snap_delete`, `vm_stop mode=hard` or `kill`, `vm_reboot mode=hard`,
+  `vm_upgrade`) require
   `confirm=true` and go
   through a policy gate you can tune in `policy.yaml`.
 

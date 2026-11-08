@@ -258,7 +258,8 @@ Things that bit us에 적혀 있습니다.
   비밀번호도 거기에 남습니다.
 - `kd_exec`는 어떤 디버거 명령이든 실행하고, kd의 `.shell`은 호스트에서 명령을 실행합니다. 그 권한을
   주지 말아야 할 에이전트에는 정책 파일에서 `kd_exec: deny`를 설정할 수 있습니다.
-- 파괴적인 동작 (`snap_delete`, `vm_stop mode=hard` 또는 `kill`, `vm_reboot mode=hard`) 은
+- 파괴적인 동작 (`snap_delete`, `vm_stop mode=hard` 또는 `kill`, `vm_reboot mode=hard`,
+  `vm_upgrade`) 은
   `confirm=true`를 요구하고 `policy.yaml`에서 조정할 수 있는 정책 게이트를 거칩니다.
 
 ## 문서 지도

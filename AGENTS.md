@@ -46,7 +46,8 @@ Requirements live in `PRD.md`. Setup is in `README.md`.
   either inline or as the name of an environment variable. Environment variables are preferred.
   Mask them in anything that is logged (`_mask_argv` in the VMware adapter, `redact` in
   `kd_setup_guest`).
-- Destructive tools (`snap_delete`, `vm_stop mode=hard` or `kill`, `vm_reboot mode=hard`) require
+- Destructive tools (`snap_delete`, `vm_stop mode=hard` or `kill`, `vm_reboot mode=hard`,
+  `vm_upgrade`) require
   `confirm=true` and go through the policy gate in `ntdrive.core.policy`. No other tool has a
   `confirm` argument.
 - Anything that becomes a command line in the guest (bcdedit arguments from `kd_setup_guest`)
@@ -249,3 +250,19 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
 - `uv run` (when pyproject changed) and `uv tool install` rewrite `ntdrive-mcp.exe`, which fails
   with os error 32 while Claude Code has the MCP server open. Close Claude Code for those, or
   run the checks with `uv run --no-sync`.
+- The in-place upgrade pipeline (`core/tools/upgrade.py`, 2026-11-08/09, 29695 to 29698) hit
+  each of these before it worked. DISM cannot build a UUP install image, even with `/SWMFile`
+  (0x80070714): the image references file data in the other package ESDs and, for in-box
+  drivers, in the FoD CABs, so wimlib does the merge with every ESD and one captured reference
+  image per CAB as `--ref`. Windows PowerShell 5.1 turns a native program's stderr into an
+  error record, and with `$ErrorActionPreference = 'Stop'` wimlib died in its first second on
+  its own progress output: the guest scripts judge native programs by exit code only. CAB
+  members carry long WinSxS names that PowerShell's file cmdlets cannot remove, so the work
+  folder is short (`C:\nx\N`) and `rd /s /q` deletes it. A healthy setup writes errors to
+  setuperr.log, so status never treats that file as a verdict. A `schtasks /sc once /st 23:59`
+  task fires again at 23:59: the pipeline's task has no trigger at all. `file_push` ran at about
+  1.75 MB/s, which is why the guest downloads the build itself.
+- Bash in this repo's tooling expands `$_` and `\$f` in places you would not expect (a `uv`
+  shim re-expanded `$_` inside single quotes, and `"C:\uup\$f"` became the literal path
+  `C:\uup$f`). Pass guest PowerShell as `-EncodedCommand` (`_encoded` in `upgrade.py`) or
+  through a pushed script file, never as an inline string with `$_`.

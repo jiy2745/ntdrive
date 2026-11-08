@@ -388,6 +388,66 @@ name that already exists is otherwise a report, not an error: `created=false` wi
 facts, so a milestone checkpoint call is safe to repeat. `replace=true` deletes and retakes, in
 one suspend-resume cycle when the suspend flow is needed.
 
+### Upgrade a guest to a newer Insider build
+
+Bug bounty work wants the newest Canary build. Do not ask for a new VM per build: `vm_upgrade`
+upgrades the existing guest in place, and its accounts, SSH, encryption and vTPM survive.
+
+Before you start:
+
+1. Make sure the VM is yours to take for an hour or more. `sys_state` shows whether another
+   session holds kd or a terminal on it, and a VM other sessions stage work on is not yours to
+   upgrade even when nothing is attached. Ask the operator when in doubt. The upgrade reboots
+   the guest several times and ends on a different build.
+2. Take a snapshot to come back to: `snap_take name=pre-upgrade-<build>` (a running encrypted VM
+   needs `allow_suspend=true`). A failed or unwanted upgrade is then one `snap_revert` away.
+3. `kd_detach`. The upgrade refuses while kd is attached, because setup boots its own
+   environment several times and KDNET across those boots can NMI the guest.
+4. Check the target: `vm_upgrade_builds` lists the amd64 Insider builds, newest first.
+
+Then `vm_upgrade vm=<vm> build=latest confirm=true` (or `build=29698`). It returns at once with
+`from_build`, `target_build`, `files` and `download_bytes`, after refusing anything it can see
+will fail: kd attached, under 30 GB free on C:, a target not newer than the guest, or an edition
+or language the build does not have (both follow the guest, an in-place upgrade cannot change
+them).
+
+Poll `vm_upgrade_status` every few minutes. It reads the pipeline's state in the guest:
+
+- `building` with `phase` and `detail`: `download` (Microsoft CDN, a few minutes), `media`,
+  `refs` (one reference image per FoD CAB), `install_image` (the slow step, 15 minutes on 2 vCPUs),
+  `winre`, `cleanup`.
+- `upgrading`: setup.exe is running, still on the old build. The copy phase took more than 15
+  minutes on 2 vCPUs.
+- `offline`: SSH does not answer. Normal while setup applies the build between reboots.
+  `vm_wait_ready` blocks until SSH is back if you would rather not poll.
+- `stalled`: setup is not running and the build is still old. Normal for a moment between its
+  steps. If it stays for more than about ten minutes, setup rolled back.
+- `done`: the guest runs the target build. Follow `next`.
+- `failed`: `detail`, or `setup_exit` and `setup_errors` (the tail of setuperr.log). A
+  `curl.exe exited` failure is an expired CDN link: call `vm_upgrade` again for fresh ones.
+  Otherwise `snap_revert` to the pre-upgrade snapshot.
+- `interrupted`: the pipeline stopped mid-build (a reboot). Call `vm_upgrade` again.
+
+Do not judge the upgrade by setuperr.log alone: a healthy setup writes errors there too (a MIG
+CSIAgent "Invalid xml format" line appears mid-upgrade). Only `status` and setup's exit code
+decide.
+
+Finishing, in this order, as `next` lists them:
+
+1. `kd_setup_guest`. Debugging was switched off for setup, and setup rewrites the boot entry.
+2. `vm_reboot mode=soft`, then `kd_attach` and `kd_symcheck` for the new kernel.
+3. `snap_take name=base-<build>` as the new starting point.
+4. `file_delete C:\ntdrive-upgrade\media recurse=true` frees about 5 GB in the guest.
+
+The VM keeps its name in `vms.yaml` (renaming is the operator's job). Each upgrade on top of a
+snapshot leaves a delta disk the size of the changed OS on the host, so delete snapshots of
+builds nobody needs any more. To speed the build step up, give the VM more vCPUs with
+`vm_config cpus=` while it is off: wimlib uses every core.
+
+Never fetch or run the uupdump conversion pack (its aria2c, 7-Zip and converter scripts) to make
+an ISO instead. `vm_upgrade` takes only the file list from the UUP dump API, refuses any URL that
+is not on a microsoft.com host and checks every file's SHA-1.
+
 ## Files
 
 - `file_push` and `file_pull` use SFTP when the guest has OpenSSH and fall back to VMware Tools
@@ -466,7 +526,8 @@ one suspend-resume cycle when the suspend flow is needed.
     `term_read` to watch it, `term_send keys=["{ctrl+c}"] enter=false` to stop it.
   - `kd_exec`: `truncated: true` per command, the full text is in the transcript (`kd_log_tail`,
     path in `kd_state.log_path`).
-- Only `snap_delete`, `vm_stop mode=hard` or `kill` and `vm_reboot mode=hard` take `confirm=true`.
+- Only `snap_delete`, `vm_stop mode=hard` or `kill`, `vm_reboot mode=hard` and `vm_upgrade` take
+  `confirm=true`.
   No other tool has a `confirm` argument, and passing one is an `invalid_args` error.
 - `unauthorized` or `daemon_unavailable` means the daemon was restarted or is down. The client
   re-reads `daemon.json` and retries once by itself, so a second call normally works. Live kd and
