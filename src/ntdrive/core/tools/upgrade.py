@@ -645,22 +645,28 @@ async def vm_upgrade_status(service: NtDriveService, p: UpgradeStatusParams) -> 
     cfg = service.vm_cfg(p.vm)
     service.ensure_not_frozen(p.vm)
     await service.ensure_running(cfg)
+    offline = {
+        "vm": p.vm,
+        "status": "offline",
+        "note": (
+            "SSH does not answer, which is normal while setup applies the build between "
+            "reboots. Poll again in a few minutes. vm_wait_ready blocks until SSH is back"
+        ),
+    }
     try:
         reachable, _ip = await service.ssh_reachable(cfg, timeout=15)
     except NtDriveError:
         # In setup's own boot environment VMware Tools report no address at all.
         reachable = False
     if not reachable:
-        return {
-            "vm": p.vm,
-            "status": "offline",
-            "note": (
-                "SSH does not answer, which is normal while setup applies the build between "
-                "reboots. Poll again in a few minutes. vm_wait_ready blocks until SSH is back"
-            ),
-        }
-    transport = await service.transport(cfg)
-    guest = await _probe(transport)
+        return offline
+    try:
+        transport = await service.transport(cfg)
+        guest = await _probe(transport)
+    except NtDriveError as exc:
+        # Seen live: the port answered, then the probe failed as setup took the guest down for
+        # its first reboot. That is the same state as no answer at all, not an error.
+        return {**offline, "probe_error": exc.message}
     job = _json_or_empty(guest.get("JOB", ""))
     state = _json_or_empty(guest.get("STATE", ""))
     return _status(p.vm, guest, job, state)

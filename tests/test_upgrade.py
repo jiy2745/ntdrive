@@ -304,3 +304,22 @@ async def test_upgrade_names_windows_old_and_removes_it_when_asked(
     job = json.loads(fake_transport.files[f"{upgrade.GUEST_ROOT}\\job.json"])
     assert job["remove_windows_old"] is True and job["min_free_gb"] == upgrade.MIN_FREE_GB
     assert "robocopy.exe C:\\nx-empty C:\\Windows.old /MIR /B" in upgrade.PIPELINE_PS
+
+
+async def test_status_says_offline_when_the_probe_dies_mid_reboot(
+    service: NtDriveService, fake_transport: FakeTransport
+) -> None:
+    await service.call("vm_start", {"vm": "win11-dev"})
+
+    async def dead_probe(transport: Any) -> dict[str, str]:
+        raise NtDriveError("timeout", "the guest did not answer the SSH command within 90s")
+
+    import ntdrive.core.tools.upgrade as mod
+
+    original = mod._probe
+    mod._probe = dead_probe
+    try:
+        status = await service.call("vm_upgrade_status", {"vm": "win11-dev"})
+    finally:
+        mod._probe = original
+    assert status["status"] == "offline" and "90s" in status["probe_error"]
