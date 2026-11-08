@@ -409,11 +409,15 @@ Then `vm_upgrade vm=<vm> build=latest confirm=true` (or `build=29698`). It retur
 `from_build`, `target_build`, `files` and `download_bytes`, after refusing anything it can see
 will fail: kd attached, under 30 GB free on C:, a target not newer than the guest, or an edition
 or language the build does not have (both follow the guest, an in-place upgrade cannot change
-them).
+them). Every upgrade leaves the previous build in `C:\Windows.old` (about 20 GB), so the next
+one is usually refused for space and the refusal says so: pass `remove_windows_old=true` (you
+have a snapshot to go back to, which is what Windows.old was for). The deletion then runs as the
+pipeline's first step, phase `windows_old`, in about a minute.
 
 Poll `vm_upgrade_status` every few minutes. It reads the pipeline's state in the guest:
 
-- `building` with `phase` and `detail`: `download` (Microsoft CDN, a few minutes), `media`,
+- `building` with `phase` and `detail`: `windows_old` (only with `remove_windows_old`),
+  `download` (Microsoft CDN, a few minutes), `media`,
   `refs` (one reference image per FoD CAB), `install_image` (the slow step, 15 minutes on 2 vCPUs),
   `winre`, `cleanup`.
 - `upgrading`: setup.exe is running, still on the old build. The copy phase took more than 15
