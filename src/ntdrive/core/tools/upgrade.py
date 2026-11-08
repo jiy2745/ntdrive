@@ -70,7 +70,16 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 _SHA1 = re.compile(r"^[0-9a-f]{40}$")
 _LANG = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})*$")
 _INSIDER_TITLE = "Windows 11 Insider Preview"
-_BUILDING = {"download", "tools", "media", "refs", "install_image", "winre", "cleanup"}
+_BUILDING = {
+    "windows_old",
+    "download",
+    "tools",
+    "media",
+    "refs",
+    "install_image",
+    "winre",
+    "cleanup",
+}
 
 
 # -- host-side HTTP, kept as module functions so tests can replace them ----------------------
@@ -177,6 +186,7 @@ $lcid = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\Language')
 'LANG=' + [Globalization.CultureInfo]::GetCultureInfo([Convert]::ToInt32($lcid, 16)).Name.ToLower()
 'FREE_GB=' + [math]::Round((Get-PSDrive C).Free / 1GB, 1)
 'CPUS=' + (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+'WINDOWS_OLD=' + (Test-Path 'C:\Windows.old')
 $t = Get-ScheduledTask -TaskName 'ntdrive-upgrade' -ErrorAction SilentlyContinue
 'TASK=' + $(if ($t) { [string]$t.State } else { 'none' })
 'SETUP_RUNNING=' + [bool](Get-Process SetupHost -ErrorAction SilentlyContinue)
@@ -248,6 +258,25 @@ function RemoveTree([string]$path) {
 function FreeGb { [math]::Round((Get-PSDrive C).Free / 1GB, 1) }
 try {
   $extra['build_started'] = (Get-Date -Format o)
+  if ($job.remove_windows_old -and (Test-Path 'C:\Windows.old')) {
+    # Its files belong to TrustedInstaller. takeown plus icacls rewrites the ACL of every file
+    # and had not finished after 40 minutes on a 21 GB Windows.old (2 vCPUs). robocopy in
+    # backup mode (/B) mirrors an empty folder over it, which skips the ACLs and took 60 s.
+    State 'windows_old' 'deleting C:\Windows.old, the previous build'
+    $t0 = Get-Date
+    New-Item -ItemType Directory -Force -Path 'C:\nx-empty' | Out-Null
+    $ErrorActionPreference = 'Continue'
+    robocopy.exe C:\nx-empty C:\Windows.old /MIR /B /MT:16 /R:0 /W:0 /NFL /NDL /NJH /NJS /NP | Out-Null
+    $rc = $LASTEXITCODE
+    cmd.exe /c 'rd /s /q C:\Windows.old' 2>&1 | Out-Null
+    cmd.exe /c 'rd /s /q C:\nx-empty' 2>&1 | Out-Null
+    $ErrorActionPreference = 'Stop'
+    if ($rc -ge 8) { throw "robocopy could not clear C:\Windows.old (exit $rc)" }
+    $extra['windows_old_s'] = [int]((Get-Date) - $t0).TotalSeconds
+    if (Test-Path 'C:\Windows.old') { throw 'C:\Windows.old could not be deleted completely' }
+  }
+  $free = FreeGb
+  if ($free -lt $job.min_free_gb) { throw "only $free GB free on C:, the upgrade needs $($job.min_free_gb)" }
   New-Item -ItemType Directory -Force -Path $dl, $refs | Out-Null
   $rows = @(Import-Csv "$root\files.csv")
   $i = 0
@@ -422,6 +451,14 @@ class UpgradeParams(VmParams, ConfirmMixin):
             "It must be newer than the guest, setup cannot downgrade"
         ),
     )
+    remove_windows_old: bool = Field(
+        default=False,
+        description=(
+            "Delete C:\\Windows.old first, the previous build an earlier upgrade left behind "
+            "(about 20 GB, so a second upgrade in a row is short of space without this). "
+            "Settings' go-back uses it, so only for a guest whose way back is a snapshot"
+        ),
+    )
 
 
 class UpgradeStatusParams(VmParams):
@@ -491,13 +528,21 @@ async def vm_upgrade(service: NtDriveService, p: UpgradeParams) -> dict[str, Any
             BACKEND_ERROR,
             f"could not read the guest's edition and language ({edition_id!r}, {lang!r})",
         )
+    # Deleting Windows.old is the pipeline's first step, not part of this call (it can take
+    # minutes), and the pipeline checks the free space again afterwards.
+    remove_old = p.remove_windows_old and guest.get("WINDOWS_OLD") == "True"
     free = float(guest.get("FREE_GB") or 0)
-    if free < MIN_FREE_GB:
+    if free < MIN_FREE_GB and not remove_old:
+        hint = "free space in the guest or grow the virtual disk"
+        if guest.get("WINDOWS_OLD") == "True":
+            hint = (
+                "C:\\Windows.old from an earlier upgrade holds about 20 GB: retry with "
+                "remove_windows_old=true (snapshot first, it is what Settings' go-back uses)"
+            )
         raise NtDriveError(
             INVALID_ARGS,
             f"{p.vm} has {free:.1f} GB free on C:, the upgrade needs {MIN_FREE_GB:.0f}",
-            "free space in the guest (Disk Cleanup removes an old C:\\Windows.old) or grow the "
-            "virtual disk",
+            hint,
         )
 
     search = _INSIDER_TITLE if p.build == "latest" else p.build.split(".")[0]
@@ -540,7 +585,9 @@ async def vm_upgrade(service: NtDriveService, p: UpgradeParams) -> dict[str, Any
         "lang": lang,
         "metadata": metadata,
         "from_build": f"{current}.{guest.get('UBR', '')}",
+        "min_free_gb": MIN_FREE_GB,
         "min_free_setup_gb": MIN_FREE_SETUP_GB,
+        "remove_windows_old": remove_old,
         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     await transport.exec_once(_encoded(PREPARE_PS), timeout=120)
@@ -575,6 +622,7 @@ async def vm_upgrade(service: NtDriveService, p: UpgradeParams) -> dict[str, Any
         "download_bytes": total,
         "cpus": guest.get("CPUS"),
         "free_gb": free,
+        "removes_windows_old": remove_old,
         "note": (
             "started in the guest. Poll vm_upgrade_status every few minutes: building takes 20 "
             "to 40 minutes, then setup reboots the guest several times. Terminal sessions drop "
@@ -630,7 +678,7 @@ def _status(
         "updated": state.get("updated"),
         "debug": guest.get("DEBUG"),
     }
-    for key in ("build_started", "install_image_s", "debug_before"):
+    for key in ("build_started", "windows_old_s", "install_image_s", "debug_before"):
         if key in state:
             result[key] = state[key]
     phase = state.get("phase")

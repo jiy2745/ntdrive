@@ -100,6 +100,7 @@ def _probe_output(**overrides: str) -> str:
         "JOB": "",
         "SETUPERR": "",
         "DEBUG": "Yes",
+        "WINDOWS_OLD": "False",
     }
     values.update(overrides)
     return "".join(f"{k}={v}\r\n" for k, v in values.items())
@@ -277,3 +278,29 @@ async def test_status_says_offline_when_ssh_is_down(service: NtDriveService) -> 
     service.ssh_probe = down
     status = await service.call("vm_upgrade_status", {"vm": "win11-dev"})
     assert status["status"] == "offline"
+
+
+async def test_upgrade_names_windows_old_and_removes_it_when_asked(
+    service: NtDriveService,
+    fake_transport: FakeTransport,
+    uup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second upgrade in a row is short of space: the first one left Windows.old behind."""
+    await service.call("vm_start", {"vm": "win11-dev"})
+    probe = upgrade._encoded(upgrade.PROBE_PS)
+    fake_transport.exec_responses[probe] = _probe_output(FREE_GB="27.7", WINDOWS_OLD="True")
+    with pytest.raises(NtDriveError) as err:
+        await service.call("vm_upgrade", {"vm": "win11-dev", "confirm": True})
+    assert "remove_windows_old=true" in err.value.hint
+    assert not [c for c in fake_transport.exec_log if "takeown" in _decoded(c)]
+
+    fake_transport.exec_responses[upgrade._encoded(upgrade.START_PS)] = "STARTED=1\r\n"
+    started = await service.call(
+        "vm_upgrade", {"vm": "win11-dev", "confirm": True, "remove_windows_old": True}
+    )
+    # The deletion takes many minutes, so it is the pipeline's first step, not part of the call.
+    assert started["removes_windows_old"] is True
+    job = json.loads(fake_transport.files[f"{upgrade.GUEST_ROOT}\\job.json"])
+    assert job["remove_windows_old"] is True and job["min_free_gb"] == upgrade.MIN_FREE_GB
+    assert "robocopy.exe C:\\nx-empty C:\\Windows.old /MIR /B" in upgrade.PIPELINE_PS
