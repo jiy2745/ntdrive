@@ -234,10 +234,12 @@ and the ones that need `confirm=true` say so in their arguments. Arguments are i
 | `vm_suspend` | additive | Suspend the VM to disk. |
 | `vm_resume` | additive | Resume a suspended VM (same as vm_start). |
 | `vm_config` | additive | Read or change the VM hardware in the vmx: cpus, memory_mb, nic. Without arguments it reports the current values. A change needs the VM powered off. |
-| `snap_list` | read | Snapshot tree of a VM plus the current snapshot and stored metadata. |
+| `snap_list` | read | Snapshot tree of a VM plus the current snapshot and stored metadata. retention classes each snapshot kept, temporary, expired or unclassified, and disk gives the free space on the VM drive and the expired snapshots snap_prune would delete. |
 | `snap_take` | additive | Take a snapshot (memory included while running), record description and kd state, and return the snapshot list. A name that already exists is reported with created=false instead of erroring, and replace=true deletes it and retakes. |
 | `snap_revert` | destructive | Revert to a snapshot: detach kd, revert, start, reattach kd, reopen terminals. The guest comes back running, not frozen at a kd> prompt, so the file_push and con_run that follow a revert work straight away (kd_break freezes it again when that is what you want). |
 | `snap_delete` | destructive | Delete a snapshot (and optionally its children). Needs confirm=true. |
+| `snap_keep` | additive | Mark a snapshot kept (never pruned) or temporary (expires, then snap_prune may delete it). Use it on a snapshot snap_list calls unclassified, or to pin a temporary one you still need. |
+| `snap_prune` | destructive | Delete the expired temporary snapshots of a VM (snap_list names them under disk.prune_candidates) and report the space it got back. Never touches kept, unclassified or current snapshots. Needs confirm=true. |
 | `kd_setup_host` | additive | Prepare the host side of the kd transport: serial adds the named-pipe COM port to the vmx (VM must be off), net checks the host firewall for kd.exe and repairs it through one UAC prompt. |
 | `kd_setup_guest` | additive | Enable kernel debugging in the guest with bcdedit over SSH (serial or KDNET per kd_transport) and save the KDNET port and key to vms.yaml. Settings that already point at this host are read back, not rewritten. |
 | `kd_attach` | additive | Start kd.exe for the VM and wait until the target connects. |
@@ -318,7 +320,7 @@ names a saved state Workstation cannot restore. What vmrun accepts is recorded i
 - `kd_exec` executes any debugger command, and kd's `.shell` runs commands on the host. The
   policy file can set `kd_exec: deny` for agents that should not have that.
 - Destructive actions (`snap_delete`, `vm_stop mode=hard` or `kill`, `vm_reboot mode=hard`,
-  `vm_upgrade`) require
+  `vm_upgrade`, `snap_prune`) require
   `confirm=true` and go
   through a policy gate you can tune in `policy.yaml`.
 

@@ -95,7 +95,7 @@ kd_attach vm=win11-dev                     -> no key saved: reads the guest's KD
 kd_break vm=win11-dev                      -> broken, target_info filled in
 kd_exec vm=win11-dev cmd="!process 0 0"
 kd_go vm=win11-dev
-snap_take vm=win11-dev name=base-kd
+snap_take vm=win11-dev name=base-kd keep=true
 ```
 
 With `kd_transport: serial` (a VMware named pipe, no firewall and no prompt) the flow is the same
@@ -388,6 +388,29 @@ name that already exists is otherwise a report, not an error: `created=false` wi
 facts, so a milestone checkpoint call is safe to repeat. `replace=true` deletes and retakes, in
 one suspend-resume cycle when the suspend flow is needed.
 
+### Snapshots fill the host drive: mark what you keep, prune the rest
+
+Every snapshot freezes a delta disk, and the chain grows with every write the guest makes. On the
+live host nine forgotten snapshots held about 200 GB and left the drive 92% full. So:
+
+- A snapshot you take is **temporary by default**: it expires after `host.snapshot_ttl_days` (7)
+  and `snap_prune` may then delete it, whoever took it. Pass `keep=true` only for a state you
+  will come back to past this experiment (a clean base, a new build), and `ttl_days` when a
+  temporary one must live longer.
+- Reuse one name per checkpoint (`replace=true`) instead of a new name per attempt.
+- Read the `disk` block and the `note` in the `snap_take` result. `snap_take` refuses with
+  `error.reason=host_disk_low` below `host.snapshot_min_free_gb` (40 GB) and names the temporary
+  snapshots in its hint. `sys_health` lists the same condition.
+- `snap_list` shows each snapshot's class: kept, temporary, expired or unclassified. Clean up
+  with `snap_prune vm=<vm> confirm=true`, which deletes only expired temporary snapshots and never
+  the current one. `include_unexpired=true` takes every temporary one, when the drive is already
+  short. A running encrypted VM needs `allow_suspend=true` for memory snapshots.
+- **Unclassified snapshots predate the flag or were taken outside ntdrive, and are never
+  pruned.** Several sessions share a VM and ntdrive does not know who took what. Ask the operator
+  before deleting one, or classify it with `snap_keep`. The same goes for a kept snapshot.
+- Deleting a snapshot merges its delta into the next one, so the space it returns is not the
+  size of its file. `snap_prune` reports `freed_gb` as measured.
+
 ### Upgrade a guest to a newer Insider build
 
 Bug bounty work wants the newest Canary build. Do not ask for a new VM per build: `vm_upgrade`
@@ -447,7 +470,10 @@ Finishing, in this order, as `next` lists them:
 
 1. `kd_setup_guest`. Debugging was switched off for setup, and setup rewrites the boot entry.
 2. `vm_reboot mode=soft`, then `kd_attach` and `kd_symcheck` for the new kernel.
-3. `snap_take name=base-<build>` as the new starting point.
+3. `snap_take name=base-<build> keep=true` as the new starting point. An upgrade rewrites most
+   of the disk, so each snapshot on either side of it holds 20 to 30 GB of delta. Once the new
+   base works, ask the operator before deleting the older bases, and mark the pre-upgrade
+   snapshot temporary (`snap_keep name=pre-upgrade-<build> keep=false`) so it expires.
 4. `file_delete C:\ntdrive-upgrade\media recurse=true` frees about 5 GB in the guest.
 
 The VM keeps its name in `vms.yaml` (renaming is the operator's job). Each upgrade on top of a
@@ -537,7 +563,7 @@ is not on a microsoft.com host and checks every file's SHA-1.
     `term_read` to watch it, `term_send keys=["{ctrl+c}"] enter=false` to stop it.
   - `kd_exec`: `truncated: true` per command, the full text is in the transcript (`kd_log_tail`,
     path in `kd_state.log_path`).
-- Only `snap_delete`, `vm_stop mode=hard` or `kill`, `vm_reboot mode=hard` and `vm_upgrade` take
+- Only `snap_delete`, `vm_stop mode=hard` or `kill`, `vm_reboot mode=hard`, `vm_upgrade` and `snap_prune` take
   `confirm=true`.
   No other tool has a `confirm` argument, and passing one is an `invalid_args` error.
 - `unauthorized` or `daemon_unavailable` means the daemon was restarted or is down. The client

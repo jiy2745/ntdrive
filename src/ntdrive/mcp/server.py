@@ -32,7 +32,7 @@ INSTRUCTIONS = (
     "guest is frozen, so call kd_go before term_*, file_* or con_screenshot. snap_revert and "
     "vm_reboot drop terminal sessions and reattach the debugger for you, and reopened "
     "terminals get new session ids (term_list). Only snap_delete, vm_stop mode=hard or kill, "
-    "vm_reboot mode=hard and vm_upgrade take confirm=true, no other tool has a confirm "
+    "vm_reboot mode=hard, vm_upgrade and snap_prune take confirm=true, no other tool has a confirm "
     "argument. "
     "Passwords and KDNET keys never go into tool arguments."
 )

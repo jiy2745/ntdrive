@@ -48,6 +48,11 @@ class HostConfig(BaseModel):
     log_dir: str = ""
     tool_timeout_max: int = 600
     ssh_connect_timeout: float = 10.0
+    # snap_take refuses below this much free space on the drive that holds the VM, because a
+    # snapshot chain grows on every write and a full drive pauses the guest mid-experiment.
+    snapshot_min_free_gb: float = 40.0
+    # A snapshot taken without keep=true expires after this many days and snap_prune may delete it.
+    snapshot_ttl_days: float = 7.0
 
     @property
     def bind_host(self) -> str:

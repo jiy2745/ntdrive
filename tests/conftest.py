@@ -539,6 +539,18 @@ class FakeKdProcess:
 # -- fixtures --------------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def plenty_of_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The VM drive has room, so snap_take and sys_health never depend on the test machine's disk.
+
+    A CI runner can have less free space than host.snapshot_min_free_gb. test_snap_retention
+    replaces this with its own value.
+    """
+    from ntdrive.core.tools import snap
+
+    monkeypatch.setattr(snap, "disk_free", lambda path: 500 * 10**9)
+
+
 @pytest.fixture
 def vmx_path(tmp_path: Path) -> str:
     vmx = tmp_path / "win11-dev" / "win11-dev.vmx"

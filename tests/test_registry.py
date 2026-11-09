@@ -19,6 +19,8 @@ EXPECTED = {
     "snap_take",
     "snap_revert",
     "snap_delete",
+    "snap_keep",
+    "snap_prune",
     "kd_setup_host",
     "kd_setup_guest",
     "kd_attach",

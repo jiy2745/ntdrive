@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ntdrive.config import VmConfig
 from ntdrive.core.registry import tool
 from ntdrive.core.state import PowerState
+from ntdrive.core.tools import snap as _snap
 from ntdrive.core.tools.common import NoParams
 from ntdrive.errors import NtDriveError
 from ntdrive.hypervisor.vmx import saved_state, saved_state_is_stale, vmx_settings
@@ -239,6 +240,24 @@ async def _probe_vm(
     }
 
 
+def _disk_issues(service: NtDriveService, cfg: VmConfig) -> list[str]:
+    """The VM drive is below the snapshot threshold, so the next snap_take will be refused."""
+    try:
+        free_gb = _snap.disk_free(cfg.vmx) / 1e9
+    except OSError:
+        return []  # a missing vmx is reported by the config checks
+    minimum = service.config.host.snapshot_min_free_gb
+    if free_gb >= minimum:
+        return []
+    msg = (
+        f"the drive that holds the VM has {free_gb:.1f} GB free, below "
+        f"host.snapshot_min_free_gb ({minimum} GB), so snap_take refuses: snap_list shows "
+        "which snapshots are temporary or expired and snap_prune confirm=true deletes the "
+        "expired ones"
+    )
+    return [msg]
+
+
 async def _vm_health(
     service: NtDriveService,
     name: str,
@@ -247,6 +266,7 @@ async def _vm_health(
     power: PowerState | NtDriveError,
 ) -> dict[str, Any]:
     issues = _config_issues(service, cfg)
+    issues.extend(_disk_issues(service, cfg))
     live = await _probe_vm(service, cfg, issues, firewall, power)
     return {
         "name": name,

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import shutil
 import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
@@ -19,6 +21,7 @@ from ntdrive.core.tools.common import ConfirmMixin, VmParams
 from ntdrive.errors import (
     BACKEND_ERROR,
     REASON_CONFIG_UNREADABLE,
+    REASON_DISK_LOW,
     REASON_ENCRYPTED_LIVE,
     REASON_SNAPSHOT_EXISTS,
     REASON_SNAPSHOT_MISSING,
@@ -185,6 +188,98 @@ def _raise_if_resume_failed(detail: dict[str, Any], done: str, result: dict[str,
     )
 
 
+# --- Retention -----------------------------------------------------------------------------------
+# A snapshot chain grows on every guest write, so snapshots that nobody deletes fill the host
+# drive. Each snapshot ntdrive takes is recorded as kept (keep=true, a base to come back to) or
+# temporary (expires after host.snapshot_ttl_days). snap_prune deletes expired temporary ones.
+# A snapshot with no recorded keep flag (taken before this existed, or outside ntdrive) is
+# "unclassified" and is never pruned: ntdrive cannot tell whose it is, and several sessions can
+# share one VM. snap_keep classifies it.
+
+_GB = 1e9
+_DAY = 86400.0
+
+
+def disk_free(path: str) -> int:
+    """Free bytes on the drive that holds `path`. A function so tests can replace it."""
+    return shutil.disk_usage(os.path.dirname(path) or ".").free
+
+
+def _vm_dir_bytes(vmx: str) -> int:
+    """Bytes in the VM folder: base disk, delta disks and memory images together."""
+    total = 0
+    with contextlib.suppress(OSError):
+        for entry in os.scandir(os.path.dirname(vmx) or "."):
+            with contextlib.suppress(OSError):
+                if entry.is_file():
+                    total += entry.stat().st_size
+    return total
+
+
+def _classify(entry: dict[str, Any] | None, now: float) -> dict[str, Any]:
+    """Retention facts for one snapshot from its recorded metadata."""
+    if not entry or "keep" not in entry:
+        return {"keep": None, "class": "unclassified"}
+    out: dict[str, Any] = {"keep": bool(entry["keep"])}
+    taken = entry.get("taken_at")
+    if taken:
+        out["age_days"] = round((now - float(taken)) / _DAY, 1)
+    if entry["keep"]:
+        out["class"] = "kept"
+        return out
+    expires = entry.get("expires_at")
+    out["expires_in_days"] = round((float(expires) - now) / _DAY, 1) if expires else None
+    out["class"] = "expired" if expires is not None and now >= float(expires) else "temporary"
+    return out
+
+
+def _retention(
+    service: NtDriveService, cfg: VmConfig, names: list[str], current: str | None
+) -> dict[str, Any]:
+    """Disk facts plus the per-snapshot classification and the prune candidates."""
+    now = time.time()
+    meta = service.load_snapshot_meta(cfg.name)
+    rows = {name: _classify(meta.get(name), now) for name in names}
+    free = disk_free(cfg.vmx)
+    minimum = service.config.host.snapshot_min_free_gb
+    counts: dict[str, int] = {"kept": 0, "temporary": 0, "expired": 0, "unclassified": 0}
+    for row in rows.values():
+        counts[row["class"]] += 1
+    # The current snapshot is what the VM runs from and is most likely the one being reverted
+    # to, so it is never a candidate even when expired.
+    candidates = [n for n, r in rows.items() if r["class"] == "expired" and n != current]
+    disk: dict[str, Any] = {
+        "host_free_gb": round(free / _GB, 1),
+        "min_free_gb": minimum,
+        "vm_folder_gb": round(_vm_dir_bytes(cfg.vmx) / _GB, 1),
+        "snapshots": len(names),
+        **counts,
+        "prune_candidates": candidates,
+    }
+    return {"rows": rows, "disk": disk, "low": free / _GB < minimum, "free": free}
+
+
+def _disk_note(disk: dict[str, Any]) -> str | None:
+    """One line for a caller who should clean up soon, or None when there is nothing to say."""
+    parts: list[str] = []
+    if disk["host_free_gb"] < 2 * disk["min_free_gb"]:
+        parts.append(
+            f"the VM drive has {disk['host_free_gb']} GB free and snap_take refuses below "
+            f"{disk['min_free_gb']} GB"
+        )
+    if disk["prune_candidates"]:
+        parts.append(
+            f"expired temporary snapshots: {', '.join(disk['prune_candidates'])} "
+            "(snap_prune confirm=true deletes them)"
+        )
+    if disk["unclassified"]:
+        parts.append(
+            f"{disk['unclassified']} snapshot(s) have no keep flag and are never pruned: "
+            "snap_keep marks each one kept or temporary"
+        )
+    return ". ".join(parts) if parts else None
+
+
 class SnapNameParams(VmParams):
     """Tools that address one snapshot."""
 
@@ -210,6 +305,19 @@ class SnapTakeParams(SnapNameParams):
             "the saved state (memory included), resume. Drops terminals, reattaches kd."
         ),
     )
+    keep: bool = Field(
+        default=False,
+        description=(
+            "true for a snapshot to come back to past this experiment (a clean base, a new "
+            "build). false (default) makes it temporary: it expires after ttl_days and "
+            "snap_prune may then delete it, whoever took it"
+        ),
+    )
+    ttl_days: float | None = Field(
+        default=None,
+        gt=0,
+        description="Days until a temporary snapshot expires (default host.snapshot_ttl_days)",
+    )
 
 
 class SnapRevertParams(SnapNameParams):
@@ -230,6 +338,41 @@ class SnapRevertParams(SnapNameParams):
     timeout: float = Field(default=180, ge=1, description="Seconds to wait for kd and ssh")
 
 
+class SnapKeepParams(SnapNameParams):
+    """snap_keep."""
+
+    keep: bool = Field(
+        default=True,
+        description="true marks it kept (never pruned), false marks it temporary",
+    )
+    ttl_days: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "With keep=false: days from now until it expires (default host.snapshot_ttl_days)"
+        ),
+    )
+
+
+class SnapPruneParams(VmParams, ConfirmMixin):
+    """snap_prune."""
+
+    include_unexpired: bool = Field(
+        default=False,
+        description=(
+            "Also delete temporary snapshots that have not expired yet (for a drive that is "
+            "already short). Kept, unclassified and current snapshots are never touched"
+        ),
+    )
+    allow_suspend: bool = Field(
+        default=False,
+        description=(
+            "When vmrun refuses to delete a memory snapshot of a running encrypted VM: suspend, "
+            "delete, resume. Drops terminals, reattaches kd."
+        ),
+    )
+
+
 class SnapDeleteParams(SnapNameParams, ConfirmMixin):
     """snap_delete."""
 
@@ -245,7 +388,9 @@ class SnapDeleteParams(SnapNameParams, ConfirmMixin):
 
 @tool(
     "snap_list",
-    "Snapshot tree of a VM plus the current snapshot and stored metadata.",
+    "Snapshot tree of a VM plus the current snapshot and stored metadata. retention classes "
+    "each snapshot kept, temporary, expired or unclassified, and disk gives the free space on "
+    "the VM drive and the expired snapshots snap_prune would delete.",
     VmParams,
     effect="read",
 )
@@ -256,6 +401,12 @@ async def snap_list(service: NtDriveService, p: VmParams) -> dict[str, Any]:
     service.state.vm(p.vm).current_snapshot = tree.current
     data = tree.to_dict()
     data["metadata"] = service.load_snapshot_meta(p.vm)
+    ret = _retention(service, cfg, tree.names(), tree.current)
+    data["retention"] = ret["rows"]
+    data["disk"] = ret["disk"]
+    note = _disk_note(ret["disk"])
+    if note:
+        data["note"] = note
     return data
 
 
@@ -283,6 +434,7 @@ async def snap_take(service: NtDriveService, p: SnapTakeParams) -> dict[str, Any
     """
     cfg = service.vm_cfg(p.vm)
     adapter = service.adapter_for(cfg)
+    _refuse_if_disk_low(service, cfg)
     power_before = await service.refresh_power(cfg)
     existing = False
     tree: Any = None
@@ -362,14 +514,19 @@ async def snap_take(service: NtDriveService, p: SnapTakeParams) -> dict[str, Any
                     raise
 
         detail = await _suspend_run_resume(service, cfg, op, present)
-    entry = {
+    taken_at = time.time()
+    entry: dict[str, Any] = {
         "description": p.description,
-        "taken_at": time.time(),
+        "taken_at": taken_at,
         "kd_state_at_snapshot": kd_state_before,
         "power_at_snapshot": str(power_before),
         "via": detail["via"],
         "memory_included": power_before == PowerState.RUNNING,
+        "keep": p.keep,
     }
+    if not p.keep:
+        ttl = p.ttl_days or service.config.host.snapshot_ttl_days
+        entry["expires_at"] = taken_at + ttl * _DAY
     meta = service.load_snapshot_meta(p.vm)
     meta[p.name] = entry
     service.save_snapshot_meta(p.vm, meta)
@@ -383,8 +540,50 @@ async def snap_take(service: NtDriveService, p: SnapTakeParams) -> dict[str, Any
         tree = await adapter.snapshot_list(cfg)
         result["snapshots"] = tree.names()
         result["current"] = tree.current
+        # The caller reads this result at the moment it adds to the chain, which is when a
+        # reminder to clean up actually lands.
+        ret = _retention(service, cfg, tree.names(), tree.current)
+        result["disk"] = ret["disk"]
+        note = _disk_note(ret["disk"])
+        if note:
+            result["note"] = note
     _raise_if_resume_failed(detail, f"snapshot {p.name} was taken", result)
     return result
+
+
+def _refuse_if_disk_low(service: NtDriveService, cfg: VmConfig) -> None:
+    """snap_take on a nearly full drive: refuse and name what can be deleted."""
+    free_gb = disk_free(cfg.vmx) / _GB
+    minimum = service.config.host.snapshot_min_free_gb
+    if free_gb >= minimum:
+        return
+    meta = service.load_snapshot_meta(cfg.name)
+    now = time.time()
+    temporary = sorted(
+        (n for n, e in meta.items() if _classify(e, now)["class"] in ("expired", "temporary")),
+        key=lambda n: meta[n].get("taken_at", 0),
+    )
+    hint = "snap_list shows each snapshot's class. "
+    if temporary:
+        hint += (
+            f"Temporary snapshots, oldest first: {', '.join(temporary)}. snap_prune confirm=true "
+            "deletes the expired ones (include_unexpired=true takes the rest too), or "
+            "snap_delete one by name. "
+        )
+    else:
+        hint += "There are no temporary snapshots to prune. "
+    hint += (
+        "Kept and unclassified snapshots are not yours to delete without asking the operator. "
+        "host.snapshot_min_free_gb in vms.yaml sets the threshold"
+    )
+    raise NtDriveError(
+        BACKEND_ERROR,
+        f"the drive that holds {cfg.name} has {free_gb:.1f} GB free, below "
+        f"host.snapshot_min_free_gb ({minimum} GB), so no snapshot was taken",
+        hint,
+        reason=REASON_DISK_LOW,
+        free_gb=round(free_gb, 1),
+    )
 
 
 @tool(
@@ -479,6 +678,86 @@ async def snap_delete(service: NtDriveService, p: SnapDeleteParams) -> dict[str,
         **_extra(detail),
     }
     _raise_if_resume_failed(detail, f"snapshot {p.name} was deleted", result)
+    return result
+
+
+@tool(
+    "snap_keep",
+    "Mark a snapshot kept (never pruned) or temporary (expires, then snap_prune may delete it). "
+    "Use it on a snapshot snap_list calls unclassified, or to pin a temporary one you still need.",
+    SnapKeepParams,
+    positional=("vm", "name"),
+    effect="additive",
+)
+async def snap_keep(service: NtDriveService, p: SnapKeepParams) -> dict[str, Any]:
+    """Record the keep flag in the snapshot metadata."""
+    cfg = service.vm_cfg(p.vm)
+    tree = await service.adapter_for(cfg).snapshot_list(cfg)
+    if p.name not in tree.names():
+        raise NtDriveError(
+            SNAPSHOT_NOT_FOUND,
+            f"VM {p.vm} has no snapshot named {p.name}",
+            f"known snapshots: {', '.join(tree.names()) or '(none)'}",
+        )
+    meta = service.load_snapshot_meta(p.vm)
+    entry = dict(meta.get(p.name) or {})
+    entry["keep"] = p.keep
+    entry.pop("expires_at", None)
+    now = time.time()
+    if not p.keep:
+        ttl = p.ttl_days or service.config.host.snapshot_ttl_days
+        entry["expires_at"] = now + ttl * _DAY
+    meta[p.name] = entry
+    service.save_snapshot_meta(p.vm, meta)
+    service.state.record_event(p.vm, "snapshot_keep", snapshot=p.name, keep=p.keep)
+    return {"vm": p.vm, "name": p.name, **_classify(entry, now)}
+
+
+@tool(
+    "snap_prune",
+    "Delete the expired temporary snapshots of a VM (snap_list names them under "
+    "disk.prune_candidates) and report the space it got back. Never touches kept, unclassified "
+    "or current snapshots. Needs confirm=true.",
+    SnapPruneParams,
+    positional=("vm",),
+    destructive=True,
+    effect="destructive",
+)
+async def snap_prune(service: NtDriveService, p: SnapPruneParams) -> dict[str, Any]:
+    """Delete temporary snapshots one at a time through snap_delete."""
+    cfg = service.vm_cfg(p.vm)
+    tree = await service.adapter_for(cfg).snapshot_list(cfg)
+    before = _retention(service, cfg, tree.names(), tree.current)
+    wanted = ("expired", "temporary") if p.include_unexpired else ("expired",)
+    matching = [n for n, r in before["rows"].items() if r["class"] in wanted]
+    targets = [n for n in matching if n != tree.current]
+    deleted: list[str] = []
+    failed: list[dict[str, Any]] = []
+    for name in targets:
+        try:
+            out = await snap_delete(
+                service,
+                SnapDeleteParams(vm=p.vm, name=name, confirm=True, allow_suspend=p.allow_suspend),
+            )
+            deleted.extend(out["deleted"])
+        except NtDriveError as exc:
+            # One refused delete (an encrypted memory snapshot without allow_suspend, say) does
+            # not stop the rest. The error says what to pass.
+            failed.append({"name": name, "error": exc.to_dict()["error"]})
+    free_after = disk_free(cfg.vmx)
+    result: dict[str, Any] = {
+        "vm": p.vm,
+        "deleted": deleted,
+        "failed": failed,
+        "freed_gb": round((free_after - before["free"]) / _GB, 1),
+        "host_free_gb": round(free_after / _GB, 1),
+        "kept": [n for n, r in before["rows"].items() if r["class"] == "kept"],
+        "unclassified": [n for n, r in before["rows"].items() if r["class"] == "unclassified"],
+    }
+    if tree.current in matching:
+        result["skipped_current"] = tree.current
+    if not targets:
+        result["note"] = "nothing to prune: no temporary snapshot matched"
     return result
 
 

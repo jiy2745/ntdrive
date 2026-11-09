@@ -47,7 +47,7 @@ Requirements live in `PRD.md`. Setup is in `README.md`.
   Mask them in anything that is logged (`_mask_argv` in the VMware adapter, `redact` in
   `kd_setup_guest`).
 - Destructive tools (`snap_delete`, `vm_stop mode=hard` or `kill`, `vm_reboot mode=hard`,
-  `vm_upgrade`) require
+  `vm_upgrade`, `snap_prune`) require
   `confirm=true` and go through the policy gate in `ntdrive.core.policy`. No other tool has a
   `confirm` argument.
 - Anything that becomes a command line in the guest (bcdedit arguments from `kd_setup_guest`)
@@ -272,3 +272,9 @@ which is what keeps a CLI command well under a second (`tests/test_imports.py` g
   shim re-expanded `$_` inside single quotes, and `"C:\uup\$f"` became the literal path
   `C:\uup$f`). Pass guest PowerShell as `-EncodedCommand` (`_encoded` in `upgrade.py`) or
   through a pushed script file, never as an inline string with `$_`.
+- Agents took a snapshot before every experiment and almost never deleted one: on 2026-11-10 the
+  host drive was 92% full with about 200 GB of delta disks behind nine snapshots. A line in
+  `SKILL.md` had not changed that, so the cleanup prompt lives in the `snap_take` result and its
+  refusal below `host.snapshot_min_free_gb` (SNAP-5). Deletion stays a `snap_prune confirm=true`
+  call and never touches an unclassified snapshot, because sessions share a VM and ntdrive does
+  not know who took what.

@@ -47,6 +47,8 @@ REASON_GUEST_ACCESS = "guest_access_denied"
 # The vmx names a saved state (checkpoint.vmState) that is not a .vmss next to it, so a
 # start cannot resume it. vm_start discard_saved_state=true boots fresh from the disk.
 REASON_SAVED_STATE_STALE = "saved_state_stale"
+# The drive that holds the VM has less free space than host.snapshot_min_free_gb.
+REASON_DISK_LOW = "host_disk_low"
 
 # HTTP status used by the daemon for each code. Anything not listed is 500.
 HTTP_STATUS: dict[str, int] = {
